@@ -42,8 +42,11 @@ pub fn start_recording(
     let stop_clone = stop.clone();
 
     std::thread::spawn(move || {
+        tracing::info!("Recording thread starting...");
         if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone) {
             tracing::error!("Recording thread error: {}", e);
+            // Send the error as a fake transcription so the user sees something
+            let _ = tx.send(AppMessage::TranscriptionReady(format!("❌ Error: {}", e)));
             let _ = tx.send(AppMessage::RecordingStopped);
         }
     });
@@ -60,11 +63,18 @@ fn recording_loop(
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     // ── Load ASR model ──────────────────────────────────────────────
+    tracing::info!("Loading ASR model from {:?}...", model_dir);
     let recognizer = create_recognizer(&model_dir)
-        .ok_or_else(|| anyhow::anyhow!("Failed to load ASR model from {:?}", model_dir))?;
+        .ok_or_else(|| anyhow::anyhow!(
+            "Failed to load ASR model. Files not found in {:?}. \
+             Download the model from Settings first.", model_dir
+        ))?;
+    tracing::info!("ASR model loaded");
 
     // ── Load VAD ────────────────────────────────────────────────────
+    tracing::info!("Loading VAD model...");
     let vad = create_vad()?;
+    tracing::info!("VAD model loaded");
 
     // ── Open mic ────────────────────────────────────────────────────
     let host = cpal::default_host();
@@ -76,6 +86,7 @@ fn recording_loop(
     let channels = supported.channels() as usize;
 
     tracing::info!("Recording from '{}' at {}Hz", device.name().unwrap_or_default(), mic_sr);
+    tracing::info!("Speak naturally — VAD will detect speech segments");
 
     // Shared audio buffer
     let audio_buf: Arc<parking_lot::Mutex<Vec<f32>>> =

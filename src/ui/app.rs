@@ -5,6 +5,7 @@
 ///   - Background thread: ksni tray service (D-Bus)
 ///   - Background thread: mic capture + VAD + transcription (on demand)
 ///   - Communication via std::sync::mpsc + glib::timeout_add_local polling
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +28,8 @@ pub struct CanarioApp {
     rx: Receiver<AppMessage>,
     /// Handle to the active recording thread (if any)
     recording_handle: Arc<Mutex<Option<RecordingHandle>>>,
+    /// Shared recording flag — read by the tray to update its menu
+    is_recording_flag: Arc<AtomicBool>,
 }
 
 impl CanarioApp {
@@ -38,6 +41,7 @@ impl CanarioApp {
 
         let config = AppConfig::load().unwrap_or_default();
         let state = Arc::new(Mutex::new(AppState::new(config)));
+        let is_recording_flag = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = mpsc::channel::<AppMessage>();
 
@@ -47,6 +51,7 @@ impl CanarioApp {
             tx,
             rx,
             recording_handle: Arc::new(Mutex::new(None)),
+            is_recording_flag: is_recording_flag.clone(),
         };
 
         canario.setup_signals();
@@ -56,6 +61,7 @@ impl CanarioApp {
     fn setup_signals(&self) {
         let state = self.state.clone();
         let tx = self.tx.clone();
+        let is_recording_flag = self.is_recording_flag.clone();
 
         self.app.connect_startup(move |app| {
             tracing::info!("Canario startup");
@@ -70,10 +76,11 @@ impl CanarioApp {
                 }
             }
 
-            // Start system tray
+            // Start system tray — pass the shared recording flag
             let tray_tx = tx.clone();
+            let flag = is_recording_flag.clone();
             std::thread::spawn(move || {
-                if let Err(e) = start_tray(tray_tx) {
+                if let Err(e) = start_tray(tray_tx, flag) {
                     tracing::error!("Tray icon failed: {}", e);
                     tracing::info!("Running without system tray icon");
                 }
@@ -101,12 +108,13 @@ impl CanarioApp {
         let app = self.app;
         let recording_handle = self.recording_handle;
         let tx = self.tx;
+        let is_recording_flag = self.is_recording_flag;
 
         let app_clone = app.clone();
 
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             while let Ok(msg) = rx.try_recv() {
-                handle_message(&app_clone, &state, &recording_handle, &tx, msg);
+                handle_message(&app_clone, &state, &recording_handle, &tx, &is_recording_flag, msg);
             }
             ControlFlow::Continue
         });
@@ -116,10 +124,10 @@ impl CanarioApp {
     }
 }
 
-fn start_tray(tx: Sender<AppMessage>) -> anyhow::Result<()> {
+fn start_tray(tx: Sender<AppMessage>, is_recording: Arc<AtomicBool>) -> anyhow::Result<()> {
     use ksni::blocking::TrayMethods;
 
-    let tray = CanarioTray::new(tx);
+    let tray = CanarioTray::new(tx, is_recording);
     let _handle = tray.spawn().map_err(|e| {
         anyhow::anyhow!("Failed to spawn tray: {}", e)
     })?;
@@ -137,6 +145,7 @@ fn handle_message(
     state: &Arc<Mutex<AppState>>,
     recording_handle: &Arc<Mutex<Option<RecordingHandle>>>,
     tx: &Sender<AppMessage>,
+    is_recording_flag: &Arc<AtomicBool>,
     msg: AppMessage,
 ) {
     match msg {
@@ -153,8 +162,8 @@ fn handle_message(
                 if let Some(h) = handle.take() {
                     tracing::info!("Stopping recording...");
                     h.stop();
-                    // Recording thread sends RecordingStopped when done
                 }
+                is_recording_flag.store(false, Ordering::SeqCst);
             } else if s.can_record() {
                 // ── Start recording ──────────────────────────────
                 let model_dir = s.config.local_model_dir();
@@ -162,7 +171,7 @@ fn handle_message(
                 match recording::start_recording(model_dir, tx.clone()) {
                     Ok(h) => {
                         *handle = Some(h);
-                        // Mutable borrow of state after we're done reading
+                        is_recording_flag.store(true, Ordering::SeqCst);
                         drop(s);
                         let mut s = state.lock().unwrap();
                         s.is_recording = true;
@@ -189,6 +198,7 @@ fn handle_message(
                     h.stop();
                 }
             }
+            is_recording_flag.store(false, Ordering::SeqCst);
             tracing::info!("Quitting...");
             app.quit();
         }
@@ -198,6 +208,7 @@ fn handle_message(
             s.is_recording = false;
             s.is_transcribing = false;
             s.status = AppStatus::Ready;
+            is_recording_flag.store(false, Ordering::SeqCst);
             RecordingIndicator::hide(app);
             tracing::info!("Recording stopped, ready");
         }

@@ -1,23 +1,26 @@
 /// System tray icon using ksni (D-Bus StatusNotifierItem).
 ///
-/// This runs in a background thread and communicates with the GTK4
-/// main loop via an mpsc channel.
+/// The tray reads `is_recording` from a shared `AtomicBool` so it
+/// always reflects the current recording state.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use crate::ui::AppMessage;
 
 /// The tray icon state
 pub struct CanarioTray {
     tx: Sender<AppMessage>,
-    is_recording: bool,
+    is_recording: Arc<AtomicBool>,
 }
 
 impl CanarioTray {
-    pub fn new(tx: Sender<AppMessage>) -> Self {
-        Self {
-            tx,
-            is_recording: false,
-        }
+    pub fn new(tx: Sender<AppMessage>, is_recording: Arc<AtomicBool>) -> Self {
+        Self { tx, is_recording }
+    }
+
+    fn recording(&self) -> bool {
+        self.is_recording.load(Ordering::SeqCst)
     }
 }
 
@@ -35,7 +38,7 @@ impl ksni::Tray for CanarioTray {
     }
 
     fn icon_name(&self) -> String {
-        if self.is_recording {
+        if self.recording() {
             "media-record".into()
         } else {
             "audio-input-microphone".into()
@@ -43,7 +46,7 @@ impl ksni::Tray for CanarioTray {
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let title = if self.is_recording {
+        let title = if self.recording() {
             "Canario — Recording…"
         } else {
             "Canario — Voice to Text"
@@ -58,7 +61,8 @@ impl ksni::Tray for CanarioTray {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 
-        let record_label = if self.is_recording {
+        let recording = self.recording();
+        let record_label = if recording {
             "⏹  Stop Recording"
         } else {
             "⏺  Start Recording"
@@ -67,7 +71,7 @@ impl ksni::Tray for CanarioTray {
         vec![
             StandardItem {
                 label: record_label.into(),
-                icon_name: if self.is_recording {
+                icon_name: if recording {
                     "media-playback-stop".into()
                 } else {
                     "media-record".into()
