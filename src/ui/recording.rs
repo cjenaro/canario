@@ -131,6 +131,8 @@ fn recording_loop(
 
     // ── VAD + transcription loop ────────────────────────────────────
     let window_size = 512; // Silero VAD window at 16kHz = 32ms
+    let mut vad_chunks_fed: usize = 0;
+    let mut log_timer = std::time::Instant::now();
 
     while !stop.load(Ordering::SeqCst) {
         // Drain captured audio
@@ -149,6 +151,16 @@ fn recording_loop(
         let level = (rms * 10.0).min(1.0) as f64; // scale up for visibility
         let _ = tx.send(AppMessage::AudioLevel(level));
 
+        // Periodic diagnostic logging (every 2s)
+        if log_timer.elapsed() >= std::time::Duration::from_secs(2) {
+            tracing::info!(
+                "Audio: {} samples @ {}Hz, RMS={:.4}, VAD chunks fed={}, segments pending={}",
+                new_audio.len(), mic_sr, rms, vad_chunks_fed,
+                if vad.is_empty() { 0 } else { 1 }
+            );
+            log_timer = std::time::Instant::now();
+        }
+
         // Resample to 16kHz if needed
         let audio_16k = if mic_sr != 16000 {
             simple_resample(&new_audio, mic_sr, 16000)
@@ -165,6 +177,7 @@ fn recording_loop(
                 padded.resize(window_size, 0.0f32);
                 vad.accept_waveform(&padded);
             }
+            vad_chunks_fed += 1;
 
             // Check for complete speech segments
             while !vad.is_empty() {

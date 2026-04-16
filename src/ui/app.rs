@@ -1,10 +1,4 @@
 /// GTK4 Application — the main entry point for the GUI app.
-///
-/// Architecture:
-///   - Main thread: GTK4 main loop (blocking)
-///   - Background thread: ksni tray service (D-Bus)
-///   - Background thread: mic capture + VAD + transcription (on demand)
-///   - Communication via std::sync::mpsc + glib::timeout_add_local polling
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -21,15 +15,17 @@ use crate::ui::indicator::RecordingIndicator;
 use crate::ui::tray::CanarioTray;
 use crate::ui::{AppMessage, AppState, AppStatus};
 
+/// Handle to the ksni tray service (blocking variant, safe to clone + share)
+type TrayHandle = ksni::blocking::Handle<CanarioTray>;
+
 pub struct CanarioApp {
     app: adw::Application,
     state: Arc<Mutex<AppState>>,
     tx: Sender<AppMessage>,
     rx: Receiver<AppMessage>,
-    /// Handle to the active recording thread (if any)
     recording_handle: Arc<Mutex<Option<RecordingHandle>>>,
-    /// Shared recording flag — read by the tray to update its menu
     is_recording_flag: Arc<AtomicBool>,
+    tray_handle: Arc<Mutex<Option<TrayHandle>>>,
 }
 
 impl CanarioApp {
@@ -52,6 +48,7 @@ impl CanarioApp {
             rx,
             recording_handle: Arc::new(Mutex::new(None)),
             is_recording_flag: is_recording_flag.clone(),
+            tray_handle: Arc::new(Mutex::new(None)),
         };
 
         canario.setup_signals();
@@ -62,6 +59,7 @@ impl CanarioApp {
         let state = self.state.clone();
         let tx = self.tx.clone();
         let is_recording_flag = self.is_recording_flag.clone();
+        let tray_handle = self.tray_handle.clone();
 
         self.app.connect_startup(move |app| {
             tracing::info!("Canario startup");
@@ -76,20 +74,25 @@ impl CanarioApp {
                 }
             }
 
-            // Start system tray — pass the shared recording flag
+            // Start system tray — store the handle so we can refresh it
             let tray_tx = tx.clone();
             let flag = is_recording_flag.clone();
+            let th = tray_handle.clone();
             std::thread::spawn(move || {
-                if let Err(e) = start_tray(tray_tx, flag) {
-                    tracing::error!("Tray icon failed: {}", e);
-                    tracing::info!("Running without system tray icon");
+                match start_tray(tray_tx, flag) {
+                    Ok(handle) => {
+                        *th.lock().unwrap() = Some(handle);
+                        tracing::info!("System tray icon started");
+                    }
+                    Err(e) => {
+                        tracing::error!("Tray icon failed: {}", e);
+                    }
                 }
             });
 
             std::mem::forget(app.hold());
         });
 
-        // Show settings if no model
         let state_for_activate = self.state.clone();
         let tx_for_activate = self.tx.clone();
         self.app.connect_activate(move |_app| {
@@ -101,7 +104,6 @@ impl CanarioApp {
         });
     }
 
-    /// Run the GTK4 main loop. Blocks until the app quits.
     pub fn run(self) -> anyhow::Result<()> {
         let rx = self.rx;
         let state = self.state;
@@ -109,12 +111,21 @@ impl CanarioApp {
         let recording_handle = self.recording_handle;
         let tx = self.tx;
         let is_recording_flag = self.is_recording_flag;
+        let tray_handle = self.tray_handle;
 
         let app_clone = app.clone();
 
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             while let Ok(msg) = rx.try_recv() {
-                handle_message(&app_clone, &state, &recording_handle, &tx, &is_recording_flag, msg);
+                handle_message(
+                    &app_clone,
+                    &state,
+                    &recording_handle,
+                    &tx,
+                    &is_recording_flag,
+                    &tray_handle,
+                    msg,
+                );
             }
             ControlFlow::Continue
         });
@@ -124,20 +135,29 @@ impl CanarioApp {
     }
 }
 
-fn start_tray(tx: Sender<AppMessage>, is_recording: Arc<AtomicBool>) -> anyhow::Result<()> {
+/// Spawn tray and return the handle immediately (doesn't block).
+fn start_tray(
+    tx: Sender<AppMessage>,
+    is_recording: Arc<AtomicBool>,
+) -> anyhow::Result<TrayHandle> {
     use ksni::blocking::TrayMethods;
 
     let tray = CanarioTray::new(tx, is_recording);
-    let _handle = tray.spawn().map_err(|e| {
+    let handle = tray.spawn().map_err(|e| {
         anyhow::anyhow!("Failed to spawn tray: {}", e)
     })?;
 
-    tracing::info!("System tray icon started");
+    Ok(handle)
+}
 
-    let (_shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
-    let _ = shutdown_rx.recv();
-
-    Ok(())
+/// Force the tray to re-read the shared recording flag and update
+/// its icon, tooltip, and menu labels.
+fn refresh_tray(tray_handle: &Arc<Mutex<Option<TrayHandle>>>) {
+    if let Some(handle) = tray_handle.lock().unwrap().as_ref() {
+        // update() calls the Tray methods again so ksni re-exports
+        // the icon_name, tool_tip, and menu over D-Bus.
+        handle.update(|_| {});
+    }
 }
 
 fn handle_message(
@@ -146,6 +166,7 @@ fn handle_message(
     recording_handle: &Arc<Mutex<Option<RecordingHandle>>>,
     tx: &Sender<AppMessage>,
     is_recording_flag: &Arc<AtomicBool>,
+    tray_handle: &Arc<Mutex<Option<TrayHandle>>>,
     msg: AppMessage,
 ) {
     match msg {
@@ -158,14 +179,20 @@ fn handle_message(
             let mut handle = recording_handle.lock().unwrap();
 
             if s.is_recording {
-                // ── Stop recording ───────────────────────────────
+                // ── Stop ──────────────────────────────────────
                 if let Some(h) = handle.take() {
                     tracing::info!("Stopping recording...");
                     h.stop();
                 }
                 is_recording_flag.store(false, Ordering::SeqCst);
+                drop(s);
+                let mut s = state.lock().unwrap();
+                s.is_recording = false;
+                s.status = AppStatus::Transcribing;
+                RecordingIndicator::hide(app);
+                refresh_tray(tray_handle);
             } else if s.can_record() {
-                // ── Start recording ──────────────────────────────
+                // ── Start ─────────────────────────────────────
                 let model_dir = s.config.local_model_dir();
 
                 match recording::start_recording(model_dir, tx.clone()) {
@@ -178,12 +205,13 @@ fn handle_message(
                         s.status = AppStatus::Recording;
                         RecordingIndicator::show(app);
                         tracing::info!("Recording started");
+                        refresh_tray(tray_handle);
                     }
                     Err(e) => {
                         tracing::error!("Failed to start recording: {}", e);
                         drop(s);
                         let mut s = state.lock().unwrap();
-                        s.status = AppStatus::Error(format!("Recording failed: {}", e));
+                        s.status = AppStatus::Error(format!("{}", e));
                     }
                 }
             } else {
@@ -199,6 +227,7 @@ fn handle_message(
                 }
             }
             is_recording_flag.store(false, Ordering::SeqCst);
+            refresh_tray(tray_handle);
             tracing::info!("Quitting...");
             app.quit();
         }
@@ -210,6 +239,7 @@ fn handle_message(
             s.status = AppStatus::Ready;
             is_recording_flag.store(false, Ordering::SeqCst);
             RecordingIndicator::hide(app);
+            refresh_tray(tray_handle);
             tracing::info!("Recording stopped, ready");
         }
 
@@ -217,11 +247,12 @@ fn handle_message(
             let mut s = state.lock().unwrap();
             s.last_transcription = text.clone();
             s.status = AppStatus::Ready;
-            tracing::info!("Transcription: {}", text);
+            tracing::info!("✅ Transcription: {}", text);
 
             if s.config.auto_paste {
-                if let Err(e) = crate::ui::paste::paste_text(&text) {
-                    tracing::error!("Paste failed: {}", e);
+                match crate::ui::paste::paste_text(&text) {
+                    Ok(()) => tracing::info!("📋 Pasted"),
+                    Err(e) => tracing::error!("Paste failed: {}", e),
                 }
             }
         }
