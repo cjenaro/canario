@@ -172,6 +172,15 @@ fn recording_loop(
     })?;
 
     tracing::info!("Transcribing {:.1}s of audio...", audio_16k.len() as f64 / 16000.0);
+
+    // Save debug WAV so we can test offline
+    let debug_wav = std::env::temp_dir().join("canario_debug.wav");
+    if let Err(e) = save_wav(&debug_wav, &audio_16k, 16000) {
+        tracing::warn!("Failed to save debug WAV: {}", e);
+    } else {
+        tracing::info!("Debug WAV saved to {:?}", debug_wav);
+    }
+
     let rec_stream = recognizer.create_stream();
     rec_stream.accept_waveform(16000, &audio_16k);
     recognizer.decode(&rec_stream);
@@ -211,6 +220,42 @@ fn create_recognizer(model_dir: &PathBuf) -> Option<OfflineRecognizer> {
     config.model_config.debug = false;
 
     OfflineRecognizer::create(&config)
+}
+
+/// Save f32 samples as a 16-bit PCM WAV file
+fn save_wav(path: &PathBuf, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
+    let data_size = (samples.len() * 2) as u32;
+    let file_size = 36 + data_size;
+
+    let mut out = std::fs::File::create(path)?;
+    use std::io::Write;
+
+    // RIFF header
+    out.write_all(b"RIFF")?;
+    out.write_all(&(file_size).to_le_bytes())?;
+    out.write_all(b"WAVE")?;
+
+    // fmt chunk
+    out.write_all(b"fmt ")?;
+    out.write_all(&16u32.to_le_bytes())?; // chunk size
+    out.write_all(&1u16.to_le_bytes())?;  // PCM format
+    out.write_all(&1u16.to_le_bytes())?;  // mono
+    out.write_all(&sample_rate.to_le_bytes())?;
+    let byte_rate = sample_rate * 2; // 1 channel * 2 bytes/sample
+    out.write_all(&(byte_rate).to_le_bytes())?;
+    out.write_all(&2u16.to_le_bytes())?;  // block align
+    out.write_all(&16u16.to_le_bytes())?; // bits per sample
+
+    // data chunk
+    out.write_all(b"data")?;
+    out.write_all(&data_size.to_le_bytes())?;
+
+    for &sample in samples {
+        let s = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.write_all(&s.to_le_bytes())?;
+    }
+
+    Ok(())
 }
 
 /// Simple linear interpolation resampling

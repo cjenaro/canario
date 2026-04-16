@@ -46,6 +46,7 @@ anyhow = "1"
 dirs = "6"
 parking_lot = "0.12"
 ringbuf = "0.4"
+arboard = "3.6"
 uuid = { version = "1", features = ["v4"] }
 ctrlc = "3.4"
 
