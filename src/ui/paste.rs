@@ -4,14 +4,17 @@
 ///   1. Always copy text to clipboard via `arboard` (pure Rust, no external deps)
 ///   2. Try to auto-type using xdotool / wtype / ydotool (best-effort)
 ///   3. If auto-type fails, text is already in clipboard — user can Ctrl+V
+///
+/// Returns Ok(true) if auto-typed, Ok(false) if only copied to clipboard.
 use anyhow::Result;
 use std::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Paste text: copy to clipboard + attempt auto-type.
-pub fn paste_text(text: &str) -> Result<()> {
+/// Returns Ok(true) if text was auto-typed, Ok(false) if only in clipboard.
+pub fn paste_text(text: &str) -> Result<bool> {
     if text.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     // Step 1: Always put text in clipboard (no external deps needed)
@@ -28,35 +31,33 @@ pub fn paste_text(text: &str) -> Result<()> {
         }
     }
 
-    // Step 2: Try auto-typing (best-effort, may not be available)
-    if let Some(text) = try_auto_type(text) {
-        debug!("Auto-typed: {} chars", text.len());
-        return Ok(());
+    // Step 2: Try auto-typing (best-effort)
+    if try_auto_type(text) {
+        return Ok(true);
     }
 
     // Step 3: Try simulating Ctrl+V (best-effort)
     if try_simulate_paste() {
-        debug!("Simulated Ctrl+V");
-        return Ok(());
+        return Ok(true);
     }
 
     // Clipboard has the text — user can Ctrl+V manually
-    info!("Text copied to clipboard (auto-type unavailable — install xdotool, wtype, or ydotool)");
-    Ok(())
+    Ok(false)
 }
 
-/// Try to auto-type text using external tools. Returns the text if successful.
-fn try_auto_type(text: &str) -> Option<String> {
+/// Try to auto-type text using external tools.
+fn try_auto_type(text: &str) -> bool {
     // xdotool (X11)
     if let Ok(output) = Command::new("xdotool").arg("--version").output() {
         if output.status.success() {
-            let status = Command::new("xdotool")
+            if let Ok(status) = Command::new("xdotool")
                 .args(["type", "--clearmodifiers", "--"])
                 .arg(text)
                 .status()
-                .ok()?;
-            if status.success() {
-                return Some(text.to_string());
+            {
+                if status.success() {
+                    return true;
+                }
             }
         }
     }
@@ -64,9 +65,10 @@ fn try_auto_type(text: &str) -> Option<String> {
     // wtype (Wayland)
     if let Ok(output) = Command::new("wtype").arg("--version").output() {
         if output.status.success() {
-            let status = Command::new("wtype").arg(text).status().ok()?;
-            if status.success() {
-                return Some(text.to_string());
+            if let Ok(status) = Command::new("wtype").arg(text).status() {
+                if status.success() {
+                    return true;
+                }
             }
         }
     }
@@ -74,18 +76,19 @@ fn try_auto_type(text: &str) -> Option<String> {
     // ydotool (both X11 and Wayland)
     if let Ok(output) = Command::new("ydotool").arg("--version").output() {
         if output.status.success() {
-            let status = Command::new("ydotool")
+            if let Ok(status) = Command::new("ydotool")
                 .args(["type", "--"])
                 .arg(text)
                 .status()
-                .ok()?;
-            if status.success() {
-                return Some(text.to_string());
+            {
+                if status.success() {
+                    return true;
+                }
             }
         }
     }
 
-    None
+    false
 }
 
 /// Try to simulate Ctrl+V paste

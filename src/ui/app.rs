@@ -251,7 +251,13 @@ fn handle_message(
 
             if s.config.auto_paste {
                 match crate::ui::paste::paste_text(&text) {
-                    Ok(()) => tracing::info!("📋 Pasted"),
+                    Ok(pasted) => {
+                        if pasted {
+                            tracing::info!("📋 Auto-typed");
+                        } else {
+                            tracing::info!("📋 Copied to clipboard (Ctrl+V to paste)");
+                        }
+                    }
                     Err(e) => tracing::error!("Paste failed: {}", e),
                 }
             }
