@@ -45,45 +45,51 @@ pub fn paste_text(text: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Check if a command exists on PATH
+fn command_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Try to auto-type text using external tools.
 fn try_auto_type(text: &str) -> bool {
     // xdotool (X11)
-    if let Ok(output) = Command::new("xdotool").arg("--version").output() {
-        if output.status.success() {
-            if let Ok(status) = Command::new("xdotool")
-                .args(["type", "--clearmodifiers", "--"])
-                .arg(text)
-                .status()
-            {
-                if status.success() {
-                    return true;
-                }
+    if command_exists("xdotool") {
+        if let Ok(status) = Command::new("xdotool")
+            .args(["type", "--clearmodifiers", "--"])
+            .arg(text)
+            .status()
+        {
+            if status.success() {
+                return true;
             }
         }
     }
 
     // wtype (Wayland)
-    if let Ok(output) = Command::new("wtype").arg("--version").output() {
-        if output.status.success() {
-            if let Ok(status) = Command::new("wtype").arg(text).status() {
-                if status.success() {
-                    return true;
-                }
+    if command_exists("wtype") {
+        if let Ok(status) = Command::new("wtype")
+            .arg(text)
+            .status()
+        {
+            if status.success() {
+                return true;
             }
         }
     }
 
     // ydotool (both X11 and Wayland)
-    if let Ok(output) = Command::new("ydotool").arg("--version").output() {
-        if output.status.success() {
-            if let Ok(status) = Command::new("ydotool")
-                .args(["type", "--"])
-                .arg(text)
-                .status()
-            {
-                if status.success() {
-                    return true;
-                }
+    if command_exists("ydotool") {
+        if let Ok(status) = Command::new("ydotool")
+            .args(["type", "--"])
+            .arg(text)
+            .status()
+        {
+            if status.success() {
+                return true;
             }
         }
     }
@@ -94,23 +100,27 @@ fn try_auto_type(text: &str) -> bool {
 /// Try to simulate Ctrl+V paste
 fn try_simulate_paste() -> bool {
     // xdotool (X11)
-    if let Ok(status) = Command::new("xdotool")
-        .args(["key", "--clearmodifiers", "ctrl+v"])
-        .status()
-    {
-        if status.success() {
-            return true;
+    if command_exists("xdotool") {
+        if let Ok(status) = Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+v"])
+            .status()
+        {
+            if status.success() {
+                return true;
+            }
         }
     }
 
     // ydotool (universal)
     // Ctrl+V: key 29 (left ctrl) down, key 47 (v) down, key 47 up, key 29 up
-    if let Ok(status) = Command::new("ydotool")
-        .args(["key", "29:1", "47:1", "47:0", "29:0"])
-        .status()
-    {
-        if status.success() {
-            return true;
+    if command_exists("ydotool") {
+        if let Ok(status) = Command::new("ydotool")
+            .args(["key", "29:1", "47:1", "47:0", "29:0"])
+            .status()
+        {
+            if status.success() {
+                return true;
+            }
         }
     }
 
