@@ -1,0 +1,49 @@
+[package]
+name = "canario"
+version = "0.1.0"
+edition = "2021"
+description = "Native Linux voice-to-text using Parakeet TDT"
+license = "MIT"
+
+[features]
+default = ["static"]
+static = ["sherpa-onnx/static"]
+shared = ["sherpa-onnx/shared"]
+
+[dependencies]
+# ASR engine - handles ONNX inference + TDT decoding
+sherpa-onnx = { version = "1.12", default-features = false }
+
+# Audio capture
+cpal = "0.16"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (for model download)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Utilities
+anyhow = "1"
+dirs = "6"
+parking_lot = "0.12"
+ringbuf = "0.4"
+uuid = { version = "1", features = ["v4"] }
+ctrlc = "3.4"
+
+[[bin]]
+name = "canario-cli"
+path = "src/bin/canario-cli.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
