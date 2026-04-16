@@ -1,15 +1,14 @@
 /// Recording engine for the GUI app.
 ///
-/// Manages mic capture + VAD + transcription in background threads,
-/// communicating results back to the GTK main loop via an mpsc channel.
+/// Simple approach: record raw audio while active, transcribe on stop.
+/// VAD streaming is great for the CLI but for a GUI with explicit
+/// start/stop buttons, capturing everything and transcribing at the
+/// end is more reliable and matches the user's mental model.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, SileroVadModelConfig, VadModelConfig,
-    VoiceActivityDetector,
-};
+use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
 use crate::ui::AppMessage;
 
@@ -24,16 +23,12 @@ impl RecordingHandle {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
     }
-
-    pub fn is_stopped(&self) -> bool {
-        self.stop.load(Ordering::SeqCst)
-    }
 }
 
-/// Start recording from the microphone with VAD.
+/// Start recording from the microphone.
 ///
-/// Returns a `RecordingHandle` that can be used to stop recording.
-/// Transcription results are sent via `tx` as `AppMessage::TranscriptionReady`.
+/// Captures audio until `RecordingHandle::stop()` is called, then
+/// transcribes the entire buffer and sends the result via `tx`.
 pub fn start_recording(
     model_dir: PathBuf,
     tx: std::sync::mpsc::Sender<AppMessage>,
@@ -45,8 +40,7 @@ pub fn start_recording(
         tracing::info!("Recording thread starting...");
         if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone) {
             tracing::error!("Recording thread error: {}", e);
-            // Send the error as a fake transcription so the user sees something
-            let _ = tx.send(AppMessage::TranscriptionReady(format!("❌ Error: {}", e)));
+            let _ = tx.send(AppMessage::TranscriptionReady(format!("❌ {}", e)));
             let _ = tx.send(AppMessage::RecordingStopped);
         }
     });
@@ -62,21 +56,7 @@ fn recording_loop(
 ) -> anyhow::Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-    // ── Load ASR model ──────────────────────────────────────────────
-    tracing::info!("Loading ASR model from {:?}...", model_dir);
-    let recognizer = create_recognizer(&model_dir)
-        .ok_or_else(|| anyhow::anyhow!(
-            "Failed to load ASR model. Files not found in {:?}. \
-             Download the model from Settings first.", model_dir
-        ))?;
-    tracing::info!("ASR model loaded");
-
-    // ── Load VAD ────────────────────────────────────────────────────
-    tracing::info!("Loading VAD model...");
-    let vad = create_vad()?;
-    tracing::info!("VAD model loaded");
-
-    // ── Open mic ────────────────────────────────────────────────────
+    // ── Open mic first (fast) ───────────────────────────────────────
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -86,9 +66,8 @@ fn recording_loop(
     let channels = supported.channels() as usize;
 
     tracing::info!("Recording from '{}' at {}Hz", device.name().unwrap_or_default(), mic_sr);
-    tracing::info!("Speak naturally — VAD will detect speech segments");
 
-    // Shared audio buffer
+    // Shared audio buffer — the callback pushes, we read on stop
     let audio_buf: Arc<parking_lot::Mutex<Vec<f32>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
 
@@ -129,114 +108,81 @@ fn recording_loop(
 
     stream.play()?;
 
-    // ── VAD + transcription loop ────────────────────────────────────
-    let window_size = 512; // Silero VAD window at 16kHz = 32ms
-    let mut vad_chunks_fed: usize = 0;
+    // ── Wait for stop signal ────────────────────────────────────────
     let mut log_timer = std::time::Instant::now();
-
     while !stop.load(Ordering::SeqCst) {
-        // Drain captured audio
-        let new_audio: Vec<f32> = {
-            let mut buf = audio_buf.lock();
-            std::mem::take(&mut *buf)
+        // Send audio level updates for the indicator
+        let buf_snapshot = audio_buf.lock();
+        let buf_len = buf_snapshot.len();
+        // Compute RMS from the last ~4000 samples (roughly last 100ms at 44100Hz)
+        let recent_start = buf_len.saturating_sub(4000);
+        let recent = &buf_snapshot[recent_start..];
+        let rms = if recent.is_empty() {
+            0.0
+        } else {
+            (recent.iter().map(|s| s * s).sum::<f32>() / recent.len() as f32).sqrt()
         };
+        drop(buf_snapshot);
 
-        if new_audio.is_empty() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            continue;
-        }
-
-        // Compute audio level for the indicator
-        let rms = (new_audio.iter().map(|s| s * s).sum::<f32>() / new_audio.len() as f32).sqrt();
-        let level = (rms * 10.0).min(1.0) as f64; // scale up for visibility
+        let level = (rms * 5.0).min(1.0) as f64;
         let _ = tx.send(AppMessage::AudioLevel(level));
 
-        // Periodic diagnostic logging (every 2s)
-        if log_timer.elapsed() >= std::time::Duration::from_secs(2) {
+        // Periodic diagnostic
+        if log_timer.elapsed() >= std::time::Duration::from_secs(3) {
             tracing::info!(
-                "Audio: {} samples @ {}Hz, RMS={:.4}, VAD chunks fed={}, segments pending={}",
-                new_audio.len(), mic_sr, rms, vad_chunks_fed,
-                if vad.is_empty() { 0 } else { 1 }
+                "Recording: {} samples ({:.1}s) captured, RMS={:.3}",
+                buf_len,
+                buf_len as f64 / mic_sr as f64,
+                rms,
             );
             log_timer = std::time::Instant::now();
         }
 
-        // Resample to 16kHz if needed
-        let audio_16k = if mic_sr != 16000 {
-            simple_resample(&new_audio, mic_sr, 16000)
-        } else {
-            new_audio
-        };
-
-        // Feed to VAD in chunks
-        for chunk in audio_16k.chunks(window_size) {
-            if chunk.len() == window_size {
-                vad.accept_waveform(chunk);
-            } else {
-                let mut padded = chunk.to_vec();
-                padded.resize(window_size, 0.0f32);
-                vad.accept_waveform(&padded);
-            }
-            vad_chunks_fed += 1;
-
-            // Check for complete speech segments
-            while !vad.is_empty() {
-                if let Some(segment) = vad.front() {
-                    let samples = segment.samples().to_vec();
-                    let duration = samples.len() as f64 / 16000.0;
-                    vad.pop();
-
-                    if duration < 0.1 {
-                        continue;
-                    }
-
-                    tracing::info!("VAD segment: {:.1}s — transcribing...", duration);
-
-                    let rec_stream = recognizer.create_stream();
-                    rec_stream.accept_waveform(16000, &samples);
-                    recognizer.decode(&rec_stream);
-
-                    if let Some(result) = rec_stream.get_result() {
-                        let text = result.text.trim().to_string();
-                        if !text.is_empty() {
-                            tracing::info!("Transcription: {}", text);
-                            let _ = tx.send(AppMessage::TranscriptionReady(text));
-                        }
-                    }
-                }
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // ── Flush remaining audio ───────────────────────────────────────
-    tracing::info!("Recording stopping — flushing remaining audio...");
-    drop(stream);
+    // ── Stop: grab the audio and release the mic ────────────────────
+    let raw_audio = audio_buf.lock().clone();
+    drop(stream); // release mic
 
-    // Flush VAD — get any remaining speech
-    vad.flush();
-    while !vad.is_empty() {
-        if let Some(segment) = vad.front() {
-            let samples = segment.samples().to_vec();
-            let duration = samples.len() as f64 / 16000.0;
-            vad.pop();
+    let duration = raw_audio.len() as f64 / mic_sr as f64;
+    tracing::info!("Stopped. Captured {} samples ({:.1}s)", raw_audio.len(), duration);
 
-            if duration < 0.1 {
-                continue;
-            }
+    if duration < 0.2 {
+        tracing::warn!("Recording too short, nothing to transcribe");
+        let _ = tx.send(AppMessage::RecordingStopped);
+        return Ok(());
+    }
 
-            let rec_stream = recognizer.create_stream();
-            rec_stream.accept_waveform(16000, &samples);
-            recognizer.decode(&rec_stream);
+    // ── Resample to 16kHz if needed ─────────────────────────────────
+    let audio_16k = if mic_sr != 16000 {
+        tracing::info!("Resampling {}Hz → 16000Hz...", mic_sr);
+        simple_resample(&raw_audio, mic_sr, 16000)
+    } else {
+        raw_audio
+    };
 
-            if let Some(result) = rec_stream.get_result() {
-                let text = result.text.trim().to_string();
-                if !text.is_empty() {
-                    tracing::info!("Final transcription: {}", text);
-                    let _ = tx.send(AppMessage::TranscriptionReady(text));
-                }
-            }
+    // ── Load model and transcribe ───────────────────────────────────
+    tracing::info!("Loading ASR model...");
+    let recognizer = create_recognizer(&model_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "ASR model not found in {:?}. Download from Settings.",
+            model_dir
+        )
+    })?;
+
+    tracing::info!("Transcribing {:.1}s of audio...", audio_16k.len() as f64 / 16000.0);
+    let rec_stream = recognizer.create_stream();
+    rec_stream.accept_waveform(16000, &audio_16k);
+    recognizer.decode(&rec_stream);
+
+    if let Some(result) = rec_stream.get_result() {
+        let text = result.text.trim().to_string();
+        if !text.is_empty() {
+            tracing::info!("✅ Transcription: {}", text);
+            let _ = tx.send(AppMessage::TranscriptionReady(text));
+        } else {
+            tracing::info!("(no speech detected)");
         }
     }
 
@@ -265,31 +211,6 @@ fn create_recognizer(model_dir: &PathBuf) -> Option<OfflineRecognizer> {
     config.model_config.debug = false;
 
     OfflineRecognizer::create(&config)
-}
-
-/// Create the Silero VAD
-fn create_vad() -> anyhow::Result<VoiceActivityDetector> {
-    let vad_path = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("canario")
-        .join("models")
-        .join("silero_vad.onnx");
-
-    let mut vad_config = VadModelConfig::default();
-    vad_config.silero_vad = SileroVadModelConfig {
-        model: Some(vad_path.to_string_lossy().to_string()),
-        threshold: 0.5,
-        min_silence_duration: 0.4,
-        min_speech_duration: 0.15,
-        window_size: 512,
-        max_speech_duration: 30.0,
-    };
-    vad_config.sample_rate = 16000;
-    vad_config.num_threads = 1;
-    vad_config.debug = false;
-
-    VoiceActivityDetector::create(&vad_config, 60.0)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create VAD"))
 }
 
 /// Simple linear interpolation resampling
