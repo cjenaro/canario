@@ -98,14 +98,17 @@ impl CanarioApp {
     /// Run the GTK4 main loop. Blocks until the app quits.
     pub fn run(self) -> anyhow::Result<()> {
         let rx = self.rx;
-        let app = self.app;
         let state = self.state;
+        let app = self.app;
+
+        // Clone for the closure, original stays for run_with_args
+        let app_clone = app.clone();
 
         // Poll for messages from background threads
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             // Drain all pending messages
             while let Ok(msg) = rx.try_recv() {
-                handle_message(&app, &state, msg);
+                handle_message(&app_clone, &state, msg);
             }
             ControlFlow::Continue
         });

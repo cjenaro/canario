@@ -44,7 +44,7 @@ impl RecordingIndicator {
         });
         if let Some(win) = existing {
             // Walk the widget tree to find the progress bar
-            find_and_update_progress(&win, level);
+            find_and_update_progress(win.upcast_ref::<gtk4::Widget>(), level);
         }
     }
 }
@@ -91,7 +91,7 @@ fn build_indicator_window(app: &adw::Application) -> gtk4::Window {
 
     // Audio level progress bar
     let level_bar = gtk4::ProgressBar::new();
-    level_bar.set_name("canario-level-bar");
+    level_bar.set_widget_name("canario-level-bar");
     level_bar.set_fraction(0.0);
     level_bar.set_show_text(false);
     level_bar.add_css_class("osd");

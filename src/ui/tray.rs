@@ -10,7 +10,6 @@ use crate::ui::AppMessage;
 pub struct CanarioTray {
     tx: Sender<AppMessage>,
     is_recording: bool,
-    model_ready: bool,
 }
 
 impl CanarioTray {
@@ -18,7 +17,6 @@ impl CanarioTray {
         Self {
             tx,
             is_recording: false,
-            model_ready: false,
         }
     }
 }

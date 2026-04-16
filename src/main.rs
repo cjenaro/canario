@@ -8,7 +8,6 @@ pub mod inference;
 
 #[cfg(feature = "gui")]
 fn main() -> anyhow::Result<()> {
-    use gtk4::prelude::*;
     use ui::app::CanarioApp;
 
     // Initialize logging

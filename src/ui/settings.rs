@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use gtk4::prelude::*;
 use libadwaita as adw;
+use libadwaita::prelude::*;
 
-use crate::config::{AppConfig, AudioBehavior, ModelVariant};
+use crate::config::{AudioBehavior, ModelVariant};
 use crate::ui::model_manager::ModelManagerWidget;
 use crate::ui::AppState;
 
