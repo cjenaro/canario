@@ -6,11 +6,21 @@ description = "Native Linux voice-to-text using Parakeet TDT"
 license = "MIT"
 
 [features]
-default = ["static"]
+default = ["static", "gui"]
 static = ["sherpa-onnx/static"]
 shared = ["sherpa-onnx/shared"]
+gui = ["dep:gtk4", "dep:libadwaita", "dep:ksni", "dep:glib", "dep:gio"]
 
 [dependencies]
+
+# GUI (optional — requires libgtk-4-dev and libadwaita-1-dev)
+gtk4 = { version = "0.8", features = ["v4_14"], optional = true }
+libadwaita = { version = "0.6", features = ["v1_5"], optional = true }
+ksni = { version = "0.3", features = ["blocking"], optional = true }
+glib = { version = "0.19", optional = true }
+gio = { version = "0.19", optional = true }
+
+# Audio capture
 # ASR engine - handles ONNX inference + TDT decoding
 sherpa-onnx = { version = "1.12", default-features = false }
 
@@ -38,6 +48,11 @@ parking_lot = "0.12"
 ringbuf = "0.4"
 uuid = { version = "1", features = ["v4"] }
 ctrlc = "3.4"
+
+[[bin]]
+name = "canario"
+path = "src/main.rs"
+required-features = ["gui"]
 
 [[bin]]
 name = "canario-cli"

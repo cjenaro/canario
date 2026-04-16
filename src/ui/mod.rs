@@ -1,16 +1,41 @@
+pub mod app;
+pub mod indicator;
+pub mod model_manager;
 pub mod paste;
+pub mod settings;
+pub mod tray;
 
-use crate::audio::AudioCapture;
 use crate::config::AppConfig;
-use crate::inference::TranscriptionEngine;
-use crate::ui::paste::paste_text;
-use std::sync::{Arc, Mutex};
+
+/// Messages from the tray / background threads to the GTK main loop
+#[derive(Debug, Clone)]
+pub enum AppMessage {
+    /// Show the settings window
+    ShowSettings,
+    /// Toggle recording on/off
+    ToggleRecording,
+    /// Quit the application
+    Quit,
+    /// Recording indicator should show
+    RecordingStarted,
+    /// Recording indicator should hide
+    RecordingStopped,
+    /// Transcription result ready
+    TranscriptionReady(String),
+    /// Model download progress (0.0 - 1.0)
+    DownloadProgress(f64),
+    /// Model download complete
+    DownloadComplete,
+    /// Model download failed
+    DownloadFailed(String),
+    /// Audio level update (0.0 - 1.0)
+    AudioLevel(f64),
+}
 
 /// Core application state shared between threads
+#[derive(Debug)]
 pub struct AppState {
     pub config: AppConfig,
-    pub audio: AudioCapture,
-    pub engine: TranscriptionEngine,
     pub is_recording: bool,
     pub is_transcribing: bool,
     pub last_transcription: String,
@@ -37,64 +62,22 @@ pub enum AppStatus {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
-        let model_dir = config.local_model_dir();
-        let num_threads = config.num_threads;
-
         Self {
             config,
-            audio: AudioCapture::new(),
-            engine: TranscriptionEngine::new(model_dir, num_threads),
             is_recording: false,
             is_transcribing: false,
             last_transcription: String::new(),
             status: AppStatus::Idle,
         }
     }
-}
 
-/// Handle a recording → transcription → paste cycle
-pub fn handle_transcription_cycle(state: &Arc<Mutex<AppState>>) {
-    let audio_samples = {
-        let mut s = state.lock().unwrap();
-        s.is_recording = false;
-        s.status = AppStatus::Transcribing;
-        s.is_transcribing = true;
-        s.audio.stop_recording()
-    };
-
-    if audio_samples.is_empty() {
-        let mut s = state.lock().unwrap();
-        s.is_transcribing = false;
-        s.status = AppStatus::Ready;
-        return;
+    /// Check if the model is downloaded and ready
+    pub fn is_model_ready(&self) -> bool {
+        self.config.is_model_downloaded()
     }
 
-    // Save to temp WAV for debugging
-    let temp_wav = std::env::temp_dir().join(format!("canario-{}.wav", uuid::Uuid::new_v4()));
-    if let Err(e) = crate::audio::save_wav(&temp_wav, &audio_samples) {
-        tracing::warn!("Failed to save temp WAV: {}", e);
+    /// Check if we can start recording
+    pub fn can_record(&self) -> bool {
+        matches!(self.status, AppStatus::Ready) && !self.is_recording
     }
-
-    // Transcribe
-    let text = {
-        let s = state.lock().unwrap();
-        s.engine.transcribe(&audio_samples).unwrap_or_default()
-    };
-
-    // Update state and paste
-    {
-        let mut s = state.lock().unwrap();
-        s.is_transcribing = false;
-        s.last_transcription = text.clone();
-        s.status = AppStatus::Ready;
-    }
-
-    if !text.is_empty() {
-        if let Err(e) = paste_text(&text) {
-            tracing::error!("Failed to paste text: {}", e);
-        }
-    }
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(temp_wav);
 }

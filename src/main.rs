@@ -1,10 +1,16 @@
+#[cfg(feature = "gui")]
+pub mod ui;
+
 pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod inference;
-pub mod ui;
 
+#[cfg(feature = "gui")]
 fn main() -> anyhow::Result<()> {
+    use gtk4::prelude::*;
+    use ui::app::CanarioApp;
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -15,11 +21,6 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!("Canario starting up...");
 
-    // TODO: Initialize GTK4 app
-    // TODO: Load config
-    // TODO: Set up hotkey listener
-    // TODO: Download model if needed
-    // TODO: Start main loop
-
-    Ok(())
+    let app = CanarioApp::new();
+    app.run()
 }

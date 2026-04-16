@@ -1,0 +1,11 @@
+/* Canario — application CSS */
+
+/* Recording indicator window */
+.canario-indicator {
+  border-radius: 12px;
+  opacity: 0.92;
+}
+
+.rounded-corners {
+  border-radius: 12px;
+}
