@@ -61,6 +61,7 @@ fn try_auto_type(text: &str) -> bool {
         if let Ok(status) = Command::new("xdotool")
             .args(["type", "--clearmodifiers", "--"])
             .arg(text)
+            .stderr(std::process::Stdio::null())
             .status()
         {
             if status.success() {
@@ -73,6 +74,7 @@ fn try_auto_type(text: &str) -> bool {
     if command_exists("wtype") {
         if let Ok(status) = Command::new("wtype")
             .arg(text)
+            .stderr(std::process::Stdio::null())
             .status()
         {
             if status.success() {
@@ -86,6 +88,7 @@ fn try_auto_type(text: &str) -> bool {
         if let Ok(status) = Command::new("ydotool")
             .args(["type", "--"])
             .arg(text)
+            .stderr(std::process::Stdio::null())
             .status()
         {
             if status.success() {
@@ -103,6 +106,7 @@ fn try_simulate_paste() -> bool {
     if command_exists("xdotool") {
         if let Ok(status) = Command::new("xdotool")
             .args(["key", "--clearmodifiers", "ctrl+v"])
+            .stderr(std::process::Stdio::null())
             .status()
         {
             if status.success() {
@@ -116,6 +120,7 @@ fn try_simulate_paste() -> bool {
     if command_exists("ydotool") {
         if let Ok(status) = Command::new("ydotool")
             .args(["key", "29:1", "47:1", "47:0", "29:0"])
+            .stderr(std::process::Stdio::null())
             .status()
         {
             if status.success() {
