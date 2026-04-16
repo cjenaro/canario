@@ -64,16 +64,18 @@ Canario always copies the transcription to your clipboard. Auto-typing
 | Environment | Auto-type tool | Install |
 |-------------|---------------|----------
 | **X11** | `xdotool` | `sudo apt install xdotool` |
-| **Wayland** | `wtype` | `sudo apt install wtype` |
-| **Either** | `ydotool` | `sudo apt install ydotool` |
+| **Wayland (KDE, Hyprland, Sway)** | `wtype` | `sudo apt install wtype` |
+| **Wayland (GNOME)** | `ydotool` | `sudo apt install ydotool` |
 
-**If no auto-type tool is installed**, the transcription is still copied to
-your clipboard — just press **Ctrl+V** to paste.
+> **GNOME note:** Mutter does not support the virtual keyboard protocol that
+> `wtype` needs. Use `ydotool` instead, which works at the kernel level.
+> After installing, enable the daemon:
+> ```bash
+> sudo systemctl enable --now ydotool
+> ```
 
-> **Note for Wayland users:** Most modern Linux desktops (GNOME, KDE) use
-> Wayland by default. Auto-typing requires `wtype` (recommended) or `ydotool`.
-> Without either, you'll see `📋 Copied to clipboard (Ctrl+V to paste)` in the
-> logs.
+**If no auto-type tool is installed (or available for your compositor),**
+the transcription is still copied to your clipboard — just press **Ctrl+V** to paste.
 
 ## Build Requirements
 
