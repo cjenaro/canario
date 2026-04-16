@@ -2,6 +2,7 @@ pub mod app;
 pub mod indicator;
 pub mod model_manager;
 pub mod paste;
+pub mod recording;
 pub mod settings;
 pub mod tray;
 
@@ -16,12 +17,10 @@ pub enum AppMessage {
     ToggleRecording,
     /// Quit the application
     Quit,
-    /// Recording indicator should show
-    RecordingStarted,
-    /// Recording indicator should hide
-    RecordingStopped,
-    /// Transcription result ready
+    /// Transcription result ready (may be sent multiple times per session)
     TranscriptionReady(String),
+    /// Recording thread has finished and exited
+    RecordingStopped,
     /// Model download progress (0.0 - 1.0)
     DownloadProgress(f64),
     /// Model download complete

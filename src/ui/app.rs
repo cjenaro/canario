@@ -2,7 +2,8 @@
 ///
 /// Architecture:
 ///   - Main thread: GTK4 main loop (blocking)
-///   - Background thread: ksni tray service (blocking D-Bus)
+///   - Background thread: ksni tray service (D-Bus)
+///   - Background thread: mic capture + VAD + transcription (on demand)
 ///   - Communication via std::sync::mpsc + glib::timeout_add_local polling
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 
 use crate::config::AppConfig;
+use crate::ui::recording::{self, RecordingHandle};
 use crate::ui::settings::SettingsWindow;
 use crate::ui::indicator::RecordingIndicator;
 use crate::ui::tray::CanarioTray;
@@ -23,6 +25,8 @@ pub struct CanarioApp {
     state: Arc<Mutex<AppState>>,
     tx: Sender<AppMessage>,
     rx: Receiver<AppMessage>,
+    /// Handle to the active recording thread (if any)
+    recording_handle: Arc<Mutex<Option<RecordingHandle>>>,
 }
 
 impl CanarioApp {
@@ -42,6 +46,7 @@ impl CanarioApp {
             state: state.clone(),
             tx,
             rx,
+            recording_handle: Arc::new(Mutex::new(None)),
         };
 
         canario.setup_signals();
@@ -55,7 +60,6 @@ impl CanarioApp {
         self.app.connect_startup(move |app| {
             tracing::info!("Canario startup");
 
-            // Load model status
             {
                 let mut s = state.lock().unwrap();
                 if s.is_model_ready() {
@@ -66,7 +70,7 @@ impl CanarioApp {
                 }
             }
 
-            // Start system tray in a background thread
+            // Start system tray
             let tray_tx = tx.clone();
             std::thread::spawn(move || {
                 if let Err(e) = start_tray(tray_tx) {
@@ -75,15 +79,10 @@ impl CanarioApp {
                 }
             });
 
-            // Keep the app running even without visible windows.
-            // Forget the guard so the hold is never released — the app
-            // exits only when app.quit() is called from the tray.
             std::mem::forget(app.hold());
         });
 
-        // connect_activate is called on first launch and when the app is
-        // activated again (e.g. desktop file activation). We use it to
-        // show the settings window if no model is configured yet.
+        // Show settings if no model
         let state_for_activate = self.state.clone();
         let tx_for_activate = self.tx.clone();
         self.app.connect_activate(move |_app| {
@@ -100,15 +99,14 @@ impl CanarioApp {
         let rx = self.rx;
         let state = self.state;
         let app = self.app;
+        let recording_handle = self.recording_handle;
+        let tx = self.tx;
 
-        // Clone for the closure, original stays for run_with_args
         let app_clone = app.clone();
 
-        // Poll for messages from background threads
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            // Drain all pending messages
             while let Ok(msg) = rx.try_recv() {
-                handle_message(&app_clone, &state, msg);
+                handle_message(&app_clone, &state, &recording_handle, &tx, msg);
             }
             ControlFlow::Continue
         });
@@ -118,8 +116,6 @@ impl CanarioApp {
     }
 }
 
-/// Start the system tray icon in a background thread.
-/// Blocks the current thread forever to keep the ksni Handle alive.
 fn start_tray(tx: Sender<AppMessage>) -> anyhow::Result<()> {
     use ksni::blocking::TrayMethods;
 
@@ -130,19 +126,17 @@ fn start_tray(tx: Sender<AppMessage>) -> anyhow::Result<()> {
 
     tracing::info!("System tray icon started");
 
-    // Block this thread forever so the handle is never dropped.
-    // Using a channel is more robust than thread::park() which can
-    // wake spuriously.
     let (_shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
     let _ = shutdown_rx.recv();
 
     Ok(())
 }
 
-/// Handle a message from background threads
 fn handle_message(
     app: &adw::Application,
     state: &Arc<Mutex<AppState>>,
+    recording_handle: &Arc<Mutex<Option<RecordingHandle>>>,
+    tx: &Sender<AppMessage>,
     msg: AppMessage,
 ) {
     match msg {
@@ -151,46 +145,65 @@ fn handle_message(
         }
 
         AppMessage::ToggleRecording => {
-            let mut s = state.lock().unwrap();
+            let s = state.lock().unwrap();
+            let mut handle = recording_handle.lock().unwrap();
+
             if s.is_recording {
-                s.is_recording = false;
-                s.status = AppStatus::Transcribing;
-                tracing::info!("Recording stopped — transcribing...");
-                // TODO: wire to actual transcription engine
-                s.status = AppStatus::Ready;
+                // ── Stop recording ───────────────────────────────
+                if let Some(h) = handle.take() {
+                    tracing::info!("Stopping recording...");
+                    h.stop();
+                    // Recording thread sends RecordingStopped when done
+                }
             } else if s.can_record() {
-                s.is_recording = true;
-                s.status = AppStatus::Recording;
-                tracing::info!("Recording started");
-                RecordingIndicator::show(app);
+                // ── Start recording ──────────────────────────────
+                let model_dir = s.config.local_model_dir();
+
+                match recording::start_recording(model_dir, tx.clone()) {
+                    Ok(h) => {
+                        *handle = Some(h);
+                        // Mutable borrow of state after we're done reading
+                        drop(s);
+                        let mut s = state.lock().unwrap();
+                        s.is_recording = true;
+                        s.status = AppStatus::Recording;
+                        RecordingIndicator::show(app);
+                        tracing::info!("Recording started");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start recording: {}", e);
+                        drop(s);
+                        let mut s = state.lock().unwrap();
+                        s.status = AppStatus::Error(format!("Recording failed: {}", e));
+                    }
+                }
             } else {
                 tracing::warn!("Cannot record in current state: {:?}", s.status);
             }
         }
 
         AppMessage::Quit => {
+            {
+                let mut handle = recording_handle.lock().unwrap();
+                if let Some(h) = handle.take() {
+                    h.stop();
+                }
+            }
             tracing::info!("Quitting...");
             app.quit();
-        }
-
-        AppMessage::RecordingStarted => {
-            let mut s = state.lock().unwrap();
-            s.is_recording = true;
-            s.status = AppStatus::Recording;
-            RecordingIndicator::show(app);
         }
 
         AppMessage::RecordingStopped => {
             let mut s = state.lock().unwrap();
             s.is_recording = false;
-            s.status = AppStatus::Transcribing;
+            s.is_transcribing = false;
+            s.status = AppStatus::Ready;
             RecordingIndicator::hide(app);
-            // TODO: wire to actual transcription engine
+            tracing::info!("Recording stopped, ready");
         }
 
         AppMessage::TranscriptionReady(text) => {
             let mut s = state.lock().unwrap();
-            s.is_transcribing = false;
             s.last_transcription = text.clone();
             s.status = AppStatus::Ready;
             tracing::info!("Transcription: {}", text);
