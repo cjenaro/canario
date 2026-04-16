@@ -62,20 +62,46 @@ Canario always copies the transcription to your clipboard. Auto-typing
 (into the focused app) is best-effort depending on available tools:
 
 | Environment | Auto-type tool | Install |
-|-------------|---------------|----------
+|-------------|---------------|----------|
 | **X11** | `xdotool` | `sudo apt install xdotool` |
 | **Wayland (KDE, Hyprland, Sway)** | `wtype` | `sudo apt install wtype` |
-| **Wayland (GNOME)** | `ydotool` | `sudo apt install ydotool` |
+| **Wayland (GNOME)** | `ydotool` + `ydotoold` | see below |
 
-> **GNOME note:** Mutter does not support the virtual keyboard protocol that
-> `wtype` needs. Use `ydotool` instead, which works at the kernel level.
-> After installing, enable the daemon:
-> ```bash
-> sudo systemctl enable --now ydotool
-> ```
+### GNOME Wayland (most common)
 
-**If no auto-type tool is installed (or available for your compositor),**
-the transcription is still copied to your clipboard — just press **Ctrl+V** to paste.
+GNOME's Mutter compositor doesn't support the virtual keyboard protocol that
+`wtype` needs. Use `ydotool` instead:
+
+```bash
+# Install CLI + daemon
+sudo apt install ydotool ydotoold
+
+# Create systemd service (daemon package doesn't include one)
+echo '[Unit]
+Description=ydotool daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ydotoold
+ExecStartPost=/bin/chmod 666 /tmp/.ydotool_socket
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target' | sudo tee /etc/systemd/system/ydotoold.service
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable --now ydotoold
+```
+
+The `ExecStartPost` line makes the daemon socket readable by all users.
+Without it, `ydotool` can't connect and falls back to `/dev/uinput` (needs root).
+
+Test: `ydotool type "hello world"` — should type into your focused app.
+
+**If no auto-type tool works**, the transcription is still copied to your
+clipboard — just press **Ctrl+V** to paste.
 
 ## Build Requirements
 
