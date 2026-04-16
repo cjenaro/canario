@@ -7,7 +7,7 @@
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HotkeyEvent {
@@ -41,7 +41,7 @@ impl HotkeyListener {
 
     /// Start listening for hotkey events
     /// Calls `on_event` with HotkeyEvent::Pressed / Released
-    pub fn start<F>(&self, config: HotkeyConfig, on_event: F) -> Result<()>
+    pub fn start<F>(&self, _config: HotkeyConfig, _on_event: F) -> Result<()>
     where
         F: Fn(HotkeyEvent) + Send + 'static,
     {

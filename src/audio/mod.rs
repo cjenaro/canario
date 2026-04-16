@@ -1,12 +1,13 @@
 use anyhow::Result;
-use ringbuf::{HeapCons, HeapProd, HeapRb};
+use ringbuf::HeapRb;
+use ringbuf::traits::{Split, Consumer, Producer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{error, info};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 const SAMPLE_RATE: u32 = 16_000;
-const CHANNELS: u16 = 1;
 const RING_BUFFER_SECONDS: f64 = 2.0;
 
 /// Raw audio sample
@@ -16,11 +17,8 @@ pub type Sample = f32;
 pub struct AudioCapture {
     running: Arc<AtomicBool>,
     recording: Arc<AtomicBool>,
-    /// Ring buffer producer (owned by the capture thread)
-    producer: Option<HeapProd<Sample>>,
-    /// Ring buffer consumer (read by the recording system)
-    consumer: Option<HeapCons<Sample>>,
-    buffer: Vec<Sample>,
+    producer: Option<ringbuf::HeapProd<Sample>>,
+    consumer: Option<ringbuf::HeapCons<Sample>>,
 }
 
 impl AudioCapture {
@@ -34,7 +32,6 @@ impl AudioCapture {
             recording: Arc::new(AtomicBool::new(false)),
             producer: Some(prod),
             consumer: Some(cons),
-            buffer: Vec::new(),
         }
     }
 
@@ -52,13 +49,8 @@ impl AudioCapture {
         info!("Using input device: {}", device.name().unwrap_or_default());
 
         let supported_config = device.default_input_config()?;
-        debug!(
-            "Input format: {:?}, sample_rate: {}",
-            supported_config.sample_format(),
-            supported_config.sample_rate().0
-        );
-
         let mic_sample_rate = supported_config.sample_rate().0;
+        let channels = supported_config.channels() as usize;
 
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
@@ -73,14 +65,14 @@ impl AudioCapture {
                     if !running.load(Ordering::SeqCst) {
                         return;
                     }
-
-                    // Convert to mono if needed and resample on the fly
-                    // For now, just push samples
-                    // TODO: handle multi-channel → mono
-                    // TODO: handle resampling from mic_sample_rate → 16000
-                    for &sample in data {
-                        if recording.load(Ordering::SeqCst) {
-                            producer.push(sample);
+                    // Convert to mono
+                    let mono: Vec<f32> = data
+                        .chunks(channels)
+                        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+                        .collect();
+                    if recording.load(Ordering::SeqCst) {
+                        for &sample in &mono {
+                            let _ = producer.try_push(sample);
                         }
                     }
                 },
@@ -93,10 +85,16 @@ impl AudioCapture {
                     if !running.load(Ordering::SeqCst) {
                         return;
                     }
-                    for &sample in data {
-                        let f = sample as f32 / i16::MAX as f32;
-                        if recording.load(Ordering::SeqCst) {
-                            producer.push(f);
+                    let mono: Vec<f32> = data
+                        .chunks(channels)
+                        .map(|frame| {
+                            frame.iter().map(|&s| s as f32 / i16::MAX as f32).sum::<f32>()
+                                / channels as f32
+                        })
+                        .collect();
+                    if recording.load(Ordering::SeqCst) {
+                        for &sample in &mono {
+                            let _ = producer.try_push(sample);
                         }
                     }
                 },
@@ -110,18 +108,16 @@ impl AudioCapture {
         info!("Audio capture started at {}Hz", mic_sample_rate);
 
         // Keep the stream alive
-        // TODO: store stream properly
         std::mem::forget(stream);
 
         Ok(())
     }
 
     /// Start recording audio into the buffer
-    pub fn start_recording(&self) {
+    pub fn start_recording(&mut self) {
         self.recording.store(true, Ordering::SeqCst);
         // Clear the ring buffer consumer
         if let Some(ref mut consumer) = self.consumer.as_mut() {
-            // Drain existing data
             let mut discard = vec![0.0f32; 4096];
             while consumer.pop_slice(&mut discard) > 0 {}
         }
@@ -144,7 +140,11 @@ impl AudioCapture {
             }
         }
 
-        info!("Recording stopped, captured {} samples ({:.2}s)", audio.len(), audio.len() as f64 / SAMPLE_RATE as f64);
+        info!(
+            "Recording stopped, captured {} samples ({:.2}s)",
+            audio.len(),
+            audio.len() as f64 / SAMPLE_RATE as f64
+        );
         audio
     }
 

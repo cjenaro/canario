@@ -13,14 +13,20 @@
 ## Quick Start
 
 ```bash
-# Download model
+# Download model (ASR + VAD)
 ./target/release/canario-cli --download
 
 # Transcribe a WAV file
 ./target/release/canario-cli --wav recording.wav
 
-# Record from microphone (Ctrl+C to stop)
+# Stream from mic with VAD auto-detect (speak naturally)
 ./target/release/canario-cli --mic
+
+# Stream from mic + auto-paste into focused app
+./target/release/canario-cli --mic --paste
+
+# Toggle mode: press Enter to start/stop recording
+./target/release/canario-cli --mic --toggle
 ```
 
 ## Architecture
@@ -57,6 +63,14 @@ src/
 
 Stored at: `~/.local/share/canario/models/sherpa-parakeet-tdt-v3/`
 
+### VAD Model
+
+| Model | Source | Size |
+|-------|--------|------|
+| Silero VAD | `snakers4/silero-vad` | ~2.3 MB |
+
+Stored at: `~/.local/share/canario/models/silero_vad.onnx`
+
 ### Reference: How Hex Does It (macOS)
 
 Hex uses:
@@ -80,7 +94,7 @@ Our Linux equivalent:
 ### Phase 1: Make the CLI Genuinely Useful
 
 #### 1.1 Streaming mic with VAD (auto-detect speech)
-**Status:** 🔲 Not started
+**Status:** ✅ Done
 **Difficulty:** Medium
 **Files:** `src/bin/canario-cli.rs`, `src/audio/mod.rs`
 
@@ -99,7 +113,7 @@ sherpa-onnx already has a VAD example at `rust-api-examples/examples/parakeet_td
 - Shows interim results while speaking
 
 #### 1.2 Auto-paste after transcription
-**Status:** 🔲 Not started (code exists in `src/ui/paste.rs`, untested)
+**Status:** ✅ Done
 **Difficulty:** Easy
 **Files:** `src/bin/canario-cli.rs`, `src/ui/paste.rs`
 
@@ -111,7 +125,7 @@ Wire up `paste_text()` from `src/ui/paste.rs` to the CLI output. Add `--paste` f
 - Falls back to clipboard if direct typing fails
 
 #### 1.3 Press-and-hold via CLI (optional)
-**Status:** 🔲 Not started
+**Status:** ✅ Done
 **Difficulty:** Medium
 **Files:** `src/bin/canario-cli.rs`, `src/hotkey/mod.rs`
 

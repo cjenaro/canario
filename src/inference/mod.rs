@@ -26,15 +26,19 @@ impl TranscriptionEngine {
     }
 
     fn encoder_path(&self) -> PathBuf {
-        self.model_dir.join("encoder-model.int8.onnx")
+        self.model_dir.join("encoder.int8.onnx")
     }
 
     fn decoder_path(&self) -> PathBuf {
-        self.model_dir.join("decoder_joint-model.int8.onnx")
+        self.model_dir.join("decoder.int8.onnx")
+    }
+
+    fn joiner_path(&self) -> PathBuf {
+        self.model_dir.join("joiner.int8.onnx")
     }
 
     fn tokens_path(&self) -> PathBuf {
-        self.model_dir.join("vocab.txt")
+        self.model_dir.join("tokens.txt")
     }
 
     /// Load the model into memory
@@ -51,14 +55,14 @@ impl TranscriptionEngine {
         let mut config = OfflineRecognizerConfig::default();
         config.model_config.transducer.encoder = Some(self.encoder_path().to_string_lossy().to_string());
         config.model_config.transducer.decoder = Some(self.decoder_path().to_string_lossy().to_string());
-        config.model_config.transducer.joiner = Some(self.decoder_path().to_string_lossy().to_string());
+        config.model_config.transducer.joiner = Some(self.joiner_path().to_string_lossy().to_string());
         config.model_config.tokens = Some(self.tokens_path().to_string_lossy().to_string());
         config.model_config.model_type = Some("nemo_transducer".to_string());
         config.model_config.num_threads = self.num_threads as i32;
         config.model_config.debug = false;
 
         let recognizer = OfflineRecognizer::create(&config)
-            .map_err(|e| anyhow::anyhow!("Failed to create recognizer: {}", e))?;
+            .ok_or_else(|| anyhow::anyhow!("Failed to create recognizer"))?;
 
         self.recognizer = Some(recognizer);
         info!("ASR model loaded successfully");
@@ -181,9 +185,10 @@ pub async fn download_model(model_dir: &std::path::Path, repo: &str) -> Result<(
     std::fs::create_dir_all(model_dir)?;
 
     let files = [
-        "encoder-model.int8.onnx",
-        "decoder_joint-model.int8.onnx",
-        "vocab.txt",
+        "encoder.int8.onnx",
+        "decoder.int8.onnx",
+        "joiner.int8.onnx",
+        "tokens.txt",
     ];
 
     for file in &files {
@@ -202,7 +207,7 @@ pub async fn download_model(model_dir: &std::path::Path, repo: &str) -> Result<(
             anyhow::bail!("Failed to download {}: HTTP {}", file, response.status());
         }
 
-        let total_size = response.content_length();
+        let _total_size = response.content_length();
         let bytes = response.bytes().await?;
 
         std::fs::write(&dest, &bytes)?;

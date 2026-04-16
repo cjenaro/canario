@@ -114,8 +114,8 @@ impl AppConfig {
     /// Get the model download URLs based on selected variant
     pub fn model_hf_repo(&self) -> &'static str {
         match self.model {
-            ModelVariant::ParakeetV2 => "istupakov/parakeet-tdt-0.6b-v2-onnx",
-            ModelVariant::ParakeetV3 => "istupakov/parakeet-tdt-0.6b-v3-onnx",
+            ModelVariant::ParakeetV2 => "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+            ModelVariant::ParakeetV3 => "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
             ModelVariant::Custom => "",
         }
     }
@@ -123,8 +123,8 @@ impl AppConfig {
     /// Get the local model directory for the selected variant
     pub fn local_model_dir(&self) -> PathBuf {
         match self.model {
-            ModelVariant::ParakeetV2 => Self::models_dir().join("parakeet-tdt-0.6b-v2"),
-            ModelVariant::ParakeetV3 => Self::models_dir().join("parakeet-tdt-0.6b-v3"),
+            ModelVariant::ParakeetV2 => Self::models_dir().join("sherpa-parakeet-tdt-v2"),
+            ModelVariant::ParakeetV3 => Self::models_dir().join("sherpa-parakeet-tdt-v3"),
             ModelVariant::Custom => {
                 if let Some(p) = &self.custom_encoder_path {
                     p.parent().unwrap_or(&Self::models_dir()).to_path_buf()
@@ -138,8 +138,9 @@ impl AppConfig {
     /// Check if model files exist locally
     pub fn is_model_downloaded(&self) -> bool {
         let dir = self.local_model_dir();
-        dir.join("encoder-model.int8.onnx").exists()
-            && dir.join("decoder_joint-model.int8.onnx").exists()
-            && dir.join("vocab.txt").exists()
+        dir.join("encoder.int8.onnx").exists()
+            && dir.join("decoder.int8.onnx").exists()
+            && dir.join("joiner.int8.onnx").exists()
+            && dir.join("tokens.txt").exists()
     }
 }
