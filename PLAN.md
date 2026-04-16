@@ -2,15 +2,28 @@
 
 > Native Linux voice-to-text using Parakeet TDT, inspired by [Hex](https://github.com/kitlangton/Hex) for macOS.
 
-## What Works (v0.0.1)
+## What Works (v0.1.0)
 
-- ✅ CLI tool (`canario-cli`) that transcribes WAV files and live microphone audio
+### CLI (`canario-cli`)
+- ✅ Transcribes WAV files and live microphone audio
 - ✅ Downloads INT8 quantized Parakeet TDT v3 model from HuggingFace (~640MB)
-- ✅ Uses `sherpa-onnx` Rust bindings for ONNX inference + TDT decoding
+- ✅ `sherpa-onnx` Rust bindings for ONNX inference + TDT decoding
 - ✅ Audio capture via `cpal`, resampling, WAV reading/writing
-- ✅ Skeleton modules for: config, hotkey, inference engine, UI, paste
+- ✅ VAD-based streaming mic with Silero VAD
+- ✅ Toggle mode (press Enter to start/stop)
+- ✅ Auto-paste transcription into focused app
+
+### GUI (`canario`)
+- ✅ GTK4 + Adwaita system tray app
+- ✅ Start/Stop recording from tray menu
+- ✅ Settings window: model selection, download, auto-paste toggle
+- ✅ Recording indicator overlay with audio level
+- ✅ Transcription → auto-paste into focused app
+- ✅ Clipboard fallback on Wayland without auto-type tools
 
 ## Quick Start
+
+### CLI
 
 ```bash
 # Download model (ASR + VAD)
@@ -28,6 +41,56 @@
 # Toggle mode: press Enter to start/stop recording
 ./target/release/canario-cli --mic --toggle
 ```
+
+### GUI
+
+```bash
+# Build (requires GTK4 dev headers)
+sudo apt install libgtk-4-dev libadwaita-1-dev   # one-time
+cargo build --release --bin canario
+
+# Run
+./target/release/canario
+```
+
+Click the microphone tray icon → **Start Recording** → speak → **Stop Recording**.
+The transcription is automatically pasted into your focused app.
+
+## Auto-Paste Behavior
+
+Canario always copies the transcription to your clipboard. Auto-typing
+(into the focused app) is best-effort depending on available tools:
+
+| Environment | Auto-type tool | Install |
+|-------------|---------------|----------
+| **X11** | `xdotool` | `sudo apt install xdotool` |
+| **Wayland** | `wtype` | `sudo apt install wtype` |
+| **Either** | `ydotool` | `sudo apt install ydotool` |
+
+**If no auto-type tool is installed**, the transcription is still copied to
+your clipboard — just press **Ctrl+V** to paste.
+
+> **Note for Wayland users:** Most modern Linux desktops (GNOME, KDE) use
+> Wayland by default. Auto-typing requires `wtype` (recommended) or `ydotool`.
+> Without either, you'll see `📋 Copied to clipboard (Ctrl+V to paste)` in the
+> logs.
+
+## Build Requirements
+
+### CLI only (no GUI deps)
+```bash
+cargo build --release --no-default-features --features static --bin canario-cli
+```
+
+### GUI (requires system packages)
+```bash
+sudo apt install libgtk-4-dev libadwaita-1-dev
+cargo build --release --bin canario
+```
+
+The `-dev` packages are **only needed for compiling**. End users running the
+binary only need the runtime libraries (`libgtk-4-1`, `libadwaita-1-0`) which
+are pre-installed on virtually every GNOME desktop.
 
 ## Architecture
 
