@@ -15,6 +15,58 @@ use crate::ui::word_remapping::WordRemappingWidget;
 use crate::ui::history::HistoryWidget;
 use crate::ui::{AppMessage, AppState};
 
+/// Find the history ListBox inside the settings window and repopulate it.
+fn refresh_history_in_window(win: &gtk4::Window, history: &Arc<Mutex<History>>) {
+    if let Some(list_box) = find_widget_by_name(win.upcast_ref(), "canario-history-list") {
+        if let Ok(lb) = list_box.clone().downcast::<gtk4::ListBox>() {
+            let h = history.lock().unwrap();
+            let entries = h.recent_owned(50);
+            drop(h);
+            crate::ui::history::repopulate_list(&lb, entries);
+        }
+    }
+}
+
+/// Recursively find a widget by name.
+fn find_widget_by_name(widget: &gtk4::Widget, name: &str) -> Option<gtk4::Widget> {
+    if widget.widget_name() == name {
+        return Some(widget.clone());
+    }
+    if let Some(container) = widget.dynamic_cast_ref::<gtk4::Box>() {
+        let mut child = container.first_child();
+        while let Some(c) = child {
+            if let Some(found) = find_widget_by_name(&c, name) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+    }
+    if let Some(container) = widget.dynamic_cast_ref::<gtk4::ListBox>() {
+        let mut child = container.first_child();
+        while let Some(c) = child {
+            if let Some(found) = find_widget_by_name(&c, name) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+    }
+    if let Some(container) = widget.dynamic_cast_ref::<adw::PreferencesGroup>() {
+        let mut child = container.first_child();
+        while let Some(c) = child {
+            if let Some(found) = find_widget_by_name(&c, name) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+    }
+    if let Some(sw) = widget.dynamic_cast_ref::<gtk4::ScrolledWindow>() {
+        if let Some(child) = sw.child() {
+            return find_widget_by_name(&child, name);
+        }
+    }
+    None
+}
+
 /// Present the settings window (creates one if none exists, or brings to front)
 pub struct SettingsWindow;
 
@@ -26,6 +78,8 @@ impl SettingsWindow {
         });
 
         if let Some(win) = existing {
+            // Refresh history list in the existing window
+            refresh_history_in_window(&win, &history);
             win.present();
             return;
         }

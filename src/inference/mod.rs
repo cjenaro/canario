@@ -182,7 +182,80 @@ fn read_wav(path: &std::path::Path) -> Result<(Vec<f32>, u32)> {
     Ok((mono, sample_rate))
 }
 
-/// Download model files from HuggingFace
+/// Download model files from HuggingFace with progress reporting.
+pub async fn download_model_with_progress(
+    model_dir: &std::path::Path,
+    repo: &str,
+    progress_tx: &std::sync::mpsc::Sender<f64>,
+) -> Result<()> {
+    std::fs::create_dir_all(model_dir)?;
+
+    let files = [
+        ("encoder.int8.onnx", true),
+        ("decoder.int8.onnx", true),
+        ("joiner.int8.onnx", true),
+        ("tokens.txt", false),
+    ];
+
+    // Calculate total size estimate for progress
+    let total_files = files.len() as f64;
+    let mut completed = 0.0;
+
+    for (file, _large) in &files {
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", repo, file);
+        let dest = model_dir.join(file);
+
+        if dest.exists() {
+            info!("{} already exists, skipping", file);
+            completed += 1.0;
+            let _ = progress_tx.send(completed / total_files);
+            continue;
+        }
+
+        info!("Downloading {}...", file);
+        let response = reqwest::get(&url).await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to download {}: HTTP {}", file, response.status());
+        }
+
+        let total_size = response.content_length().unwrap_or(0) as f64;
+
+        // Stream the response to track progress
+        let response = response;
+        let mut downloaded: f64 = 0.0;
+        let mut buf = Vec::new();
+
+        use futures_util::StreamExt;
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            downloaded += chunk.len() as f64;
+            buf.extend_from_slice(&chunk);
+
+            // Report progress: (files_completed + current_file_progress) / total_files
+            if total_size > 0.0 {
+                let file_progress = downloaded / total_size;
+                let overall = (completed + file_progress) / total_files;
+                let _ = progress_tx.send(overall.min(0.99));
+            }
+        }
+
+        std::fs::write(&dest, &buf)?;
+
+        let size_mb = buf.len() as f64 / (1024.0 * 1024.0);
+        info!("Downloaded {} ({:.1} MB)", file, size_mb);
+
+        completed += 1.0;
+        let _ = progress_tx.send(completed / total_files);
+    }
+
+    info!("Model download complete!");
+    Ok(())
+}
+
+/// Download model files from HuggingFace (no progress reporting)
 pub async fn download_model(model_dir: &std::path::Path, repo: &str) -> Result<()> {
     std::fs::create_dir_all(model_dir)?;
 

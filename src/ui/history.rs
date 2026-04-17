@@ -57,6 +57,7 @@ impl HistoryWidget {
         scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
 
         let list_box = gtk4::ListBox::new();
+        list_box.set_widget_name("canario-history-list");
         list_box.add_css_class("boxed-list");
         list_box.set_selection_mode(gtk4::SelectionMode::None);
 
@@ -209,5 +210,52 @@ fn truncate(text: &str, max_len: usize) -> String {
     } else {
         let truncated: String = text.chars().take(max_len).collect();
         truncated + "…"
+    }
+}
+
+/// Public function to repopulate a ListBox with given entries.
+/// Called from settings.rs when refreshing an existing window.
+pub fn repopulate_list(list_box: &gtk4::ListBox, entries: Vec<crate::history::HistoryEntry>) {
+    // Remove all existing children
+    while let Some(child) = list_box.first_child() {
+        list_box.remove(&child);
+    }
+
+    if entries.is_empty() {
+        let empty_row = adw::ActionRow::builder()
+            .title("No transcriptions yet")
+            .build();
+        empty_row.add_css_class("dim-label");
+        list_box.append(&empty_row);
+        return;
+    }
+
+    for entry in &entries {
+        let row = adw::ActionRow::builder()
+            .title(&truncate(&entry.text, 80))
+            .subtitle(&format!(
+                "{}  •  {:.1}s",
+                entry.timestamp
+                    .with_timezone(&chrono::Local)
+                    .format("%b %d, %H:%M"),
+                entry.duration_secs,
+            ))
+            .build();
+
+        // Copy button
+        let text = entry.text.clone();
+        let copy_btn = gtk4::Button::new();
+        copy_btn.set_icon_name("edit-copy-symbolic");
+        copy_btn.add_css_class("flat");
+        copy_btn.set_valign(gtk4::Align::Center);
+        copy_btn.set_tooltip_text(Some("Copy to clipboard"));
+        copy_btn.connect_clicked(move |_| {
+            if let Err(e) = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+                tracing::warn!("Failed to copy to clipboard: {}", e);
+            }
+        });
+        row.add_suffix(&copy_btn);
+
+        list_box.append(&row);
     }
 }

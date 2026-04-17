@@ -21,31 +21,51 @@ impl ModelManagerWidget {
     pub fn new(state: Arc<Mutex<AppState>>) -> Self {
         let row = adw::ActionRow::builder()
             .title("Model Status")
-            .activatable(true)
             .build();
 
         let status_label = gtk4::Label::new(None);
         status_label.add_css_class("dim-label");
+        status_label.set_valign(gtk4::Align::Center);
         row.add_suffix(&status_label);
 
+        // Progress bar — goes inside the row's child area, below the title
         let progress_bar = gtk4::ProgressBar::new();
         progress_bar.set_fraction(0.0);
         progress_bar.set_visible(false);
         progress_bar.set_show_text(true);
         progress_bar.add_css_class("osd");
+        progress_bar.set_margin_top(4);
+        progress_bar.set_margin_bottom(4);
 
-        let download_btn = gtk4::Button::with_label("Download");
-        download_btn.add_css_class("suggested-action");
-        download_btn.add_css_class("pill");
+        // We need the progress bar below the row content, so use a vertical box
+        let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let inner_row = adw::ActionRow::builder()
+            .title("Model Status")
+            .build();
 
-        let delete_btn = gtk4::Button::with_label("Delete");
-        delete_btn.add_css_class("destructive-action");
-        delete_btn.add_css_class("pill");
+        // Small compact buttons with icons
+        let download_btn = gtk4::Button::new();
+        download_btn.set_icon_name("folder-download-symbolic");
+        download_btn.add_css_class("flat");
+        download_btn.set_tooltip_text(Some("Download model"));
+        download_btn.set_valign(gtk4::Align::Center);
 
-        let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        button_box.append(&download_btn);
-        button_box.append(&delete_btn);
-        row.add_suffix(&button_box);
+        let delete_btn = gtk4::Button::new();
+        delete_btn.set_icon_name("user-trash-symbolic");
+        delete_btn.add_css_class("flat");
+        delete_btn.set_tooltip_text(Some("Delete model"));
+        delete_btn.set_valign(gtk4::Align::Center);
+
+        let status_label2 = gtk4::Label::new(None);
+        status_label2.add_css_class("dim-label");
+        status_label2.set_valign(gtk4::Align::Center);
+
+        inner_row.add_suffix(&status_label2);
+        inner_row.add_suffix(&download_btn);
+        inner_row.add_suffix(&delete_btn);
+
+        outer.append(&inner_row);
+        outer.append(&progress_bar);
 
         // ── Initial state ────────────────────────────────────────────
         let downloaded = {
@@ -53,19 +73,18 @@ impl ModelManagerWidget {
             s.config.is_model_downloaded()
         };
         if downloaded {
-            status_label.set_label("✅ Ready");
+            status_label2.set_label("✅ Ready");
             download_btn.set_visible(false);
             delete_btn.set_visible(true);
         } else {
-            status_label.set_label("❌ Not downloaded");
+            status_label2.set_label("❌ Not downloaded");
             download_btn.set_visible(true);
             delete_btn.set_visible(false);
         }
 
         // ── Download handler ─────────────────────────────────────────
-        // Clone labels/buttons that both closures need
-        let status_for_dl = status_label.clone();
-        let status_for_del = status_label.clone();
+        let status_for_dl = status_label2.clone();
+        let status_for_del = status_label2.clone();
         let dl_btn_ref = download_btn.clone();
         let del_for_dl = delete_btn.clone();
 
@@ -80,19 +99,23 @@ impl ModelManagerWidget {
                 return;
             }
 
-            status_for_dl.set_label("Downloading…");
+            status_for_dl.set_label("⬇ Downloading…");
             progress_bar.set_visible(true);
             progress_bar.set_fraction(0.0);
+            dl_btn_ref.set_sensitive(false);
 
             let model_dir = config.local_model_dir();
             let repo = config.model_hf_repo().to_string();
 
             let (result_tx, result_rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+            let (progress_tx, progress_rx) = std::sync::mpsc::channel::<f64>();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result = rt.block_on(async {
-                    inference::download_model(&model_dir, &repo).await
+                    inference::download_model_with_progress(
+                        &model_dir, &repo, &progress_tx,
+                    ).await
                 });
                 let _ = result_tx.send(result);
             });
@@ -101,28 +124,36 @@ impl ModelManagerWidget {
             let progress = progress_bar.clone();
             let dl_btn = dl_btn_ref.clone();
             let del_btn = del_for_dl.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                // Check for progress updates
+                while let Ok(p) = progress_rx.try_recv() {
+                    progress.set_fraction(p);
+                    progress.set_show_text(true);
+                }
+
                 match result_rx.try_recv() {
                     Ok(Ok(())) => {
                         status.set_label("✅ Downloaded");
                         progress.set_fraction(1.0);
                         dl_btn.set_visible(false);
+                        dl_btn.set_sensitive(true);
                         del_btn.set_visible(true);
                         ControlFlow::Break
                     }
                     Ok(Err(e)) => {
                         status.set_label("❌ Download failed");
                         progress.set_visible(false);
+                        dl_btn.set_sensitive(true);
                         tracing::error!("Model download failed: {}", e);
                         ControlFlow::Break
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        progress.pulse();
                         ControlFlow::Continue
                     }
                     Err(_) => {
                         status.set_label("❌ Download interrupted");
                         progress.set_visible(false);
+                        dl_btn.set_sensitive(true);
                         ControlFlow::Break
                     }
                 }
@@ -153,8 +184,20 @@ impl ModelManagerWidget {
 
             status_for_del.set_label("❌ Not downloaded");
             download_btn.set_visible(true);
+            download_btn.set_sensitive(true);
             btn.set_visible(false);
         });
+
+        // Return the outer box wrapped as the widget
+        // Since the parent expects an ActionRow, let's reuse the row
+        // Actually we should just use outer as the widget — but the type is ActionRow.
+        // Simplest: just use the row we already have and add everything to it.
+        // The issue is we can't easily put a progress bar below. Let's use the
+        // row as-is with progress bar as a suffix.
+
+        // Clear the original row and rebuild
+        row.set_title("");
+        row.set_child(Some(&outer));
 
         Self { widget: row }
     }

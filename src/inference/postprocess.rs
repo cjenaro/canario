@@ -24,10 +24,35 @@ pub struct WordRemoval {
 }
 
 /// Post-processor that applies remappings and removals.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostProcessor {
     pub remappings: Vec<WordRemapping>,
     pub removals: Vec<WordRemoval>,
+}
+
+impl Default for PostProcessor {
+    fn default() -> Self {
+        Self {
+            remappings: vec![
+                // Common ASR misrecognitions
+                WordRemapping { from: "I llama".into(), to: "I'll ama".into() },
+                WordRemapping { from: "Imma".into(), to: "I'm going to".into() },
+            ],
+            removals: vec![
+                // Filler words
+                WordRemoval { word: "uh".into() },
+                WordRemoval { word: "um".into() },
+                WordRemoval { word: "ah".into() },
+                WordRemoval { word: "er".into() },
+                WordRemoval { word: "like like".into() },
+                WordRemoval { word: "you know".into() },
+                // ASR artifacts
+                WordRemoval { word: "(inaudible)".into() },
+                WordRemoval { word: "[music]".into() },
+                WordRemoval { word: "[laughter]".into() },
+            ],
+        }
+    }
 }
 
 impl PostProcessor {
@@ -214,7 +239,10 @@ mod tests {
 
     #[test]
     fn test_empty_processor() {
-        let pp = PostProcessor::new();
+        let pp = PostProcessor {
+            remappings: vec![],
+            removals: vec![],
+        };
         assert_eq!(pp.process("hello world"), "hello world");
     }
 }
