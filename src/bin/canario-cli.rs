@@ -49,6 +49,7 @@ struct CliArgs {
     use_mic: bool,
     paste: bool,
     toggle: bool,
+    toggle_external: bool,
     model_dir: PathBuf,
     encoder: Option<String>,
     decoder: Option<String>,
@@ -63,6 +64,7 @@ fn parse_args() -> CliArgs {
         use_mic: args.contains(&"--mic".to_string()),
         paste: args.contains(&"--paste".to_string()),
         toggle: args.contains(&"--toggle".to_string()),
+        toggle_external: args.contains(&"--toggle-external".to_string()),
         model_dir: get_arg(&args, "--model-dir")
             .map(PathBuf::from)
             .unwrap_or_else(default_model_dir),
@@ -83,6 +85,20 @@ fn main() -> Result<()> {
         .init();
 
     let cli = parse_args();
+
+    // ── External toggle mode (no model needed) ──────────────────────
+    if cli.toggle_external {
+        let socket_path = std::env::temp_dir().join("canario-hotkey.sock");
+        if !socket_path.exists() {
+            anyhow::bail!("Canario GUI is not running (socket not found at {:?})", socket_path);
+        }
+        let sock = std::os::unix::net::UnixDatagram::unbound()
+            .map_err(|e| anyhow::anyhow!("Failed to create socket: {}", e))?;
+        sock.send_to(b"toggle", &socket_path)
+            .map_err(|e| anyhow::anyhow!("Failed to send toggle command: {}", e))?;
+        eprintln!("✅ Toggle command sent to running Canario instance");
+        return Ok(());
+    }
 
     // ── Download mode ──────────────────────────────────────────────────
     if cli.download {
@@ -149,6 +165,7 @@ fn main() -> Result<()> {
         eprintln!("  canario --mic --paste           Stream + auto-paste results");
         eprintln!("  canario --mic --toggle          Press Enter to start/stop recording");
         eprintln!("  canario --mic --paste --toggle  Toggle mode + auto-paste");
+        eprintln!("  canario --toggle-external        Send toggle to running GUI instance");
     }
 
     Ok(())

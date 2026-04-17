@@ -5,6 +5,7 @@ pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod inference;
+pub mod history;
 
 #[cfg(feature = "gui")]
 fn main() -> anyhow::Result<()> {

@@ -1,3 +1,5 @@
+pub mod postprocess;
+
 use anyhow::Result;
 use sherpa_onnx::OfflineRecognizer;
 use sherpa_onnx::OfflineRecognizerConfig;

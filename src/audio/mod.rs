@@ -1,3 +1,5 @@
+pub mod effects;
+
 use anyhow::Result;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Split, Consumer, Producer};

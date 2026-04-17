@@ -11,6 +11,7 @@ use std::sync::Arc;
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
 use crate::ui::AppMessage;
+use crate::inference::postprocess::PostProcessor;
 
 /// Shared state that the background recording thread checks to know
 /// when to stop.
@@ -28,17 +29,25 @@ impl RecordingHandle {
 /// Start recording from the microphone.
 ///
 /// Captures audio until `RecordingHandle::stop()` is called, then
-/// transcribes the entire buffer and sends the result via `tx`.
+/// transcribes the entire buffer, applies post-processing, and sends
+/// the result via `tx`.
 pub fn start_recording(
     model_dir: PathBuf,
     tx: std::sync::mpsc::Sender<AppMessage>,
+    post_processor: PostProcessor,
+    sound_effects: bool,
 ) -> anyhow::Result<RecordingHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
 
+    // Play start beep
+    if sound_effects {
+        crate::audio::effects::beep_start();
+    }
+
     std::thread::spawn(move || {
         tracing::info!("Recording thread starting...");
-        if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone) {
+        if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone, &post_processor) {
             tracing::error!("Recording thread error: {}", e);
             let _ = tx.send(AppMessage::TranscriptionReady(format!("❌ {}", e)));
             let _ = tx.send(AppMessage::RecordingStopped);
@@ -53,6 +62,7 @@ fn recording_loop(
     model_dir: PathBuf,
     tx: std::sync::mpsc::Sender<AppMessage>,
     stop: Arc<AtomicBool>,
+    post_processor: &PostProcessor,
 ) -> anyhow::Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -186,8 +196,10 @@ fn recording_loop(
     recognizer.decode(&rec_stream);
 
     if let Some(result) = rec_stream.get_result() {
-        let text = result.text.trim().to_string();
-        if !text.is_empty() {
+        let raw_text = result.text.trim().to_string();
+        if !raw_text.is_empty() {
+            // Apply post-processing (word remappings / removals)
+            let text = post_processor.process(&raw_text);
             tracing::info!("✅ Transcription: {}", text);
             let _ = tx.send(AppMessage::TranscriptionReady(text));
         } else {

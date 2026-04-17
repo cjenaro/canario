@@ -1,5 +1,9 @@
+pub mod autostart;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use crate::inference::postprocess::PostProcessor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -34,6 +38,15 @@ pub struct AppConfig {
 
     /// Number of inference threads (0 = auto)
     pub num_threads: u32,
+
+    /// Post-processing rules for transcription text
+    pub post_processor: PostProcessor,
+
+    /// Autostart on login
+    pub autostart: bool,
+
+    /// Play sound effects on recording start/stop
+    pub sound_effects: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -69,6 +82,9 @@ impl Default for AppConfig {
             custom_decoder_path: None,
             custom_tokens_path: None,
             num_threads: 4,
+            post_processor: PostProcessor::default(),
+            autostart: false,
+            sound_effects: true,
         }
     }
 }

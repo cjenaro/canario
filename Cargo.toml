@@ -49,6 +49,10 @@ ringbuf = "0.4"
 arboard = "3.6"
 uuid = { version = "1", features = ["v4"] }
 ctrlc = "3.4"
+x11rb = "0.13"
+evdev = "0.13"
+rodio = "0.20"
+chrono = { version = "0.4", features = ["serde"] }
 
 [[bin]]
 name = "canario"

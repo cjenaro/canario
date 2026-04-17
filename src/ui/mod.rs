@@ -1,10 +1,12 @@
 pub mod app;
+pub mod history;
 pub mod indicator;
 pub mod model_manager;
 pub mod paste;
 pub mod recording;
 pub mod settings;
 pub mod tray;
+pub mod word_remapping;
 
 use crate::config::AppConfig;
 
@@ -29,6 +31,8 @@ pub enum AppMessage {
     DownloadFailed(String),
     /// Audio level update (0.0 - 1.0)
     AudioLevel(f64),
+    /// Hotkey changed in settings — restart the listener
+    HotkeyChanged(Vec<String>),
 }
 
 /// Core application state shared between threads

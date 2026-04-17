@@ -1,8 +1,13 @@
-/target
-*.swp
-*.swo
-*~
-.DS_Store
-models/
-*.onnx
-*.onnx.data
+/target/
+# Build artifacts
+packaging/*.AppImage
+packaging/*.deb
+packaging/*.flatpak
+packaging/appimage/Canario.AppDir/
+packaging/deb/canario_*/
+packaging/flatpak/build-dir/
+packaging/flatpak/.flatpak-builder/
+packaging/flatpak/repo/
+
+# Debug
+canario-debug.log

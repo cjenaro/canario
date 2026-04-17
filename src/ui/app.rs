@@ -9,11 +9,13 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 
 use crate::config::AppConfig;
+use crate::hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener};
 use crate::ui::recording::{self, RecordingHandle};
 use crate::ui::settings::SettingsWindow;
 use crate::ui::indicator::RecordingIndicator;
 use crate::ui::tray::CanarioTray;
 use crate::ui::{AppMessage, AppState, AppStatus};
+use crate::history::History;
 
 /// Handle to the ksni tray service (blocking variant, safe to clone + share)
 type TrayHandle = ksni::blocking::Handle<CanarioTray>;
@@ -26,6 +28,9 @@ pub struct CanarioApp {
     recording_handle: Arc<Mutex<Option<RecordingHandle>>>,
     is_recording_flag: Arc<AtomicBool>,
     tray_handle: Arc<Mutex<Option<TrayHandle>>>,
+    #[allow(dead_code)] // Kept alive to maintain hotkey listener
+    hotkey: Arc<Mutex<Option<HotkeyListener>>>,
+    history: Arc<Mutex<History>>,
 }
 
 impl CanarioApp {
@@ -49,6 +54,8 @@ impl CanarioApp {
             recording_handle: Arc::new(Mutex::new(None)),
             is_recording_flag: is_recording_flag.clone(),
             tray_handle: Arc::new(Mutex::new(None)),
+            hotkey: Arc::new(Mutex::new(None)),
+            history: Arc::new(Mutex::new(History::load())),
         };
 
         canario.setup_signals();
@@ -60,9 +67,21 @@ impl CanarioApp {
         let tx = self.tx.clone();
         let is_recording_flag = self.is_recording_flag.clone();
         let tray_handle = self.tray_handle.clone();
+        let hotkey = self.hotkey.clone();
 
         self.app.connect_startup(move |app| {
             tracing::info!("Canario startup");
+
+            // Install .desktop file on first launch
+            if let Err(e) = crate::config::autostart::install_desktop_file() {
+                tracing::warn!("Failed to install .desktop file: {}", e);
+            }
+
+            // Install icon
+            let icon_svg = include_bytes!("../../assets/canario.svg");
+            if let Err(e) = crate::config::autostart::install_icon(icon_svg) {
+                tracing::warn!("Failed to install icon: {}", e);
+            }
 
             {
                 let mut s = state.lock().unwrap();
@@ -90,6 +109,42 @@ impl CanarioApp {
                 }
             });
 
+            // Start hotkey listener
+            let hk_tx = tx.clone();
+            let s = state.lock().unwrap();
+            let hotkey_config = HotkeyConfig::from_app_config(
+                &s.config.hotkey,
+                s.config.minimum_key_time,
+                s.config.double_tap_lock,
+                s.config.double_tap_only,
+            );
+            drop(s);
+
+            let hk = hotkey.clone();
+            std::thread::spawn(move || {
+                let mut listener = HotkeyListener::new();
+                match listener.start(hotkey_config, move |action| {
+                    tracing::info!("Hotkey action: {:?}", action);
+                    match action {
+                        HotkeyAction::StartRecording => {
+                            let _ = hk_tx.send(AppMessage::ToggleRecording);
+                        }
+                        HotkeyAction::StopRecording => {
+                            let _ = hk_tx.send(AppMessage::ToggleRecording);
+                        }
+                        HotkeyAction::CancelRecording => {
+                            let _ = hk_tx.send(AppMessage::ToggleRecording);
+                        }
+                    }
+                }) {
+                    Ok(()) => {
+                        tracing::info!("Global hotkey listener started");
+                        *hk.lock().unwrap() = Some(listener);
+                    }
+                    Err(e) => tracing::warn!("Hotkey listener failed to start: {}", e),
+                }
+            });
+
             std::mem::forget(app.hold());
         });
 
@@ -112,6 +167,8 @@ impl CanarioApp {
         let tx = self.tx;
         let is_recording_flag = self.is_recording_flag;
         let tray_handle = self.tray_handle;
+        let hotkey = self.hotkey;
+        let history = self.history;
 
         let app_clone = app.clone();
 
@@ -124,6 +181,8 @@ impl CanarioApp {
                     &tx,
                     &is_recording_flag,
                     &tray_handle,
+                    &hotkey,
+                    &history,
                     msg,
                 );
             }
@@ -167,11 +226,13 @@ fn handle_message(
     tx: &Sender<AppMessage>,
     is_recording_flag: &Arc<AtomicBool>,
     tray_handle: &Arc<Mutex<Option<TrayHandle>>>,
+    hotkey_listener: &Arc<Mutex<Option<HotkeyListener>>>,
+    history: &Arc<Mutex<History>>,
     msg: AppMessage,
 ) {
     match msg {
         AppMessage::ShowSettings => {
-            SettingsWindow::present(app, state.clone());
+            SettingsWindow::present(app, state.clone(), tx.clone(), history.clone());
         }
 
         AppMessage::ToggleRecording => {
@@ -194,8 +255,10 @@ fn handle_message(
             } else if s.can_record() {
                 // ── Start ─────────────────────────────────────
                 let model_dir = s.config.local_model_dir();
+                let post_processor = s.config.post_processor.clone();
+                let sound_effects = s.config.sound_effects;
 
-                match recording::start_recording(model_dir, tx.clone()) {
+                match recording::start_recording(model_dir, tx.clone(), post_processor, sound_effects) {
                     Ok(h) => {
                         *handle = Some(h);
                         is_recording_flag.store(true, Ordering::SeqCst);
@@ -245,6 +308,7 @@ fn handle_message(
 
         AppMessage::TranscriptionReady(text) => {
             let mut s = state.lock().unwrap();
+            let sound_effects = s.config.sound_effects;
             s.last_transcription = text.clone();
             s.status = AppStatus::Ready;
             tracing::info!("✅ Transcription: {}", text);
@@ -254,6 +318,9 @@ fn handle_message(
                     Ok(pasted) => {
                         if pasted {
                             tracing::info!("📋 Auto-typed");
+                            if sound_effects {
+                                crate::audio::effects::beep_confirm();
+                            }
                         } else {
                             tracing::info!("📋 Copied to clipboard (Ctrl+V to paste)");
                         }
@@ -261,6 +328,13 @@ fn handle_message(
                     Err(e) => tracing::error!("Paste failed: {}", e),
                 }
             }
+
+            // Store in history
+            history.lock().unwrap().add(
+                text,
+                0.0, // duration not tracked here yet
+                None, // source_app not detected yet
+            );
         }
 
         AppMessage::DownloadProgress(p) => {
@@ -282,6 +356,53 @@ fn handle_message(
 
         AppMessage::AudioLevel(level) => {
             RecordingIndicator::update_level(app, level);
+        }
+
+        AppMessage::HotkeyChanged(new_hotkey) => {
+            // Update config
+            {
+                let mut s = state.lock().unwrap();
+                s.config.hotkey = new_hotkey.clone();
+                let _ = s.config.save();
+            }
+
+            // Stop old listener
+            if let Some(listener) = hotkey_listener.lock().unwrap().take() {
+                listener.stop();
+                drop(listener);
+                tracing::info!("Old hotkey listener stopped");
+            }
+
+            // Start new listener
+            let s = state.lock().unwrap();
+            let hotkey_config = HotkeyConfig::from_app_config(
+                &s.config.hotkey,
+                s.config.minimum_key_time,
+                s.config.double_tap_lock,
+                s.config.double_tap_only,
+            );
+            drop(s);
+
+            let hk = hotkey_listener.clone();
+            let hk_tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut listener = HotkeyListener::new();
+                match listener.start(hotkey_config, move |action| {
+                    match action {
+                        HotkeyAction::StartRecording
+                        | HotkeyAction::StopRecording
+                        | HotkeyAction::CancelRecording => {
+                            let _ = hk_tx.send(AppMessage::ToggleRecording);
+                        }
+                    }
+                }) {
+                    Ok(()) => {
+                        tracing::info!("Hotkey listener restarted with {:?}", new_hotkey);
+                        *hk.lock().unwrap() = Some(listener);
+                    }
+                    Err(e) => tracing::warn!("Hotkey restart failed: {}", e),
+                }
+            });
         }
     }
 }
