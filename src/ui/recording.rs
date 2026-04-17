@@ -49,7 +49,7 @@ pub fn start_recording(
         tracing::info!("Recording thread starting...");
         if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone, &post_processor) {
             tracing::error!("Recording thread error: {}", e);
-            let _ = tx.send(AppMessage::TranscriptionReady(format!("❌ {}", e)));
+            let _ = tx.send(AppMessage::RecordingError(format!("{}", e)));
             let _ = tx.send(AppMessage::RecordingStopped);
         }
     });

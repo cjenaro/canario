@@ -19,8 +19,10 @@ pub enum AppMessage {
     ToggleRecording,
     /// Quit the application
     Quit,
-    /// Transcription result ready (may be sent multiple times per session)
+    /// Transcription result ready
     TranscriptionReady(String),
+    /// Recording/transcription error (do NOT paste or store in history)
+    RecordingError(String),
     /// Recording thread has finished and exited
     RecordingStopped,
     /// Model download progress (0.0 - 1.0)

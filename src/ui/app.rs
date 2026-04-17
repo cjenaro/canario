@@ -306,6 +306,13 @@ fn handle_message(
             tracing::info!("Recording stopped, ready");
         }
 
+        AppMessage::RecordingError(err) => {
+            let mut s = state.lock().unwrap();
+            s.status = AppStatus::Error(err.clone());
+            tracing::error!("Recording error: {}", err);
+            // Do NOT paste or store in history
+        }
+
         AppMessage::TranscriptionReady(text) => {
             let mut s = state.lock().unwrap();
             let sound_effects = s.config.sound_effects;
