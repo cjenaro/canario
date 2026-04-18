@@ -223,9 +223,3 @@ fn to_evdev_key_name(key: &str) -> String {
         other => other.into(),
     }
 }
-
-/// Send a toggle command to a running Canario instance.
-/// Used by the CLI's `--toggle-external` flag.
-pub fn send_toggle() -> Result<()> {
-    wayland::WaylandHotkey::send_toggle()
-}

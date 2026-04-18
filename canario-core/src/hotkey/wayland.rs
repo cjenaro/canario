@@ -108,23 +108,6 @@ impl WaylandHotkey {
         }
     }
 
-    /// Path to the control socket (for external triggering).
-    pub fn socket_path() -> PathBuf {
-        socket_path()
-    }
-
-    /// Send a toggle command to a running Canario instance.
-    pub fn send_toggle() -> Result<()> {
-        let path = Self::socket_path();
-        if !path.exists() {
-            bail!("Canario is not running (socket not found at {:?})", path);
-        }
-        let sock = UnixDatagram::unbound().context("Failed to create socket")?;
-        sock.send_to(b"toggle", &path)
-            .context("Failed to send toggle command")?;
-        info!("Toggle command sent to running Canario instance");
-        Ok(())
-    }
 }
 
 impl Drop for WaylandHotkey {

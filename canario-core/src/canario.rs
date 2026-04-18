@@ -11,7 +11,6 @@ use crate::config::AppConfig;
 use crate::event::Event;
 use crate::history::History;
 use crate::hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener};
-use crate::inference::postprocess::PostProcessor;
 use crate::recording::RecordingHandle;
 
 struct Inner {
