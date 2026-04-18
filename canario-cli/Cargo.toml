@@ -1,6 +1,6 @@
 [package]
 name = "canario-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "CLI frontend for Canario voice-to-text"
 license = "MIT"

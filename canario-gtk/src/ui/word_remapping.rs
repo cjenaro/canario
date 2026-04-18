@@ -4,140 +4,151 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
+use std::rc::Rc;
+use std::cell::RefCell;
+
 use canario_core::{Canario, WordRemapping, WordRemoval};
 
 pub struct WordRemappingWidget {
     pub group: adw::PreferencesGroup,
+    /// Widgets added to the group via `group.add()`. Tracked so we can
+    /// remove only our rows — AdwPreferencesGroup's internal GtkBox cannot
+    /// be removed via `group.remove()`, and `first_child()` would return it.
+    added_rows: RefCell<Vec<gtk4::Widget>>,
+    canario: Canario,
 }
 
 impl WordRemappingWidget {
-    pub fn new(canario: &Canario) -> Self {
+    pub fn new(canario: &Canario) -> Rc<Self> {
         let group = adw::PreferencesGroup::new();
         group.set_title("Word Remapping");
         group.set_description(Some("Automatically replace or remove words in transcriptions"));
 
-        rebuild_remapping_group(&group, canario);
+        let widget = Rc::new(Self {
+            group,
+            added_rows: RefCell::new(Vec::new()),
+            canario: canario.clone(),
+        });
 
-        Self { group }
-    }
-}
+        widget.rebuild();
 
-/// Clear and rebuild the entire remapping group from config.
-fn rebuild_remapping_group(group: &adw::PreferencesGroup, canario: &Canario) {
-    // Remove all children
-    while let Some(child) = group.first_child() {
-        group.remove(&child);
+        widget
     }
 
-    // Header row with add button
-    let header_row = adw::ActionRow::new();
-    header_row.set_title("Rules");
-    header_row.set_subtitle("Add replacements (from → to) or removals");
+    /// Clear and rebuild the entire remapping group from config.
+    fn rebuild(self: &Rc<Self>) {
+        let group = &self.group;
 
-    let add_btn = gtk4::Button::new();
-    add_btn.set_icon_name("list-add-symbolic");
-    add_btn.add_css_class("flat");
-    add_btn.set_valign(gtk4::Align::Center);
-    header_row.add_suffix(&add_btn);
-    group.add(&header_row);
-
-    // BUG-006: Wire the add button to show a dialog
-    let c = canario.clone();
-    let g = group.clone();
-    add_btn.connect_clicked(move |btn| {
-        if let Some(win) = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok()) {
-            show_add_remapping_dialog(&win, &c, &g);
+        // Remove only widgets we previously added via group.add().
+        for row in self.added_rows.borrow_mut().drain(..) {
+            group.remove(&row);
         }
-    });
 
-    // Populate from config
-    let config = canario.config();
-    for mapping in &config.post_processor.remappings {
-        let row = make_remapping_row(&mapping.from, &mapping.to, canario, group);
-        group.add(&row);
+        // Header row with add button
+        let header_row = adw::ActionRow::new();
+        header_row.set_title("Rules");
+        header_row.set_subtitle("Add replacements (from → to) or removals");
+
+        let add_btn = gtk4::Button::new();
+        add_btn.set_icon_name("list-add-symbolic");
+        add_btn.add_css_class("flat");
+        add_btn.set_valign(gtk4::Align::Center);
+        header_row.add_suffix(&add_btn);
+        group.add(&header_row);
+        self.added_rows.borrow_mut().push(header_row.upcast::<gtk4::Widget>());
+
+        // BUG-006: Wire the add button to show a dialog
+        let w = Rc::clone(self);
+        add_btn.connect_clicked(move |btn| {
+            if let Some(win) = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok()) {
+                show_add_remapping_dialog(&win, &w);
+            }
+        });
+
+        // Populate from config
+        let config = self.canario.config();
+        for mapping in &config.post_processor.remappings {
+            self.add_remapping_row(&mapping.from, &mapping.to);
+        }
+        for removal in &config.post_processor.removals {
+            self.add_removal_row(&removal.word);
+        }
+        if config.post_processor.remappings.is_empty() && config.post_processor.removals.is_empty() {
+            let empty = adw::ActionRow::builder()
+                .title("No rules yet")
+                .subtitle("Click + to add a word replacement or removal")
+                .build();
+            empty.add_css_class("dim-label");
+            group.add(&empty);
+            self.added_rows.borrow_mut().push(empty.upcast::<gtk4::Widget>());
+        }
     }
-    for removal in &config.post_processor.removals {
-        let row = make_removal_row(&removal.word, canario, group);
-        group.add(&row);
-    }
-    if config.post_processor.remappings.is_empty() && config.post_processor.removals.is_empty() {
-        let empty = adw::ActionRow::builder()
-            .title("No rules yet")
-            .subtitle("Click + to add a word replacement or removal")
+
+    /// BUG-007: Row with a delete button for a remapping rule.
+    fn add_remapping_row(self: &Rc<Self>, from: &str, to: &str) {
+        let row = adw::ActionRow::builder()
+            .title(&format!("↔  {}  →  {}", from, to))
+            .subtitle("Remapping")
             .build();
-        empty.add_css_class("dim-label");
-        group.add(&empty);
+
+        let del_btn = gtk4::Button::new();
+        del_btn.set_icon_name("list-remove-symbolic");
+        del_btn.add_css_class("flat");
+        del_btn.set_valign(gtk4::Align::Center);
+        del_btn.set_tooltip_text(Some("Remove this rule"));
+        row.add_suffix(&del_btn);
+
+        let c = self.canario.clone();
+        let w = Rc::clone(self);
+        let from = from.to_string();
+        let to = to.to_string();
+        del_btn.connect_clicked(move |_| {
+            let _ = c.update_config(|cfg| {
+                cfg.post_processor
+                    .remappings
+                    .retain(|r| r.from != from || r.to != to);
+            });
+            w.rebuild();
+        });
+
+        self.group.add(&row);
+        self.added_rows.borrow_mut().push(row.upcast::<gtk4::Widget>());
     }
-}
 
-/// BUG-007: Row with a delete button for a remapping rule.
-fn make_remapping_row(
-    from: &str,
-    to: &str,
-    canario: &Canario,
-    group: &adw::PreferencesGroup,
-) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(&format!("↔  {}  →  {}", from, to))
-        .subtitle("Remapping")
-        .build();
+    /// BUG-007: Row with a delete button for a removal rule.
+    fn add_removal_row(self: &Rc<Self>, word: &str) {
+        let row = adw::ActionRow::builder()
+            .title(&format!("✕  {}", word))
+            .subtitle("Removal")
+            .build();
 
-    let del_btn = gtk4::Button::new();
-    del_btn.set_icon_name("list-remove-symbolic");
-    del_btn.add_css_class("flat");
-    del_btn.set_valign(gtk4::Align::Center);
-    del_btn.set_tooltip_text(Some("Remove this rule"));
-    row.add_suffix(&del_btn);
+        let del_btn = gtk4::Button::new();
+        del_btn.set_icon_name("list-remove-symbolic");
+        del_btn.add_css_class("flat");
+        del_btn.set_valign(gtk4::Align::Center);
+        del_btn.set_tooltip_text(Some("Remove this rule"));
+        row.add_suffix(&del_btn);
 
-    let c = canario.clone();
-    let g = group.clone();
-    let from = from.to_string();
-    let to = to.to_string();
-    del_btn.connect_clicked(move |_| {
-        let _ = c.update_config(|cfg| {
-            cfg.post_processor
-                .remappings
-                .retain(|r| r.from != from || r.to != to);
+        let c = self.canario.clone();
+        let w = Rc::clone(self);
+        let word = word.to_string();
+        del_btn.connect_clicked(move |_| {
+            let _ = c.update_config(|cfg| {
+                cfg.post_processor.removals.retain(|r| r.word != word);
+            });
+            w.rebuild();
         });
-        rebuild_remapping_group(&g, &c);
-    });
 
-    row
-}
-
-/// BUG-007: Row with a delete button for a removal rule.
-fn make_removal_row(word: &str, canario: &Canario, group: &adw::PreferencesGroup) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(&format!("✕  {}", word))
-        .subtitle("Removal")
-        .build();
-
-    let del_btn = gtk4::Button::new();
-    del_btn.set_icon_name("list-remove-symbolic");
-    del_btn.add_css_class("flat");
-    del_btn.set_valign(gtk4::Align::Center);
-    del_btn.set_tooltip_text(Some("Remove this rule"));
-    row.add_suffix(&del_btn);
-
-    let c = canario.clone();
-    let g = group.clone();
-    let word = word.to_string();
-    del_btn.connect_clicked(move |_| {
-        let _ = c.update_config(|cfg| {
-            cfg.post_processor.removals.retain(|r| r.word != word);
-        });
-        rebuild_remapping_group(&g, &c);
-    });
-
-    row
+        self.group.add(&row);
+        self.added_rows.borrow_mut().push(row.upcast::<gtk4::Widget>());
+    }
 }
 
 /// BUG-006: Dialog for adding a new word remapping or removal rule.
 #[allow(deprecated)]
 fn show_add_remapping_dialog(
     parent: &gtk4::Window,
-    canario: &Canario,
-    group: &adw::PreferencesGroup,
+    widget: &Rc<WordRemappingWidget>,
 ) {
     let dialog = gtk4::Window::new();
     dialog.set_transient_for(Some(parent));
@@ -220,8 +231,8 @@ fn show_add_remapping_dialog(
     });
 
     // Add Rule
-    let c = canario.clone();
-    let g = group.clone();
+    let c = widget.canario.clone();
+    let w = Rc::clone(widget);
     let dlg2 = dialog.clone();
     let fe = from_entry.clone();
     let te = to_entry.clone();
@@ -251,7 +262,7 @@ fn show_add_remapping_dialog(
             }
         });
 
-        rebuild_remapping_group(&g, &c);
+        w.rebuild();
         dlg2.close();
     });
 

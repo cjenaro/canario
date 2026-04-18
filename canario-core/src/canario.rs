@@ -74,14 +74,17 @@ impl Canario {
             return Err(anyhow::anyhow!("Already recording"));
         }
 
-        // Don't start a new recording if the old thread is still transcribing
-        if let Some(handle) = self.inner.recording_handle.lock().unwrap().as_ref() {
-            if handle.is_busy() {
-                return Err(anyhow::anyhow!("Transcription in progress, please wait"));
-            } else {
-                // Thread finished, clean up stale handle
-                drop(self.inner.recording_handle.lock().unwrap().take());
+        // Don't start a new recording if the old thread is still transcribing.
+        // Must acquire the lock only ONCE to avoid deadlock (Mutex is not reentrant).
+        {
+            let mut guard = self.inner.recording_handle.lock().unwrap();
+            if let Some(handle) = guard.as_ref() {
+                if handle.is_busy() {
+                    return Err(anyhow::anyhow!("Transcription in progress, please wait"));
+                }
             }
+            // Clean up stale handle (whether or not one existed)
+            *guard = None;
         }
 
         let config = self.config().clone();
