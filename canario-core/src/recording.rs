@@ -12,15 +12,22 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 use crate::event::Event;
 use crate::inference::postprocess::PostProcessor;
 
-/// Handle to stop a running recording.
+/// Handle to stop a running recording and track thread completion.
 pub struct RecordingHandle {
     stop: Arc<AtomicBool>,
+    /// Set to `false` by the thread when it finishes (recording + transcription).
+    busy: Arc<AtomicBool>,
 }
 
 impl RecordingHandle {
     /// Signal the recording thread to stop.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Is the thread still running (capturing or transcribing)?
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
     }
 }
 
@@ -36,7 +43,9 @@ pub fn start_recording(
     sound_effects: bool,
 ) -> anyhow::Result<RecordingHandle> {
     let stop = Arc::new(AtomicBool::new(false));
+    let busy = Arc::new(AtomicBool::new(true));
     let stop_clone = stop.clone();
+    let busy_clone = busy.clone();
 
     // Play start beep
     if sound_effects {
@@ -45,14 +54,17 @@ pub fn start_recording(
 
     std::thread::spawn(move || {
         tracing::info!("Recording thread starting...");
-        if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone, &post_processor) {
+        let result = recording_loop(model_dir, tx.clone(), stop_clone, &post_processor, sound_effects);
+        if let Err(e) = &result {
             tracing::error!("Recording thread error: {}", e);
             let _ = tx.send(Event::Error(format!("{}", e)));
             let _ = tx.send(Event::RecordingStopped);
         }
+        // Mark thread as no longer busy (whether success or failure)
+        busy_clone.store(false, Ordering::SeqCst);
     });
 
-    Ok(RecordingHandle { stop })
+    Ok(RecordingHandle { stop, busy })
 }
 
 /// The main recording loop — runs in a background thread.
@@ -61,6 +73,7 @@ fn recording_loop(
     tx: std::sync::mpsc::Sender<Event>,
     stop: Arc<AtomicBool>,
     post_processor: &PostProcessor,
+    sound_effects: bool,
 ) -> anyhow::Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -146,6 +159,11 @@ fn recording_loop(
     // ── Stop: grab audio, release mic ───────────────────────────────
     let raw_audio = audio_buf.lock().clone();
     drop(stream);
+
+    // Play stop beep (double-beep) before transcription begins
+    if sound_effects {
+        crate::audio::effects::beep_stop();
+    }
 
     let duration = raw_audio.len() as f64 / mic_sr as f64;
     tracing::info!("Stopped. Captured {} samples ({:.1}s)", raw_audio.len(), duration);

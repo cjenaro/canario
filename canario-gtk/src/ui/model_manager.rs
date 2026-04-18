@@ -1,5 +1,4 @@
 /// Model manager widget — download/delete models with progress bar.
-use glib::ControlFlow;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -16,16 +15,19 @@ impl ModelManagerWidget {
         let inner_row = adw::ActionRow::builder().title("Model Status").build();
 
         let status_label = gtk4::Label::new(None);
+        status_label.set_widget_name("model-status-label");
         status_label.add_css_class("dim-label");
         status_label.set_valign(gtk4::Align::Center);
 
         let download_btn = gtk4::Button::new();
+        download_btn.set_widget_name("model-download-btn");
         download_btn.set_icon_name("folder-download-symbolic");
         download_btn.add_css_class("flat");
         download_btn.set_tooltip_text(Some("Download model"));
         download_btn.set_valign(gtk4::Align::Center);
 
         let delete_btn = gtk4::Button::new();
+        delete_btn.set_widget_name("model-delete-btn");
         delete_btn.set_icon_name("user-trash-symbolic");
         delete_btn.add_css_class("flat");
         delete_btn.set_tooltip_text(Some("Delete model"));
@@ -36,6 +38,7 @@ impl ModelManagerWidget {
         inner_row.add_suffix(&delete_btn);
 
         let progress_bar = gtk4::ProgressBar::new();
+        progress_bar.set_widget_name("model-download-progress");
         progress_bar.set_fraction(0.0);
         progress_bar.set_visible(false);
         progress_bar.set_show_text(true);
@@ -62,7 +65,7 @@ impl ModelManagerWidget {
         let c = canario.clone();
         let status_dl = status_label.clone();
         let dl_btn = download_btn.clone();
-        let del_btn = delete_btn.clone();
+        let _del_btn = delete_btn.clone();
         download_btn.connect_clicked(move |_btn| {
             if c.is_model_downloaded() { return; }
             status_dl.set_label("⬇ Downloading…");

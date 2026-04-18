@@ -130,7 +130,7 @@ impl TranscriptionEngine {
 }
 
 /// Simple WAV reader that returns 16kHz mono f32 samples
-fn read_wav(path: &std::path::Path) -> Result<(Vec<f32>, u32)> {
+pub fn read_wav(path: &std::path::Path) -> Result<(Vec<f32>, u32)> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(path)?;

@@ -253,6 +253,12 @@ fn build_settings_window(app: &adw::Application, canario: &Canario) -> adw::Appl
     let history_widget = HistoryWidget::new(canario);
     main_box.append(&history_widget.group);
 
+    // BUG-008: Refresh history when settings window is re-shown
+    let hw = history_widget;
+    win.connect_show(move |_| {
+        hw.refresh();
+    });
+
     // ── About section ───────────────────────────────────────────────
     let about_group = adw::PreferencesGroup::new();
     about_group.set_title("About");

@@ -75,6 +75,16 @@ impl Canario {
             return Err(anyhow::anyhow!("Already recording"));
         }
 
+        // Don't start a new recording if the old thread is still transcribing
+        if let Some(handle) = self.inner.recording_handle.lock().unwrap().as_ref() {
+            if handle.is_busy() {
+                return Err(anyhow::anyhow!("Transcription in progress, please wait"));
+            } else {
+                // Thread finished, clean up stale handle
+                drop(self.inner.recording_handle.lock().unwrap().take());
+            }
+        }
+
         let config = self.config().clone();
         let model_dir = config.local_model_dir();
         let post_processor = config.post_processor.clone();
@@ -96,14 +106,15 @@ impl Canario {
 
     /// Stop recording and begin transcription.
     ///
-    /// The recording thread will transcribe and emit
-    /// `Event::TranscriptionReady` when done.
+    /// The recording thread will emit `Event::RecordingStopped` when
+    /// transcription is complete (or immediately for short recordings).
     pub fn stop_recording(&self) {
-        if let Some(h) = self.inner.recording_handle.lock().unwrap().take() {
+        if let Some(h) = self.inner.recording_handle.lock().unwrap().as_ref() {
             h.stop();
         }
+        // Don't send RecordingStopped here — the recording thread sends it
+        // after transcription is done. Only update the in-memory flag.
         self.inner.is_recording.store(false, Ordering::SeqCst);
-        let _ = self.inner.event_tx.send(Event::RecordingStopped);
     }
 
     /// Toggle recording: start if idle, stop if recording.

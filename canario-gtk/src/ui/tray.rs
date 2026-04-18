@@ -2,13 +2,28 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Actions that can be triggered from the system tray menu.
+#[derive(Debug)]
+pub enum TrayAction {
+    ToggleRecording,
+    ShowSettings,
+    Quit,
+}
+
 pub struct CanarioTray {
     is_recording: Arc<AtomicBool>,
+    action_tx: std::sync::mpsc::Sender<TrayAction>,
 }
 
 impl CanarioTray {
-    pub fn new(is_recording: Arc<AtomicBool>) -> Self {
-        Self { is_recording }
+    pub fn new(
+        is_recording: Arc<AtomicBool>,
+        action_tx: std::sync::mpsc::Sender<TrayAction>,
+    ) -> Self {
+        Self {
+            is_recording,
+            action_tx,
+        }
     }
 
     fn recording(&self) -> bool {
@@ -17,18 +32,30 @@ impl CanarioTray {
 }
 
 impl ksni::Tray for CanarioTray {
-    fn id(&self) -> String { "canario".into() }
-    fn title(&self) -> String { "Canario".into() }
-    fn status(&self) -> ksni::Status { ksni::Status::Active }
+    fn id(&self) -> String {
+        "canario".into()
+    }
+    fn title(&self) -> String {
+        "Canario".into()
+    }
+    fn status(&self) -> ksni::Status {
+        ksni::Status::Active
+    }
 
     fn icon_name(&self) -> String {
-        if self.recording() { "media-record".into() }
-        else { "audio-input-microphone".into() }
+        if self.recording() {
+            "media-record".into()
+        } else {
+            "audio-input-microphone".into()
+        }
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let title = if self.recording() { "Canario — Recording…" }
-        else { "Canario — Voice to Text" };
+        let title = if self.recording() {
+            "Canario — Recording…"
+        } else {
+            "Canario — Voice to Text"
+        };
         ksni::ToolTip {
             title: title.into(),
             description: "Press the hotkey to start recording".into(),
@@ -41,31 +68,42 @@ impl ksni::Tray for CanarioTray {
         let recording = self.recording();
         vec![
             StandardItem {
-                label: if recording { "⏹  Stop Recording" } else { "⏺  Start Recording" }.into(),
-                icon_name: if recording { "media-playback-stop" } else { "media-record" }.into(),
-                activate: Box::new(|_this: &mut Self| {
-                    // The toggle is handled by the hotkey system / is_recording flag
-                    // For tray menu clicks, we toggle the flag directly
-                    // (The app polls this flag)
+                label: if recording {
+                    "⏹  Stop Recording".into()
+                } else {
+                    "⏺  Start Recording".into()
+                },
+                icon_name: if recording {
+                    "media-playback-stop".into()
+                } else {
+                    "media-record".into()
+                },
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.action_tx.send(TrayAction::ToggleRecording);
                 }),
                 ..Default::default()
-            }.into(),
+            }
+            .into(),
             MenuItem::Separator,
             StandardItem {
                 label: "⚙  Settings".into(),
                 icon_name: "preferences-system".into(),
-                activate: Box::new(|_this: &mut Self| {
-                    // Settings is opened via the app event loop
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.action_tx.send(TrayAction::ShowSettings);
                 }),
                 ..Default::default()
-            }.into(),
+            }
+            .into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit".into(),
-                activate: Box::new(|_this: &mut Self| {}),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.action_tx.send(TrayAction::Quit);
+                }),
                 ..Default::default()
-            }.into(),
+            }
+            .into(),
         ]
     }
 }

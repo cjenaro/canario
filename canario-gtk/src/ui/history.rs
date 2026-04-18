@@ -8,6 +8,9 @@ use canario_core::Canario;
 pub struct HistoryWidget {
     pub group: adw::PreferencesGroup,
     list_box: gtk4::ListBox,
+    canario: Canario,
+    count_label: gtk4::Label,
+    search_entry: gtk4::SearchEntry,
 }
 
 impl HistoryWidget {
@@ -29,6 +32,14 @@ impl HistoryWidget {
         header_row.add_suffix(&btn_box);
         group.add(&header_row);
 
+        // BUG-009: Search bar for filtering history entries
+        let search_entry = gtk4::SearchEntry::new();
+        search_entry.set_placeholder_text(Some("Search transcriptions…"));
+        search_entry.set_hexpand(true);
+        let search_row = adw::ActionRow::new();
+        search_row.set_child(Some(&search_entry));
+        group.add(&search_row);
+
         let scrolled = gtk4::ScrolledWindow::new();
         scrolled.set_vexpand(true);
         scrolled.set_min_content_height(200);
@@ -49,6 +60,19 @@ impl HistoryWidget {
         let entries = canario.recent_history(50);
         populate_list(&list_box, &entries, canario);
 
+        // Search: BUG-009
+        let c_search = canario.clone();
+        let lb_search = list_box.clone();
+        search_entry.connect_search_changed(move |entry| {
+            let query = entry.text().to_string();
+            let entries = if query.is_empty() {
+                c_search.recent_history(50)
+            } else {
+                c_search.search_history(&query)
+            };
+            populate_list(&lb_search, &entries, &c_search);
+        });
+
         // Clear all
         let c = canario.clone();
         let lb = list_box.clone();
@@ -59,12 +83,33 @@ impl HistoryWidget {
             cl.set_text("0 entries");
         });
 
-        Self { group, list_box }
+        Self {
+            group,
+            list_box,
+            canario: canario.clone(),
+            count_label,
+            search_entry,
+        }
+    }
+
+    /// BUG-008: Refresh history entries (call when settings window is re-shown).
+    pub fn refresh(&self) {
+        let query = self.search_entry.text().to_string();
+        let entries = if query.is_empty() {
+            self.canario.recent_history(50)
+        } else {
+            self.canario.search_history(&query)
+        };
+        populate_list(&self.list_box, &entries, &self.canario);
+        self.count_label
+            .set_text(&format!("{} entries", self.canario.history_count()));
     }
 }
 
 fn populate_list(list_box: &gtk4::ListBox, entries: &[canario_core::HistoryEntry], _canario: &Canario) {
-    while let Some(child) = list_box.first_child() { list_box.remove(&child); }
+    while let Some(child) = list_box.first_child() {
+        list_box.remove(&child);
+    }
 
     if entries.is_empty() {
         populate_empty(list_box);
@@ -76,7 +121,10 @@ fn populate_list(list_box: &gtk4::ListBox, entries: &[canario_core::HistoryEntry
             .title(&truncate(&entry.text, 80))
             .subtitle(&format!(
                 "{}  •  {:.1}s",
-                entry.timestamp.with_timezone(&chrono::Local).format("%b %d, %H:%M"),
+                entry
+                    .timestamp
+                    .with_timezone(&chrono::Local)
+                    .format("%b %d, %H:%M"),
                 entry.duration_secs,
             ))
             .build();
@@ -95,13 +143,20 @@ fn populate_list(list_box: &gtk4::ListBox, entries: &[canario_core::HistoryEntry
 }
 
 fn populate_empty(list_box: &gtk4::ListBox) {
-    while let Some(child) = list_box.first_child() { list_box.remove(&child); }
-    let empty = adw::ActionRow::builder().title("No transcriptions yet").build();
+    while let Some(child) = list_box.first_child() {
+        list_box.remove(&child);
+    }
+    let empty = adw::ActionRow::builder()
+        .title("No transcriptions yet")
+        .build();
     empty.add_css_class("dim-label");
     list_box.append(&empty);
 }
 
 fn truncate(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len { text.to_string() }
-    else { text.chars().take(max_len).collect::<String>() + "…" }
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        text.chars().take(max_len).collect::<String>() + "…"
+    }
 }

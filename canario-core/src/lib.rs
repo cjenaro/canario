@@ -48,6 +48,8 @@ pub use paste::paste_text;
 
 // Re-export for convenience
 pub use recording::RecordingHandle;
+pub use inference::TranscriptionEngine;
+pub use inference::read_wav;
 
 // Re-export submodules that frontends need
 pub mod autostart {
