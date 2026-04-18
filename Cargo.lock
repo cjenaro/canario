@@ -258,22 +258,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "canario"
-version = "0.1.0"
+name = "canario-cli"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "canario-core",
+ "ctrlc",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "canario-core"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
  "chrono",
  "cpal 0.16.0",
- "ctrlc",
  "dirs",
  "evdev",
  "futures-util",
- "gio",
- "glib",
- "gtk4",
- "ksni",
- "libadwaita",
  "parking_lot",
  "reqwest",
  "ringbuf",
@@ -283,9 +288,26 @@ dependencies = [
  "sherpa-onnx",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "x11rb",
+]
+
+[[package]]
+name = "canario-gtk"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "canario-core",
+ "chrono",
+ "gio",
+ "glib",
+ "gtk4",
+ "ksni",
+ "libadwaita",
+ "parking_lot",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

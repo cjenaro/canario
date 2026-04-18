@@ -1,26 +1,24 @@
-/// Recording engine for the GUI app.
+/// Recording engine — captures audio, transcribes, emits events.
 ///
 /// Simple approach: record raw audio while active, transcribe on stop.
-/// VAD streaming is great for the CLI but for a GUI with explicit
-/// start/stop buttons, capturing everything and transcribing at the
-/// end is more reliable and matches the user's mental model.
+/// Communicates results via the `Sender<Event>` channel.
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
-use crate::ui::AppMessage;
+use crate::event::Event;
 use crate::inference::postprocess::PostProcessor;
 
-/// Shared state that the background recording thread checks to know
-/// when to stop.
+/// Handle to stop a running recording.
 pub struct RecordingHandle {
     stop: Arc<AtomicBool>,
 }
 
 impl RecordingHandle {
-    /// Signal the recording thread to stop
+    /// Signal the recording thread to stop.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
     }
@@ -30,10 +28,10 @@ impl RecordingHandle {
 ///
 /// Captures audio until `RecordingHandle::stop()` is called, then
 /// transcribes the entire buffer, applies post-processing, and sends
-/// the result via `tx`.
+/// events via `tx`.
 pub fn start_recording(
     model_dir: PathBuf,
-    tx: std::sync::mpsc::Sender<AppMessage>,
+    tx: std::sync::mpsc::Sender<Event>,
     post_processor: PostProcessor,
     sound_effects: bool,
 ) -> anyhow::Result<RecordingHandle> {
@@ -49,8 +47,8 @@ pub fn start_recording(
         tracing::info!("Recording thread starting...");
         if let Err(e) = recording_loop(model_dir, tx.clone(), stop_clone, &post_processor) {
             tracing::error!("Recording thread error: {}", e);
-            let _ = tx.send(AppMessage::RecordingError(format!("{}", e)));
-            let _ = tx.send(AppMessage::RecordingStopped);
+            let _ = tx.send(Event::Error(format!("{}", e)));
+            let _ = tx.send(Event::RecordingStopped);
         }
     });
 
@@ -60,13 +58,13 @@ pub fn start_recording(
 /// The main recording loop — runs in a background thread.
 fn recording_loop(
     model_dir: PathBuf,
-    tx: std::sync::mpsc::Sender<AppMessage>,
+    tx: std::sync::mpsc::Sender<Event>,
     stop: Arc<AtomicBool>,
     post_processor: &PostProcessor,
 ) -> anyhow::Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-    // ── Open mic first (fast) ───────────────────────────────────────
+    // ── Open mic ────────────────────────────────────────────────────
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -77,7 +75,6 @@ fn recording_loop(
 
     tracing::info!("Recording from '{}' at {}Hz", device.name().unwrap_or_default(), mic_sr);
 
-    // Shared audio buffer — the callback pushes, we read on stop
     let audio_buf: Arc<parking_lot::Mutex<Vec<f32>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
 
@@ -121,10 +118,8 @@ fn recording_loop(
     // ── Wait for stop signal ────────────────────────────────────────
     let mut log_timer = std::time::Instant::now();
     while !stop.load(Ordering::SeqCst) {
-        // Send audio level updates for the indicator
         let buf_snapshot = audio_buf.lock();
         let buf_len = buf_snapshot.len();
-        // Compute RMS from the last ~4000 samples (roughly last 100ms at 44100Hz)
         let recent_start = buf_len.saturating_sub(4000);
         let recent = &buf_snapshot[recent_start..];
         let rms = if recent.is_empty() {
@@ -135,15 +130,12 @@ fn recording_loop(
         drop(buf_snapshot);
 
         let level = (rms * 5.0).min(1.0) as f64;
-        let _ = tx.send(AppMessage::AudioLevel(level));
+        let _ = tx.send(Event::AudioLevel(level));
 
-        // Periodic diagnostic
         if log_timer.elapsed() >= std::time::Duration::from_secs(3) {
             tracing::info!(
-                "Recording: {} samples ({:.1}s) captured, RMS={:.3}",
-                buf_len,
-                buf_len as f64 / mic_sr as f64,
-                rms,
+                "Recording: {} samples ({:.1}s), RMS={:.3}",
+                buf_len, buf_len as f64 / mic_sr as f64, rms,
             );
             log_timer = std::time::Instant::now();
         }
@@ -151,16 +143,16 @@ fn recording_loop(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // ── Stop: grab the audio and release the mic ────────────────────
+    // ── Stop: grab audio, release mic ───────────────────────────────
     let raw_audio = audio_buf.lock().clone();
-    drop(stream); // release mic
+    drop(stream);
 
     let duration = raw_audio.len() as f64 / mic_sr as f64;
     tracing::info!("Stopped. Captured {} samples ({:.1}s)", raw_audio.len(), duration);
 
     if duration < 0.2 {
         tracing::warn!("Recording too short, nothing to transcribe");
-        let _ = tx.send(AppMessage::RecordingStopped);
+        let _ = tx.send(Event::RecordingStopped);
         return Ok(());
     }
 
@@ -183,14 +175,6 @@ fn recording_loop(
 
     tracing::info!("Transcribing {:.1}s of audio...", audio_16k.len() as f64 / 16000.0);
 
-    // Save debug WAV so we can test offline
-    let debug_wav = std::env::temp_dir().join("canario_debug.wav");
-    if let Err(e) = save_wav(&debug_wav, &audio_16k, 16000) {
-        tracing::warn!("Failed to save debug WAV: {}", e);
-    } else {
-        tracing::info!("Debug WAV saved to {:?}", debug_wav);
-    }
-
     let rec_stream = recognizer.create_stream();
     rec_stream.accept_waveform(16000, &audio_16k);
     recognizer.decode(&rec_stream);
@@ -198,20 +182,22 @@ fn recording_loop(
     if let Some(result) = rec_stream.get_result() {
         let raw_text = result.text.trim().to_string();
         if !raw_text.is_empty() {
-            // Apply post-processing (word remappings / removals)
             let text = post_processor.process(&raw_text);
             tracing::info!("✅ Transcription: {}", text);
-            let _ = tx.send(AppMessage::TranscriptionReady(text));
+            let _ = tx.send(Event::TranscriptionReady {
+                text,
+                duration_secs: duration,
+            });
         } else {
             tracing::info!("(no speech detected)");
         }
     }
 
-    let _ = tx.send(AppMessage::RecordingStopped);
+    let _ = tx.send(Event::RecordingStopped);
     Ok(())
 }
 
-/// Create the ASR recognizer from model files
+/// Create the ASR recognizer from model files.
 fn create_recognizer(model_dir: &PathBuf) -> Option<OfflineRecognizer> {
     let encoder = model_dir.join("encoder.int8.onnx");
     let decoder = model_dir.join("decoder.int8.onnx");
@@ -234,43 +220,7 @@ fn create_recognizer(model_dir: &PathBuf) -> Option<OfflineRecognizer> {
     OfflineRecognizer::create(&config)
 }
 
-/// Save f32 samples as a 16-bit PCM WAV file
-fn save_wav(path: &PathBuf, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
-    let data_size = (samples.len() * 2) as u32;
-    let file_size = 36 + data_size;
-
-    let mut out = std::fs::File::create(path)?;
-    use std::io::Write;
-
-    // RIFF header
-    out.write_all(b"RIFF")?;
-    out.write_all(&(file_size).to_le_bytes())?;
-    out.write_all(b"WAVE")?;
-
-    // fmt chunk
-    out.write_all(b"fmt ")?;
-    out.write_all(&16u32.to_le_bytes())?; // chunk size
-    out.write_all(&1u16.to_le_bytes())?;  // PCM format
-    out.write_all(&1u16.to_le_bytes())?;  // mono
-    out.write_all(&sample_rate.to_le_bytes())?;
-    let byte_rate = sample_rate * 2; // 1 channel * 2 bytes/sample
-    out.write_all(&(byte_rate).to_le_bytes())?;
-    out.write_all(&2u16.to_le_bytes())?;  // block align
-    out.write_all(&16u16.to_le_bytes())?; // bits per sample
-
-    // data chunk
-    out.write_all(b"data")?;
-    out.write_all(&data_size.to_le_bytes())?;
-
-    for &sample in samples {
-        let s = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
-        out.write_all(&s.to_le_bytes())?;
-    }
-
-    Ok(())
-}
-
-/// Simple linear interpolation resampling
+/// Simple linear interpolation resampling.
 fn simple_resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     let ratio = to_rate as f64 / from_rate as f64;
     let new_len = (samples.len() as f64 * ratio) as usize;

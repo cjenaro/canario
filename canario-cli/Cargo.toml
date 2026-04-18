@@ -1,0 +1,22 @@
+[package]
+name = "canario-cli"
+version = "0.1.1"
+edition = "2021"
+description = "CLI frontend for Canario voice-to-text"
+license = "MIT"
+
+[features]
+default = ["static"]
+static = ["canario-core/static"]
+shared = ["canario-core/shared"]
+
+[dependencies]
+canario-core = { path = "../canario-core" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ctrlc = "3.4"
+anyhow = "1"
+
+[[bin]]
+name = "canario-cli"
+path = "src/main.rs"

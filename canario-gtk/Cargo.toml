@@ -1,0 +1,35 @@
+[package]
+name = "canario-gtk"
+version = "0.1.1"
+edition = "2021"
+description = "GTK4 frontend for Canario voice-to-text"
+license = "MIT"
+
+[features]
+default = ["static", "gui"]
+static = ["canario-core/static"]
+shared = ["canario-core/shared"]
+gui = ["dep:gtk4", "dep:libadwaita", "dep:ksni", "dep:glib", "dep:gio"]
+
+[dependencies]
+canario-core = { path = "../canario-core" }
+
+# GUI
+gtk4 = { version = "0.8", features = ["v4_14"], optional = true }
+libadwaita = { version = "0.6", features = ["v1_5"], optional = true }
+ksni = { version = "0.3", features = ["blocking"], optional = true }
+glib = { version = "0.19", optional = true }
+gio = { version = "0.19", optional = true }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+arboard = "3.6"
+
+[[bin]]
+name = "canario"
+path = "src/main.rs"
+required-features = ["gui"]

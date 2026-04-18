@@ -15,7 +15,7 @@
 /// listener.start(config, |action| {
 ///     println!("Hotkey action: {:?}", action);
 /// }).unwrap();
-/// ```
+/// ```no_run
 mod processor;
 mod x11;
 mod wayland;
