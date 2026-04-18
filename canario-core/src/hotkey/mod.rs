@@ -4,7 +4,10 @@
 /// the appropriate backend:
 ///
 /// - **X11**: `XGrabKey` via x11rb — full press-and-hold and double-tap support
-/// - **Wayland**: `evdev` raw keyboard input, with socket-based fallback
+/// - **Wayland**: `evdev` raw keyboard input (requires `input` group), with socket-based fallback
+///
+/// Default hotkey: **Super+Alt+Space** (avoids conflicts with most desktop environments
+/// which already bind Super+Space to the app launcher).
 ///
 /// Usage:
 /// ```no_run
@@ -42,7 +45,7 @@ impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
             key: "space".into(),
-            modifiers: vec!["Super".into()],
+            modifiers: vec!["Super".into(), "Alt".into()],
             processor: ProcessorConfig::default(),
         }
     }

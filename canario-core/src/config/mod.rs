@@ -10,7 +10,7 @@ pub struct AppConfig {
     /// Selected model variant
     pub model: ModelVariant,
 
-    /// Global hotkey (key names, e.g., ["Super", "Space"])
+    /// Global hotkey (key names, e.g., ["Super", "Alt", "Space"])
     pub hotkey: Vec<String>,
 
     /// Minimum key hold time in seconds before recording starts
@@ -71,7 +71,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model: ModelVariant::ParakeetV3,
-            hotkey: vec!["Super".into(), "Space".into()],
+            hotkey: vec!["Super".into(), "Alt".into(), "Space".into()],
             minimum_key_time: 0.2,
             double_tap_lock: true,
             double_tap_only: false,
