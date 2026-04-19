@@ -41,6 +41,9 @@ const api = {
 
   // Auto-paste (clipboard + simulated keystroke)
   autoPaste: (text: string) => ipcRenderer.invoke("auto-paste", text),
+
+  // Autostart on login
+  setAutostart: (enabled: boolean) => ipcRenderer.invoke("app:setAutostart", enabled),
 };
 
 export type CanarioAPI = typeof api;

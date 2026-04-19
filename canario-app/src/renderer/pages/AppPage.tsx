@@ -1,9 +1,12 @@
 // Settings / Main page for Canario Electron
+// Phase 2: Polish - animations, error states, empty states, autostart
 import { createSignal, Show, For, onMount, createEffect } from "solid-js";
 import { useAppState } from "../state/context";
 import { createCanario } from "../primitives/createCanario";
 import { HotkeyCapture, toAccelerator } from "../components/HotkeyCapture";
 import { WordRemapping } from "../components/WordRemapping";
+import { Toggle } from "../components/Toggle";
+import { ToastContainer, showToast } from "../components/Toast";
 
 const MODELS = [
   { id: "ParakeetV3", name: "Parakeet TDT v3", desc: "Multilingual · ~640MB" },
@@ -24,6 +27,9 @@ export function AppPage() {
   const [historySearch, setHistorySearch] = createSignal("");
   const [theme, setTheme] = createSignal<string>("dark");
 
+  // Track history items being animated out
+  const [deletingIds, setDeletingIds] = createSignal<Set<string>>(new Set());
+
   // Config state
   const [hotkey, setHotkey] = createSignal<string[]>([]);
   const [autoPaste, setAutoPaste] = createSignal(true);
@@ -33,6 +39,9 @@ export function AppPage() {
   const [remappings, setRemappings] = createSignal<{ from: string; to: string }[]>([]);
   const [removals, setRemovals] = createSignal<{ word: string }[]>([]);
   const [platform, setPlatform] = createSignal<{ isLinux: boolean; isMac: boolean; isWindows: boolean }>({ isLinux: true, isMac: false, isWindows: false });
+
+  // Track whether the initial model check is done
+  const [initialModelCheck, setInitialModelCheck] = createSignal(false);
 
   async function checkModelDownloaded(modelId: string): Promise<boolean> {
     await canario.updateConfig({ model: modelId });
@@ -57,6 +66,16 @@ export function AppPage() {
 
   createEffect(() => {
     applyTheme(theme());
+  });
+
+  // Clear error after it's been shown
+  createEffect(() => {
+    const err = context().lastError;
+    if (err) {
+      showToast(err, "error", 6000);
+      // Clear error so it doesn't re-show
+      updateContext({ lastError: null });
+    }
   });
 
   async function loadHistory() {
@@ -120,17 +139,27 @@ export function AppPage() {
       // 3. Update app state
       const currentReady = downloadedModels().has(originalModel);
       updateContext({ modelReady: currentReady });
+      setInitialModelCheck(true);
 
       // 4. Auto-load history
       await loadHistory();
     } catch (err) {
       console.error("[AppPage] init error:", err);
+      showToast("Failed to initialize. Check that canario-electron sidecar is running.", "error", 8000);
     }
     setLoading(false);
   });
 
   async function handleToggle() {
-    await canario.toggleRecording();
+    const res = await canario.toggleRecording();
+    if (res && !res.ok) {
+      const errMsg = (res.error as string) || "Recording failed";
+      if (errMsg.toLowerCase().includes("no mic") || errMsg.toLowerCase().includes("microphone") || errMsg.toLowerCase().includes("audio")) {
+        showToast("No microphone detected. Check your audio settings.", "error", 6000);
+      } else {
+        showToast(errMsg, "error");
+      }
+    }
   }
 
   async function handleSelectModel(modelId: string) {
@@ -163,7 +192,16 @@ export function AppPage() {
     await canario.updateConfig({ [field]: value });
     if (field === "auto_paste") setAutoPaste(value);
     if (field === "sound_effects") setSoundEffects(value);
-    if (field === "autostart") setAutostart(value);
+    if (field === "autostart") {
+      setAutostart(value);
+      const ok = await canario.setAutostart(value);
+      if (!ok) {
+        showToast("Could not change autostart setting.", "warning");
+        setAutostart(!value);
+        return;
+      }
+      showToast(value ? "Canario will start on login" : "Autostart disabled", "info", 3000);
+    }
   }
 
   async function handleAudioBehaviorChange(behavior: string) {
@@ -183,13 +221,22 @@ export function AppPage() {
   }
 
   async function handleDeleteHistory(id: string) {
+    // Animate out first
+    setDeletingIds(prev => new Set([...prev, id]));
+    await new Promise(r => setTimeout(r, 200));
     await canario.deleteHistory(id);
     await loadHistory();
+    setDeletingIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   }
 
   async function handleClearHistory() {
     await canario.clearHistory();
     setHistory([]);
+    showToast("History cleared", "info", 2000);
   }
 
   async function handleThemeChange(t: string) {
@@ -229,7 +276,7 @@ export function AppPage() {
           </Show>
           <Show when={state().status === "idle" && context().modelReady}>
             <button
-              class="px-4 py-1.5 rounded-lg text-sm font-medium transition-colors"
+              class="px-4 py-1.5 rounded-lg text-sm font-medium transition-colors hover:opacity-90"
               style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
               onClick={handleToggle}
             >
@@ -241,10 +288,13 @@ export function AppPage() {
 
       <Show when={!loading()} fallback={
         <div class="flex items-center justify-center h-64">
-          <p class="text-sm" style={{ color: "var(--text-secondary)" }}>Loading…</p>
+          <div class="flex flex-col items-center gap-3">
+            <div class="w-6 h-6 rounded-full border-2 border-t-transparent animate-spin" style={{ "border-color": "var(--accent)", "border-top-color": "transparent" }} />
+            <p class="text-sm" style={{ color: "var(--text-secondary)" }}>Loading...</p>
+          </div>
         </div>
       }>
-        <div class="max-w-lg mx-auto px-5 py-6 flex flex-col gap-5">
+        <div class="max-w-lg mx-auto px-5 py-6 flex flex-col gap-5 animate-window-appear">
 
           {/* ── Model section ─────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
@@ -288,13 +338,20 @@ export function AppPage() {
                 <Show
                   when={state().status === "downloading"}
                   fallback={
-                    <button
-                      class="w-full py-2.5 rounded-lg text-sm font-medium transition-colors"
-                      style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
-                      onClick={handleDownload}
-                    >
-                      Download {currentModel().name}
-                    </button>
+                    <div class="flex flex-col gap-3">
+                      <button
+                        class="w-full py-2.5 rounded-lg text-sm font-medium transition-colors hover:opacity-90"
+                        style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
+                        onClick={handleDownload}
+                      >
+                        Download {currentModel().name}
+                      </button>
+                      <Show when={initialModelCheck() && !currentModelDownloaded()}>
+                        <p class="text-xs text-center" style={{ color: "var(--text-secondary)" }}>
+                          The ASR model runs locally on your device. Download required before first use.
+                        </p>
+                      </Show>
+                    </div>
                   }
                 >
                   <div class="flex items-center gap-3">
@@ -311,6 +368,9 @@ export function AppPage() {
                       {(((state() as any).progress || 0) * 100).toFixed(0)}%
                     </span>
                   </div>
+                  <p class="text-xs mt-2 text-center" style={{ color: "var(--text-secondary)" }}>
+                    Downloading model... this may take a few minutes.
+                  </p>
                 </Show>
               }
             >
@@ -319,7 +379,7 @@ export function AppPage() {
                   ✓ {currentModel().name} is ready
                 </span>
                 <button
-                  class="text-xs px-2 py-1 rounded-md"
+                  class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
                   style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                   onClick={async () => {
                     await canario.deleteModel();
@@ -329,6 +389,7 @@ export function AppPage() {
                       return next;
                     });
                     updateContext({ modelReady: false });
+                    showToast("Model deleted", "info", 3000);
                   }}
                 >
                   Delete
@@ -377,13 +438,26 @@ export function AppPage() {
               <p class="text-center text-sm" style={{ color: "var(--text-secondary)" }}>
                 <Show when={state().status === "recording"} fallback={
                   <Show when={state().status === "transcribing"} fallback="Click or press your hotkey to record">
-                    Transcribing…
+                    Transcribing...
                   </Show>
                 }>
-                  Listening… speak now
+                  Listening... speak now
                 </Show>
               </p>
             </section>
+          </Show>
+
+          {/* ── No model warning ──────────────────────────────────── */}
+          <Show when={initialModelCheck() && !context().modelReady && state().status !== "downloading"}>
+            <div class="rounded-xl border p-4 flex items-start gap-3" style={{ "background-color": "rgba(239, 68, 68, 0.06)", "border-color": "rgba(239, 68, 68, 0.2)" }}>
+              <span class="text-lg leading-none mt-0.5">🎙️</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium" style={{ color: "var(--error)" }}>No model downloaded</p>
+                <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                  Download a speech recognition model above to start transcribing.
+                </p>
+              </div>
+            </div>
           </Show>
 
           {/* ── Last transcription ────────────────────────────────── */}
@@ -392,11 +466,12 @@ export function AppPage() {
               <div class="flex items-center justify-between mb-2">
                 <h2 class={sectionHeader} style={sectionHeaderStyle}>Last Transcription</h2>
                 <button
-                  class="text-xs px-2 py-1 rounded-md"
+                  class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
                   style={{ color: "var(--text-secondary)", cursor: "pointer", "background-color": "var(--bg)" }}
                   onClick={() => {
                     if (context().lastTranscription) {
                       navigator.clipboard.writeText(context().lastTranscription!);
+                      showToast("Copied to clipboard", "success", 2000);
                     }
                   }}
                   title="Copy to clipboard"
@@ -413,13 +488,6 @@ export function AppPage() {
             </section>
           </Show>
 
-          {/* ── Error ─────────────────────────────────────────────── */}
-          <Show when={context().lastError}>
-            <div class="rounded-xl border p-4" style={{ "background-color": "rgba(239, 68, 68, 0.08)", "border-color": "rgba(239, 68, 68, 0.2)" }}>
-              <p class="text-sm" style={{ color: "var(--error)" }}>⚠ {context().lastError}</p>
-            </div>
-          </Show>
-
           {/* ── Hotkey ────────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
             <h2 class={sectionHeader} style={sectionHeaderStyle}>Hotkey</h2>
@@ -432,30 +500,14 @@ export function AppPage() {
           {/* ── Behavior ──────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
             <h2 class={sectionHeader} style={sectionHeaderStyle}>Behavior</h2>
-            <div class="flex flex-col gap-3">
+            <div class="flex flex-col gap-4">
               {/* Auto-paste */}
               <div class="flex items-center justify-between">
                 <div>
                   <p class="text-sm font-medium">Auto-paste transcription</p>
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Automatically paste result into focused app</p>
                 </div>
-                <label class="relative inline-flex cursor-pointer">
-                  <input type="checkbox" class="sr-only peer" checked={autoPaste()} onChange={(e) => handleConfigToggle("auto_paste", e.target.checked)} />
-                  <div
-                    class="w-10 h-5 rounded-full transition-colors"
-                    style={{
-                      "background-color": autoPaste() ? "var(--accent)" : "var(--border)",
-                    }}
-                  >
-                    <div
-                      class="absolute top-0.5 w-4 h-4 rounded-full transition-all duration-200"
-                      style={{
-                        "background-color": "white",
-                        left: autoPaste() ? "22px" : "2px",
-                      }}
-                    />
-                  </div>
-                </label>
+                <Toggle checked={autoPaste()} onChange={(v) => handleConfigToggle("auto_paste", v)} />
               </div>
 
               {/* Sound effects */}
@@ -464,18 +516,7 @@ export function AppPage() {
                   <p class="text-sm font-medium">Sound effects</p>
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Play sounds on recording start/stop</p>
                 </div>
-                <label class="relative inline-flex cursor-pointer">
-                  <input type="checkbox" class="sr-only peer" checked={soundEffects()} onChange={(e) => handleConfigToggle("sound_effects", e.target.checked)} />
-                  <div class="w-10 h-5 rounded-full transition-colors" style={{ "background-color": soundEffects() ? "var(--accent)" : "var(--border)" }}>
-                    <div
-                      class="absolute top-0.5 w-4 h-4 rounded-full transition-all duration-200"
-                      style={{
-                        "background-color": "white",
-                        left: soundEffects() ? "22px" : "2px",
-                      }}
-                    />
-                  </div>
-                </label>
+                <Toggle checked={soundEffects()} onChange={(v) => handleConfigToggle("sound_effects", v)} />
               </div>
 
               {/* Autostart */}
@@ -484,18 +525,7 @@ export function AppPage() {
                   <p class="text-sm font-medium">Start on login</p>
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Launch Canario when you log in</p>
                 </div>
-                <label class="relative inline-flex cursor-pointer">
-                  <input type="checkbox" class="sr-only peer" checked={autostart()} onChange={(e) => handleConfigToggle("autostart", e.target.checked)} />
-                  <div class="w-10 h-5 rounded-full transition-colors" style={{ "background-color": autostart() ? "var(--accent)" : "var(--border)" }}>
-                    <div
-                      class="absolute top-0.5 w-4 h-4 rounded-full transition-all duration-200"
-                      style={{
-                        "background-color": "white",
-                        left: autostart() ? "22px" : "2px",
-                      }}
-                    />
-                  </div>
-                </label>
+                <Toggle checked={autostart()} onChange={(v) => handleConfigToggle("autostart", v)} />
               </div>
 
               {/* Audio during recording */}
@@ -525,9 +555,20 @@ export function AppPage() {
           {/* ── Word Remapping ────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
             <h2 class={sectionHeader} style={sectionHeaderStyle}>Word Remapping</h2>
-            <p class="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
-              Fix common misrecognitions and remove filler words
-            </p>
+            <Show when={remappings().length > 0 || removals().length > 0} fallback={
+              <div class="py-4 text-center">
+                <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
+                  No remapping rules yet. Add rules to fix common misrecognitions.
+                </p>
+                <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                  e.g. "I llama" → "I'll ama"
+                </p>
+              </div>
+            }>
+              <p class="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
+                Fix common misrecognitions and remove filler words
+              </p>
+            </Show>
             <WordRemapping
               remappings={remappings()}
               removals={removals()}
@@ -564,7 +605,7 @@ export function AppPage() {
               <h2 class={sectionHeader} style={sectionHeaderStyle}>History</h2>
               <Show when={history().length > 0}>
                 <button
-                  class="text-xs px-2 py-1 rounded-md"
+                  class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
                   style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                   onClick={handleClearHistory}
                 >
@@ -601,30 +642,63 @@ export function AppPage() {
             </Show>
 
             <Show when={history().length > 0} fallback={
-              <p class="text-sm py-4 text-center" style={{ color: "var(--text-secondary)" }}>
-                {historySearch() ? "No results found" : "No transcriptions yet. Press your hotkey and start talking! 🎤"}
-              </p>
+              <div class="py-8 text-center">
+                <Show when={historySearch()} fallback={
+                  <div class="flex flex-col items-center gap-2">
+                    <span class="text-3xl">🎤</span>
+                    <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
+                      No transcriptions yet
+                    </p>
+                    <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                      Press your hotkey and start talking!
+                    </p>
+                  </div>
+                }>
+                  <div class="flex flex-col items-center gap-2">
+                    <span class="text-2xl">🔍</span>
+                    <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
+                      No results found for “{historySearch()}”
+                    </p>
+                    <button
+                      class="text-xs px-3 py-1 rounded-md"
+                      style={{ color: "var(--accent)", cursor: "pointer", "background-color": "var(--bg)" }}
+                      onClick={() => { setHistorySearch(""); loadHistory(); }}
+                    >
+                      Clear search
+                    </button>
+                  </div>
+                </Show>
+              </div>
             }>
               <div class="flex flex-col gap-2">
                 <For each={history()}>
                   {(entry) => (
-                    <div class="group p-3 rounded-lg border transition-colors" style={{ "background-color": "var(--bg)", "border-color": "var(--border)" }}>
+                    <div
+                      class="group p-3 rounded-lg border transition-colors"
+                      classList={{
+                        "animate-slide-left": deletingIds().has(entry.id),
+                      }}
+                      style={{ "background-color": "var(--bg)", "border-color": "var(--border)" }}
+                    >
                       <p class="text-sm leading-relaxed">{entry.text}</p>
                       <div class="flex items-center justify-between mt-1.5">
                         <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
                           {entry.duration_secs.toFixed(1)}s · {formatTimestamp(entry.timestamp)}
                         </p>
-                        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
                           <button
-                            class="text-xs px-1.5 py-0.5 rounded"
+                            class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
                             style={{ color: "var(--text-secondary)", cursor: "pointer" }}
-                            onClick={() => navigator.clipboard.writeText(entry.text)}
+                            onClick={() => {
+                              navigator.clipboard.writeText(entry.text);
+                              showToast("Copied to clipboard", "success", 2000);
+                            }}
                             title="Copy"
                           >
                             📋
                           </button>
                           <button
-                            class="text-xs px-1.5 py-0.5 rounded"
+                            class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
                             style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                             onClick={() => handleDeleteHistory(entry.id)}
                             title="Delete"
@@ -642,6 +716,9 @@ export function AppPage() {
 
         </div>
       </Show>
+
+      {/* Toast notification container */}
+      <ToastContainer />
     </div>
   );
 }

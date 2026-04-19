@@ -4,6 +4,7 @@ import { join } from "path";
 import { createTray, setSettingsWindow, updateTrayMenu } from "./tray.js";
 import { startSidecar, stopSidecar, sendCommand, onSidecarEvent } from "./sidecar.js";
 import { loadWindowState, saveWindowState, trackWindowState } from "./windowState.js";
+import { setAutostart } from "./autostart.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -181,6 +182,11 @@ ipcMain.handle("shortcut:register", async (_e, accelerator: string) => {
 
 ipcMain.handle("shortcut:unregister", () => {
   globalShortcut.unregisterAll();
+});
+
+// Autostart on login
+ipcMain.handle("app:setAutostart", async (_e, enabled: boolean) => {
+  return setAutostart(enabled);
 });
 
 // ── App lifecycle ────────────────────────────────────────────────────────

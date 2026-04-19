@@ -18,6 +18,7 @@ interface CanarioAPI {
   getTheme: () => Promise<string>;
   setTheme: (theme: string) => Promise<void>;
   autoPaste: (text: string) => Promise<boolean>;
+  setAutostart: (enabled: boolean) => Promise<boolean>;
 }
 
 declare global {
@@ -68,7 +69,7 @@ export function createCanario(machine: AppMachine) {
   }
 
   // Toggle recording
-  async function toggleRecording() {
+  async function toggleRecording(): Promise<Record<string, unknown> | null> {
     const res = await command("toggle_recording");
     if (res?.ok) {
       const recording = (res.data as { recording?: boolean })?.recording;
@@ -79,6 +80,7 @@ export function createCanario(machine: AppMachine) {
         send({ type: "STOP_RECORDING" });
       }
     }
+    return res;
   }
 
   // Download model
@@ -172,6 +174,11 @@ export function createCanario(machine: AppMachine) {
   // Auto-paste
   async function autoPaste(text: string): Promise<boolean | undefined> {
     return api?.autoPaste(text);
+  }
+
+  // Autostart
+  async function setAutostart(enabled: boolean): Promise<boolean | undefined> {
+    return api?.setAutostart(enabled);
   }
 
   // ── Event listener ─────────────────────────────────────────────────
@@ -272,6 +279,7 @@ export function createCanario(machine: AppMachine) {
     getTheme,
     setTheme,
     autoPaste,
+    setAutostart,
   };
 }
 

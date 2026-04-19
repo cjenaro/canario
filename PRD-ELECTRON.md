@@ -1002,18 +1002,16 @@ The Rust sidecar binary (~15-20MB static) is bundled inside the Electron package
 
 **Exit criteria:** Can daily-drive the Electron app instead of the GTK app on Linux
 
-### Phase 2 — Onboarding + Polish
-**Goal:** First-run experience that delights
+### Phase 2 — Polish
+**Goal:** Make the existing UI feel refined and robust
 
-- [ ] Onboarding wizard (3 steps: model download → hotkey setup → first transcription)
-- [ ] Mic test widget in onboarding (live audio level)
-- [ ] Animations: overlay transitions, toggle switches, list items
-- [ ] Sound effects (sidecar's rodio on all platforms)
-- [ ] Autostart on login (macOS: LaunchAgent, Windows: registry, Linux: .desktop)
-- [ ] Error states with clear messages (no mic, no model, download failed)
-- [ ] Empty states with helpful copy
+- [x] Animations: overlay transitions, toggle switches, list items
+- [x] Sound effects (sidecar's rodio on all platforms)
+- [x] Autostart on login (macOS: LaunchAgent, Windows: registry, Linux: .desktop)
+- [x] Error states with clear messages (no mic, no model, download failed)
+- [x] Empty states with helpful copy
 
-**Exit criteria:** New user goes from install to first transcription in < 2 minutes
+**Exit criteria:** App feels polished — smooth animations, clear error handling, no rough edges
 
 ### Phase 3 — Cross-Platform
 **Goal:** Ship macOS and Windows builds
