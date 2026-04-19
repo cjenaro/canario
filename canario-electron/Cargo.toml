@@ -1,0 +1,13 @@
+[package]
+name = "canario-electron"
+version = "0.1.0"
+edition = "2021"
+description = "Sidecar binary for Canario Electron — JSON stdin/stdout bridge over canario-core"
+
+[dependencies]
+canario-core = { path = "../canario-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

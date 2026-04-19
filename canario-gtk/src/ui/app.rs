@@ -199,16 +199,16 @@ fn handle_event(
             canario.add_history(text, duration_secs, None);
         }
 
-        Event::Error(err) => {
+        Event::Error { message: err } => {
             tracing::error!("Error: {}", err);
         }
 
-        Event::AudioLevel(level) => {
+        Event::AudioLevel { level } => {
             RecordingIndicator::update_level(app, level);
         }
 
         // BUG-003: Model download progress — find by widget name
-        Event::ModelDownloadProgress(p) => {
+        Event::ModelDownloadProgress { progress: p } => {
             if let Some(win) = app
                 .windows()
                 .into_iter()
@@ -229,7 +229,7 @@ fn handle_event(
             }
         }
 
-        Event::ModelDownloadFailed(err) => {
+        Event::ModelDownloadFailed { error: err } => {
             tracing::error!("Model download failed: {}", err);
             if let Some(win) = app
                 .windows()

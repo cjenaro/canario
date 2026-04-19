@@ -70,7 +70,7 @@ fn cmd_download() -> anyhow::Result<()> {
     eprintln!("Downloading model...");
     loop {
         match rx.recv() {
-            Ok(canario_core::Event::ModelDownloadProgress(p)) => {
+            Ok(canario_core::Event::ModelDownloadProgress { progress: p }) => {
                 eprint!("\r⬇  Progress: {:.0}%", p * 100.0);
                 io::stderr().flush().ok();
             }
@@ -78,7 +78,7 @@ fn cmd_download() -> anyhow::Result<()> {
                 eprintln!("\n✅ Model download complete!");
                 return Ok(());
             }
-            Ok(canario_core::Event::ModelDownloadFailed(e)) => {
+            Ok(canario_core::Event::ModelDownloadFailed { error: e }) => {
                 eprintln!("\n❌ Model download failed: {}", e);
                 std::process::exit(1);
             }
@@ -208,11 +208,11 @@ fn cmd_mic(paste: bool, toggle: bool) -> anyhow::Result<()> {
                 Ok(canario_core::Event::RecordingStopped) => {
                     // Recording stopped, transcription may follow
                 }
-                Ok(canario_core::Event::Error(e)) => {
+                Ok(canario_core::Event::Error { message: e }) => {
                     eprintln!("❌ {}", e);
                     break;
                 }
-                Ok(canario_core::Event::AudioLevel(level)) => {
+                Ok(canario_core::Event::AudioLevel { level }) => {
                     // Show a simple level indicator
                     let bars = (level * 20.0) as usize;
                     eprint!("\r🎤 [{}{}]   ", "█".repeat(bars), "░".repeat(20 - bars));
@@ -256,7 +256,7 @@ fn drain_events(rx: &std::sync::mpsc::Receiver<canario_core::Event>, _canario: &
             canario_core::Event::RecordingStopped => {
                 eprintln!("⏹  Recording stopped");
             }
-            canario_core::Event::Error(e) => {
+            canario_core::Event::Error { message: e } => {
                 eprintln!("❌ {}", e);
             }
             _ => {}

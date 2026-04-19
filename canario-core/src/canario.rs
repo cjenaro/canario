@@ -133,9 +133,9 @@ impl Canario {
                 false
             }
         } else {
-            let _ = self.inner.event_tx.send(Event::Error(
-                "Model not downloaded. Open settings to download.".into(),
-            ));
+            let _ = self.inner.event_tx.send(Event::Error {
+                message: "Model not downloaded. Open settings to download.".into(),
+            });
             false
         }
     }
@@ -192,7 +192,7 @@ impl Canario {
             });
             match result {
                 Ok(()) => { let _ = tx.send(Event::ModelDownloadComplete); }
-                Err(e) => { let _ = tx.send(Event::ModelDownloadFailed(e.to_string())); }
+                Err(e) => { let _ = tx.send(Event::ModelDownloadFailed { error: e.to_string() }); }
             }
         });
 

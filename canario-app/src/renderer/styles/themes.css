@@ -1,0 +1,67 @@
+/* Dark theme (default) */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --surface-hover: #1e2d4a;
+  --border: #2a3a5c;
+  --text-primary: #e8e8f0;
+  --text-secondary: #8888a8;
+  --accent: #e94560;
+  --accent-hover: #ff6b81;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --error: #ef4444;
+  --recording-dot: #ef4444;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f8f9fa;
+  --surface: #ffffff;
+  --surface-hover: #f0f0f5;
+  --border: #d0d0e0;
+  --text-primary: #1a1a2e;
+  --text-secondary: #666680;
+  --accent: #d63050;
+  --accent-hover: #e94560;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --error: #dc2626;
+  --recording-dot: #dc2626;
+}
+
+/* System theme — inherits from OS preference when no data-theme is set */
+:root:not([data-theme]) {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --surface-hover: #1e2d4a;
+  --border: #2a3a5c;
+  --text-primary: #e8e8f0;
+  --text-secondary: #8888a8;
+  --accent: #e94560;
+  --accent-hover: #ff6b81;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --error: #ef4444;
+  --recording-dot: #ef4444;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f8f9fa;
+    --surface: #ffffff;
+    --surface-hover: #f0f0f5;
+    --border: #d0d0e0;
+    --text-primary: #1a1a2e;
+    --text-secondary: #666680;
+    --accent: #d63050;
+    --accent-hover: #e94560;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --error: #dc2626;
+    --recording-dot: #dc2626;
+  }
+}

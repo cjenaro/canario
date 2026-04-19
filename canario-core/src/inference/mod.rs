@@ -208,7 +208,7 @@ pub async fn download_model_with_progress(
         if dest.exists() {
             info!("{} already exists, skipping", file);
             completed += 1.0;
-            let _ = event_tx.send(crate::event::Event::ModelDownloadProgress(completed / total_files));
+            let _ = event_tx.send(crate::event::Event::ModelDownloadProgress { progress: completed / total_files });
             continue;
         }
 
@@ -238,7 +238,7 @@ pub async fn download_model_with_progress(
             if total_size > 0.0 {
                 let file_progress = downloaded / total_size;
                 let overall = (completed + file_progress) / total_files;
-                let _ = event_tx.send(crate::event::Event::ModelDownloadProgress(overall.min(0.99)));
+                let _ = event_tx.send(crate::event::Event::ModelDownloadProgress { progress: overall.min(0.99) });
             }
         }
 
@@ -248,7 +248,7 @@ pub async fn download_model_with_progress(
         info!("Downloaded {} ({:.1} MB)", file, size_mb);
 
         completed += 1.0;
-        let _ = event_tx.send(crate::event::Event::ModelDownloadProgress(completed / total_files));
+        let _ = event_tx.send(crate::event::Event::ModelDownloadProgress { progress: completed / total_files });
     }
 
     info!("Model download complete!");

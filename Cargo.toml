@@ -1,3 +1,3 @@
 [workspace]
-members = ["canario-core", "canario-gtk", "canario-cli"]
+members = ["canario-core", "canario-gtk", "canario-cli", "canario-electron"]
 resolver = "2"

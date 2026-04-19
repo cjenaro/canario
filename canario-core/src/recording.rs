@@ -57,7 +57,7 @@ pub fn start_recording(
         let result = recording_loop(model_dir, tx.clone(), stop_clone, &post_processor, sound_effects);
         if let Err(e) = &result {
             tracing::error!("Recording thread error: {}", e);
-            let _ = tx.send(Event::Error(format!("{}", e)));
+            let _ = tx.send(Event::Error { message: format!("{}", e) });
             let _ = tx.send(Event::RecordingStopped);
         }
         // Mark thread as no longer busy (whether success or failure)
@@ -143,7 +143,7 @@ fn recording_loop(
         drop(buf_snapshot);
 
         let level = (rms * 5.0).min(1.0) as f64;
-        let _ = tx.send(Event::AudioLevel(level));
+        let _ = tx.send(Event::AudioLevel { level });
 
         if log_timer.elapsed() >= std::time::Duration::from_secs(3) {
             tracing::info!(

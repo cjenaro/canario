@@ -3,7 +3,8 @@
 /// Frontends receive these via the `Receiver<Event>` returned by `Canario::new()`.
 /// All events are `Clone + Send` so they can be safely passed across threads.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "event")]
 pub enum Event {
     // ── Recording lifecycle ─────────────────────────────────────────
     /// Recording has started (mic is open, audio is being captured)
@@ -21,21 +22,31 @@ pub enum Event {
     },
 
     /// Recording/transcription error. Do NOT paste or store in history.
-    Error(String),
+    #[serde(rename = "Error")]
+    Error {
+        message: String,
+    },
 
     // ── Real-time feedback ──────────────────────────────────────────
     /// Audio level update during recording (0.0 = silence, 1.0 = clipping)
-    AudioLevel(f64),
+    AudioLevel {
+        level: f64,
+    },
 
     // ── Model management ────────────────────────────────────────────
     /// Model download progress (0.0 to 1.0)
-    ModelDownloadProgress(f64),
+    ModelDownloadProgress {
+        progress: f64,
+    },
 
     /// Model download completed successfully
     ModelDownloadComplete,
 
     /// Model download failed
-    ModelDownloadFailed(String),
+    #[serde(rename = "ModelDownloadFailed")]
+    ModelDownloadFailed {
+        error: String,
+    },
 
     // ── Hotkey ──────────────────────────────────────────────────────
     /// Global hotkey was triggered — frontend should toggle recording

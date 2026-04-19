@@ -11,3 +11,8 @@ packaging/flatpak/repo/
 
 # Debug
 canario-debug.log
+
+# Node
+canario-app/node_modules/
+canario-app/out/
+canario-app/dist/

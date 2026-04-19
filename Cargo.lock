@@ -292,6 +292,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "canario-electron"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canario-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "canario-gtk"
 version = "0.1.2"
 dependencies = [
