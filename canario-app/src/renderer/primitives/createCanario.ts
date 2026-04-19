@@ -20,6 +20,9 @@ interface CanarioAPI {
   autoPaste: (text: string) => Promise<boolean>;
   setAutostart: (enabled: boolean) => Promise<boolean>;
   updateConfigCache: (config: Record<string, unknown>) => Promise<void>;
+  getVersion: () => Promise<{ electron: string; sidecar: string | null; mismatch: boolean }>;
+  checkForUpdate: () => Promise<{ available: boolean; version?: string }>;
+  onUpdateAvailable: (callback: (info: { version: string }) => void) => () => void;
 }
 
 declare global {
@@ -185,6 +188,16 @@ export function createCanario(machine: AppMachine) {
     return api?.setAutostart(enabled);
   }
 
+  // Version info
+  async function getVersion() {
+    return api?.getVersion();
+  }
+
+  // Check for updates
+  async function checkForUpdate() {
+    return api?.checkForUpdate();
+  }
+
   // ── Event listener ─────────────────────────────────────────────────
 
   onMount(() => {
@@ -257,30 +270,32 @@ export function createCanario(machine: AppMachine) {
     });
   });
 
-  return {
-    command,
-    startRecording,
-    stopRecording,
-    toggleRecording,
-    downloadModel,
-    deleteModel,
-    getConfig,
-    updateConfig,
-    checkModel,
-    getHistory,
-    searchHistory,
-    deleteHistory,
-    clearHistory,
-    startHotkey,
-    stopHotkey,
-    restartHotkey,
-    registerShortcut,
-    getPlatform,
-    getTheme,
-    setTheme,
-    autoPaste,
-    setAutostart,
-  };
+    return {
+      command,
+      startRecording,
+      stopRecording,
+      toggleRecording,
+      downloadModel,
+      deleteModel,
+      getConfig,
+      updateConfig,
+      checkModel,
+      getHistory,
+      searchHistory,
+      deleteHistory,
+      clearHistory,
+      startHotkey,
+      stopHotkey,
+      restartHotkey,
+      registerShortcut,
+      getPlatform,
+      getTheme,
+      setTheme,
+      autoPaste,
+      setAutostart,
+      getVersion,
+      checkForUpdate,
+    };
 }
 
 export type CanarioBridge = ReturnType<typeof createCanario>;

@@ -43,6 +43,28 @@ export function AppPage() {
   // Track whether the initial model check is done
   const [initialModelCheck, setInitialModelCheck] = createSignal(false);
 
+  // About / Updates
+  const [appVersion, setAppVersion] = createSignal("...");
+  const [updateChecking, setUpdateChecking] = createSignal(false);
+  const [updateAvailable, setUpdateAvailable] = createSignal(false);
+  const [updateVersion, setUpdateVersion] = createSignal("");
+
+  async function handleCheckUpdate() {
+    setUpdateChecking(true);
+    try {
+      const result = await canario.checkForUpdate();
+      if (result?.available) {
+        setUpdateAvailable(true);
+        setUpdateVersion(result.version || "?");
+      } else {
+        showToast("Canario is up to date", "success", 3000);
+      }
+    } catch {
+      showToast("Could not check for updates", "error");
+    }
+    setUpdateChecking(false);
+  }
+
   async function checkModelDownloaded(modelId: string): Promise<boolean> {
     await canario.updateConfig({ model: modelId });
     const res = await canario.command("is_model_downloaded");
@@ -143,6 +165,10 @@ export function AppPage() {
 
       // 4. Auto-load history
       await loadHistory();
+
+      // 5. Get version info
+      const ver = await canario.getVersion();
+      if (ver) setAppVersion(ver.electron + (ver.sidecar ? ` (sidecar ${ver.sidecar})` : ""));
     } catch (err) {
       console.error("[AppPage] init error:", err);
       showToast("Failed to initialize. Check that canario-electron sidecar is running.", "error", 8000);
@@ -596,6 +622,44 @@ export function AppPage() {
                   </button>
                 )}
               </For>
+            </div>
+          </section>
+
+          {/* ── About & Updates ────────────────────────────────────── */}
+          <section class="rounded-xl border p-5" style={sectionStyle}>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>About</h2>
+            <div class="flex flex-col gap-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Version</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{appVersion()}</p>
+                </div>
+                <Show when={updateChecking()} fallback={
+                  <button
+                    class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:opacity-80"
+                    style={{ "background-color": "var(--bg)", "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
+                    onClick={handleCheckUpdate}
+                  >
+                    Check for Updates
+                  </button>
+                }>
+                  <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin" style={{ "border-color": "var(--accent)", "border-top-color": "transparent" }} />
+                    <span class="text-xs" style={{ color: "var(--text-secondary)" }}>Checking...</span>
+                  </div>
+                </Show>
+              </div>
+              <Show when={updateAvailable()}>
+                <div class="rounded-lg p-3 flex items-start gap-2" style={{ "background-color": "rgba(74, 222, 128, 0.06)", border: "1px solid rgba(74, 222, 128, 0.2)" }}>
+                  <span class="text-sm leading-none mt-0.5">🎉</span>
+                  <div class="flex-1">
+                    <p class="text-sm font-medium" style={{ color: "var(--success)" }}>Update available: v{updateVersion()}</p>
+                    <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                      Restart Canario to install the latest version.
+                    </p>
+                  </div>
+                </div>
+              </Show>
             </div>
           </section>
 

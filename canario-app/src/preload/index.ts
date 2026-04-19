@@ -47,6 +47,19 @@ const api = {
 
   // Update config cache in main process (so auto-paste flag stays in sync)
   updateConfigCache: (config: Record<string, unknown>) => ipcRenderer.invoke("config:update-cache", config),
+
+  // Version info
+  getVersion: () => ipcRenderer.invoke("app:version"),
+
+  // Manual update check
+  checkForUpdate: () => ipcRenderer.invoke("app:checkUpdate"),
+
+  // Listen for update-downloaded event from main process
+  onUpdateAvailable: (callback: (info: { version: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, info: { version: string }) => callback(info);
+    ipcRenderer.on("update:available", handler);
+    return () => ipcRenderer.removeListener("update:available", handler);
+  },
 };
 
 export type CanarioAPI = typeof api;

@@ -132,6 +132,7 @@ jobs:
             canario-app/dist/*.deb
             canario-app/dist/*.dmg
             canario-app/dist/*.exe
+            canario-app/dist/*.blockmap
             canario-app/dist/latest*.yml
           retention-days: 30
 
@@ -158,6 +159,14 @@ jobs:
           files: |
             artifacts/canario-linux/*.AppImage
             artifacts/canario-linux/*.deb
+            artifacts/canario-linux/*.blockmap
+            artifacts/canario-linux/latest*.yml
             artifacts/canario-mac-arm64/*.dmg
+            artifacts/canario-mac-arm64/*.blockmap
+            artifacts/canario-mac-arm64/latest*.yml
             artifacts/canario-mac-x64/*.dmg
+            artifacts/canario-mac-x64/*.blockmap
+            artifacts/canario-mac-x64/latest*.yml
             artifacts/canario-win/*.exe
+            artifacts/canario-win/*.blockmap
+            artifacts/canario-win/latest*.yml

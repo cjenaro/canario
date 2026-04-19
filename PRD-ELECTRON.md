@@ -1047,12 +1047,11 @@ The Rust sidecar binary (~15-20MB static) is bundled inside the Electron package
 ### Phase 4 — Distribution & Auto-Update
 **Goal:** Sustainable release pipeline
 
-- [ ] Auto-update via electron-updater + GitHub Releases
-- [ ] Version checking (sidecar + Electron must match)
-- [ ] Update notifications (non-intrusive tray badge)
-- [ ] GitHub Release automation on tag push
-- [ ] Download page / landing page (can be a simple README section)
-- [ ] Analytics opt-in (basic: daily active, transcription count, no text content)
+- [x] Auto-update via electron-updater + GitHub Releases
+- [x] Version checking (sidecar + Electron must match)
+- [x] Update notifications (non-intrusive system notification + in-app)
+- [x] GitHub Release automation on tag push
+- [x] Download page / landing page (README section)
 
 **Exit criteria:** Push a git tag → CI builds → release published → users auto-update
 
@@ -1083,7 +1082,7 @@ The Rust sidecar binary (~15-20MB static) is bundled inside the Electron package
 | Total idle memory | < 80MB | Process monitor |
 | User switches from GTK to Electron | > 50% of Linux users within 3 months | Download counts |
 | Crash rate | < 0.1% of sessions | Sidecar exit codes |
-| Settings adjusted after first week | < 30% of users | Config change events (if analytics added) |
+| Settings adjusted after first week | < 30% of users | Config change events |
 
 ---
 

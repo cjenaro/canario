@@ -6,6 +6,8 @@ import { startSidecar, stopSidecar, sendCommand, onSidecarEvent } from "./sideca
 import { loadWindowState, saveWindowState, trackWindowState } from "./windowState.js";
 import { setAutostart } from "./autostart.js";
 import { autoPasteText } from "./autoPaste.js";
+import { initUpdater, cleanupUpdater, checkForUpdatesManual } from "./updater.js";
+import { checkVersion, getVersionInfo } from "./version.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -179,11 +181,22 @@ ipcMain.handle("app:setAutostart", async (_e, enabled: boolean) => {
   return setAutostart(enabled);
 });
 
+// Version info
+ipcMain.handle("app:version", () => getVersionInfo());
+
+// Manual update check
+ipcMain.handle("app:checkUpdate", async () => {
+  return checkForUpdatesManual();
+});
+
 // ── App lifecycle ────────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
   // Start sidecar
   await startSidecar();
+
+  // Check sidecar version matches Electron
+  await checkVersion();
 
   // Forward sidecar events to all renderer windows
   onSidecarEvent((event) => {
@@ -217,6 +230,9 @@ app.whenReady().then(async () => {
   createMainWindow();
   createOverlayWindow();
   setSettingsWindow(mainWindow);
+
+  // Initialize auto-updater
+  initUpdater(mainWindow);
 
   // macOS: hide from Dock — app lives in system tray
   if (process.platform === "darwin") {
@@ -277,6 +293,7 @@ let isQuitting = false;
 function forceQuit() {
   if (isQuitting) return;
   isQuitting = true;
+  cleanupUpdater();
   stopSidecar();
   globalShortcut.unregisterAll();
   app.exit(0);
