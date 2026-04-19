@@ -19,6 +19,7 @@ interface CanarioAPI {
   setTheme: (theme: string) => Promise<void>;
   autoPaste: (text: string) => Promise<boolean>;
   setAutostart: (enabled: boolean) => Promise<boolean>;
+  updateConfigCache: (config: Record<string, unknown>) => Promise<void>;
 }
 
 declare global {
@@ -108,6 +109,8 @@ export function createCanario(machine: AppMachine) {
   // Update config
   async function updateConfig(config: Record<string, unknown>) {
     await command("update_config", { config });
+    // Sync config cache with main process (so auto-paste flag stays current)
+    api?.updateConfigCache(config);
   }
 
   // Check if model is downloaded

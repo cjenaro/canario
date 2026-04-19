@@ -725,10 +725,10 @@ User releases hotkey
 |----------|--------|
 | **Linux X11** | `xdotool type` (sidecar) |
 | **Linux Wayland** | `wtype` / `ydotool` (sidecar) |
-| **macOS** | Clipboard + simulated Cmd+V via Electron's `robotjs` or `nutjs` |
-| **Windows** | Clipboard + simulated Ctrl+V via Electron's `robotjs` or `nutjs` |
+| **macOS** | Clipboard + simulated Cmd+V via `@jitsi/robotjs` (Electron main process) |
+| **Windows** | Clipboard + simulated Ctrl+V via `@jitsi/robotjs` (Electron main process) |
 
-**Key difference:** On macOS/Windows, auto-paste is handled in the Electron layer, not the sidecar. The sidecar still copies to clipboard (portable), but the "type into focused app" part uses platform-specific Electron APIs.
+**Key difference:** On macOS/Windows, auto-paste is handled in the Electron layer using `@jitsi/robotjs` (Jitsi-maintained native addon). The sidecar still copies to clipboard (portable), but the "type into focused app" part uses robotjs. On macOS, Accessibility permissions are required — the app prompts the user on first paste attempt.
 
 ### 7.3 Sound Effects
 
@@ -1027,13 +1027,20 @@ The Rust sidecar binary (~15-20MB static) is bundled inside the Electron package
 ### Phase 3 — Cross-Platform
 **Goal:** Ship macOS and Windows builds
 
-- [ ] Cross-compile Rust sidecar for macOS (arm64 + x64) and Windows (x64)
-- [ ] macOS-specific: global shortcut via Electron API, paste via AppleScript/robotjs
-- [ ] Windows-specific: global shortcut via Electron API, paste via robotjs
+- [x] Cross-compile Rust sidecar for macOS (arm64 + x64) and Windows (x64)
+- [x] macOS-specific: global shortcut via Electron API, paste via robotjs
+- [x] Windows-specific: global shortcut via Electron API, paste via robotjs
 - [ ] Code signing (macOS: Apple Developer ID, Windows: certificate)
 - [ ] Notarization (macOS)
-- [ ] electron-builder configs for .dmg, .exe, AppImage
-- [ ] GitHub Actions CI: build + test on all platforms
+- [x] electron-builder configs for .dmg, .exe, AppImage
+- [x] GitHub Actions CI: build + test on all platforms
+
+**Notes:**
+- Code signing and notarization deferred — unsigned builds work with manual approval (right-click → Open on macOS, More info → Run anyway on Windows)
+- Auto-paste on macOS/Windows uses `@jitsi/robotjs` (Jitsi-maintained native addon). On first paste attempt without Accessibility permissions, the user is prompted.
+- macOS: app hides from Dock (tray-only). Shows in Dock when Settings window is opened.
+- Sidecar path resolution handles Windows `.exe` extension automatically.
+- Config cache in main process keeps `auto_paste` flag in sync between renderer and main process for cross-platform auto-paste.
 
 **Exit criteria:** Downloadable .dmg and .exe that work out of the box
 

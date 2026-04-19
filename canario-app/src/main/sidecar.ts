@@ -9,13 +9,16 @@ let buffer = "";
 
 function getSidecarPath(): string {
   const isDev = !app.isPackaged;
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const binName = `canario-electron${ext}`;
+
   if (isDev) {
     // In dev, use the debug-built binary from the Rust target dir
     // out/main/ → canario-app/ → canario/ → target/debug/
-    return join(__dirname, "../../../target/debug/canario-electron");
+    return join(__dirname, `../../../target/debug/${binName}`);
   }
   // In production, bundled alongside the app
-  return join(process.resourcesPath, "sidecar", "canario-electron");
+  return join(process.resourcesPath, "sidecar", binName);
 }
 
 function emitToListeners(event: Record<string, unknown>) {

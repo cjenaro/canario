@@ -9,7 +9,7 @@
 use std::io::{BufRead, Write};
 
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 // ── Command types ────────────────────────────────────────────────────────────
 
@@ -124,16 +124,10 @@ fn main() -> anyhow::Result<()> {
     std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             // Special handling: auto-add transcription to history
+            // Note: auto-paste is handled by the Electron main process, not the sidecar.
+            // The sidecar only adds to history here.
             if let canario_core::Event::TranscriptionReady { ref text, duration_secs } = event {
                 event_tx_canario.add_history(text.clone(), duration_secs, None);
-                // Auto-paste if configured
-                let config = event_tx_canario.config();
-                if config.auto_paste {
-                    match canario_core::paste_text(text) {
-                        Ok(_) => info!("Auto-pasted transcription"),
-                        Err(e) => warn!("Auto-paste failed: {}", e),
-                    }
-                }
             }
             let json = serialize_event(&event);
             let mut stdout = std::io::stdout().lock();

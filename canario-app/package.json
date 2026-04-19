@@ -13,12 +13,16 @@
   "author": "Jenaro",
   "license": "MIT",
   "type": "module",
+  "dependencies": {
+    "@jitsi/robotjs": "^0.6.22"
+  },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^25.6.0",
     "concurrently": "^9.2.1",
     "electron": "^41.2.1",
-    "electron-vite": "^3.2.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^5.0.0",
     "solid-js": "^1.9.12",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.3",

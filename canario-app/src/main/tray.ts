@@ -67,6 +67,10 @@ export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
       click: () => {
         settingsWindow?.show();
         settingsWindow?.focus();
+        // macOS: show in Dock when settings opens from tray
+        if (process.platform === "darwin") {
+          app.dock?.show();
+        }
       },
     },
     { type: "separator" },

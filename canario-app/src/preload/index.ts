@@ -44,6 +44,9 @@ const api = {
 
   // Autostart on login
   setAutostart: (enabled: boolean) => ipcRenderer.invoke("app:setAutostart", enabled),
+
+  // Update config cache in main process (so auto-paste flag stays in sync)
+  updateConfigCache: (config: Record<string, unknown>) => ipcRenderer.invoke("config:update-cache", config),
 };
 
 export type CanarioAPI = typeof api;

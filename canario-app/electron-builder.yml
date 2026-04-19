@@ -1,0 +1,133 @@
+# Canario Electron — electron-builder configuration
+# Phase 3: Cross-platform packaging (no code signing)
+
+appId: com.canario.app
+productName: Canario
+copyright: Copyright © 2026 Jenaro
+
+# Output directory for built artifacts
+directories:
+  output: dist
+  buildResources: resources
+
+# Bundle the Rust sidecar binary
+# In CI, the compiled binary is placed at canario-app/sidecar/canario-electron[.exe]
+extraResources:
+  - from: sidecar
+    to: sidecar
+    filter:
+      - "**/*"
+
+# Files to include in the app
+files:
+  - out/**/*
+  - node_modules/**/*
+  - resources/**/*
+  - "!node_modules/**/test/**"
+  - "!node_modules/**/*.md"
+  - "!node_modules/**/*.ts"
+
+# ── Linux ────────────────────────────────────────────────────────────────
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  category: Utility
+  icon: resources/icon.png
+  desktop:
+    Name: Canario
+    Comment: Voice-to-text
+    Categories: Utility
+    StartupWMClass: canario
+    SingleMainWindow: true
+
+# AppImage-specific settings
+appImage:
+  license: LICENSE
+
+# deb-specific settings
+deb:
+  depends:
+    - libasound2
+    - libatk1.0-0
+    - libc6
+    - libcairo2
+    - libcups2
+    - libdbus-1-3
+    - libexpat1
+    - libfontconfig1
+    - libgcc1
+    - libglib2.0-0
+    - libgtk-3-0
+    - libnspr4
+    - libnss3
+    - libpango-1.0-0
+    - libpangocairo-1.0-0
+    - libstdc++6
+    - libx11-6
+    - libxcomposite1
+    - libxcursor1
+    - libxdamage1
+    - libxext6
+    - libxfixes3
+    - libxi6
+    - libxrandr2
+    - libxrender1
+    - libxss1
+    - libxtst6
+
+# ── macOS ────────────────────────────────────────────────────────────────
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  category: public.app-category.utilities
+  icon: resources/icon.png
+  # No code signing
+  identity: null
+  # Hardened runtime is needed even without signing for some permissions
+  hardenedRuntime: false
+  # Minimum macOS version
+  minimumSystemVersion: "10.15.0"
+
+dmg:
+  title: "${productName} ${version}"
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# ── Windows ──────────────────────────────────────────────────────────────
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.png
+  # No code signing
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: "${productName}-Setup-${version}.${ext}"
+  shortcutName: Canario
+  uninstallDisplayName: Canario
+
+# ── Publish ──────────────────────────────────────────────────────────────
+# GitHub Releases for auto-update (Phase 4)
+publish:
+  provider: github
+  owner: jenaro
+  repo: canario
+  # No token needed for public repos

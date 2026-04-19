@@ -5,6 +5,7 @@ import { createTray, setSettingsWindow, updateTrayMenu } from "./tray.js";
 import { startSidecar, stopSidecar, sendCommand, onSidecarEvent } from "./sidecar.js";
 import { loadWindowState, saveWindowState, trackWindowState } from "./windowState.js";
 import { setAutostart } from "./autostart.js";
+import { autoPasteText } from "./autoPaste.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -45,6 +46,10 @@ function createMainWindow() {
     e.preventDefault();
     saveWindowState(mainWindow!);
     mainWindow?.hide();
+    // macOS: hide from Dock when settings window closes
+    if (process.platform === "darwin") {
+      app.dock?.hide();
+    }
   });
 
   if (isDev) {
@@ -108,6 +113,10 @@ ipcMain.handle("overlay:hide", () => {
 ipcMain.handle("window:showSettings", () => {
   mainWindow?.show();
   mainWindow?.focus();
+  // macOS: show in Dock when settings window opens
+  if (process.platform === "darwin") {
+    app.dock?.show();
+  }
 });
 
 ipcMain.handle("window:hideSettings", () => {
@@ -144,19 +153,7 @@ ipcMain.handle("theme:set", (_e, theme: string) => {
 
 // Auto-paste: copy text to clipboard + simulate Ctrl/Cmd+V
 ipcMain.handle("auto-paste", async (_e, text: string) => {
-  const { clipboard, BrowserWindow } = require("electron");
-  clipboard.writeText(text);
-
-  // Small delay to ensure clipboard is set before paste
-  await new Promise((r) => setTimeout(r, 50));
-
-  // On Linux, the sidecar handles auto-paste via xdotool/wtype
-  if (process.platform === "linux") return true;
-
-  // On macOS/Windows, we'd need robotjs or similar to simulate Cmd+V
-  // For now, clipboard copy is sufficient — user can Ctrl+V manually
-  // TODO: Phase 3 — integrate robotjs/nutjs for auto-type on macOS/Windows
-  return true;
+  return autoPasteText(text);
 });
 
 // Global shortcut for macOS/Windows
@@ -199,13 +196,32 @@ app.whenReady().then(async () => {
       updateTrayState("idle");
     }
 
+    // Auto-paste (all platforms: Linux via xdotool ctrl+v, macOS/Windows via robotjs)
+    // The sidecar no longer auto-pastes — Electron handles it for better reliability.
+    if (event.event === "TranscriptionReady" && event.text) {
+      const config = cachedConfig;
+      if (config?.auto_paste) {
+        autoPasteText(event.text as string).catch((err) => {
+          console.error("[main] Auto-paste failed:", err);
+        });
+      }
+    }
+
     mainWindow?.webContents.send("sidecar:event", event);
     overlayWindow?.webContents.send("sidecar:event", event);
   });
 
+  // Fetch config from sidecar (for auto-paste flag, etc.)
+  fetchConfig();
+
   createMainWindow();
   createOverlayWindow();
   setSettingsWindow(mainWindow);
+
+  // macOS: hide from Dock — app lives in system tray
+  if (process.platform === "darwin") {
+    app.dock?.hide();
+  }
 
   // Create tray (needs windows to exist)
   createTray();
@@ -225,6 +241,25 @@ app.on("window-all-closed", () => {});
 app.on("will-quit", () => {
   stopSidecar();
   globalShortcut.unregisterAll();
+});
+
+// ── Config cache ────────────────────────────────────────────────────────
+// Cache sidecar config so the main process can check auto_paste, etc.
+let cachedConfig: Record<string, unknown> | null = null;
+
+async function fetchConfig() {
+  try {
+    const res = await sendCommand({ id: "init-config", cmd: "get_config" });
+    if (res?.ok && res.data) {
+      cachedConfig = res.data as Record<string, unknown>;
+    }
+  } catch {
+    // Config fetch is non-critical
+  }
+}
+
+ipcMain.handle("config:update-cache", (_e, config: Record<string, unknown>) => {
+  cachedConfig = config;
 });
 
 // Tray state updates from sidecar events
