@@ -403,13 +403,13 @@ canario/
 │   │   │   └── createHistory.ts   # history queries
 │   │   ├── components/
 │   │   │   ├── ui/                # solid-ui base components (Kobalte + Tailwind)
-│   │   │   ├── RecordingOverlay.tsx
-│   │   │   ├── AudioLevel.tsx     # animated level meter
-│   │   │   ├── Waveform.tsx       # real-time audio visualization
-│   │   │   └── HotkeyCapture.tsx  # keyboard capture widget
+│   │   │   ├── HotkeyCapture.tsx  # keyboard capture widget
+│   │   │   ├── Toggle.tsx         # toggle switch component
+│   │   │   ├── WordRemapping.tsx  # word remapping rules editor
+│   │   │   └── Toast.tsx          # toast notification system
 │   │   ├── pages/
-│   │   │   ├── Onboarding.tsx     # first-launch setup wizard
-│   │   │   ├── Settings.tsx       # main settings page
+│   │   │   ├── OverlayPage.tsx   # recording overlay (self-contained, direct sidecar events)
+│   │   │   ├── AppPage.tsx       # main settings page
 │   │   │   ├── History.tsx        # transcription history browser
 │   │   │   └── Popup.tsx          # quick-action popup (triggered by hotkey)
 │   │   ├── lib/
@@ -526,34 +526,40 @@ The app lives in the system tray. No windows open unless the user asks for them.
 
 ### 5.3 Recording Overlay
 
-The signature visual moment. A small, elegant overlay that appears the instant recording starts.
+The signature visual moment. A compact pill-shaped indicator that appears the instant recording starts, floating at the top-center of the screen.
 
 ```
-┌────────────────────────────────┐
-│  ● Recording                   │
-│  ▓▓▓▓▓▓▓▓▓▓░░░░░░░░░  0.7    │
-│  0:03                          │
-└────────────────────────────────┘
+         ┌────────────────────────────┐
+         │ ● ▎▌█▌▎  0:03            │
+         └────────────────────────────┘
 ```
 
 **Spec:**
-- **Size:** ~220×60px, positioned top-center of screen (configurable)
-- **Appearance:** rounded corners, subtle backdrop-blur, semi-transparent dark background
+- **Shape:** Compact pill (`rounded-full`), ~180×32px
+- **Position:** Top-center of screen, 10–12px from top edge
+- **Appearance:** rounded-full pill, semi-transparent dark background (`rgba(26, 26, 46, 0.92)`), backdrop-blur, accent-colored border
 - **Always on top** — `alwaysOnTop: true, focusable: false`
-- **Content:**
+- **Click-through** — `setIgnoreMouseEvents(true)` so the overlay doesn't block windows below
+- **Content (while recording):**
   - Pulsing red dot (CSS animation, 1.5s cycle)
-  - "Recording" label in system font
-  - Audio level meter — smooth gradient bar, updated at 20fps
-  - Elapsed timer (MM:SS)
-- **Transition in:** fade + slide-down from top (150ms ease-out)
-- **Transition out:** fade (100ms) — happens when transcription starts
-- **State change to "Transcribing…":** red dot → spinning indicator, label changes, level bar freezes
-- **Disappears** after transcription completes or on error
+  - 5-bar waveform visualization driven by audio levels — bars grow/brighten when audio is detected, stay small/dim when silent (gives immediate visual feedback that audio is being captured)
+  - Elapsed timer (M:SS)
+- **Transition in:** slide-down + fade (150ms ease-out)
+- **Transition out:** disappears instantly when the user releases the hotkey (no delay)
+- **Disappears** on `RecordingStopped`, `TranscriptionReady`, or `Error` — no lingering
+
+**Implementation notes:**
+- The overlay is a **full-screen transparent BrowserWindow** (`width × height` of the display), anchored at `(0, 0)`. CSS positions the pill at `fixed inset-0 flex items-start justify-center pt-3`. This approach works on all platforms including Linux/Wayland where `setPosition()` is unreliable.
+- The overlay page (`OverlayPage.tsx`) is **self-contained** — it listens to sidecar events directly via the preload API and manages its own local state. It does **not** use the global state machine (which has a `modelReady` guard that would block transitions in the overlay's fresh context).
+- `setIgnoreMouseEvents(true)` on the overlay window ensures clicks pass through to windows below.
+- Audio level is smoothed with exponential moving average (`0.6/0.4` blend) to avoid jitter.
+- Waveform bars animate via `requestAnimationFrame` for smooth 60fps updates independent of IPC event rate.
 
 **Performance constraints:**
 - Window must appear within **50ms** of `RecordingStarted` event
-- Audio level updates must not drop frames — use `requestAnimationFrame` for the bar, decouple from IPC event rate
+- Audio level updates must not drop frames — use `requestAnimationFrame` for the waveform bars, decouple from IPC event rate
 - Window creation: **pre-create** the overlay window on app start, hide it. Show/hide is near-instant. Don't create on demand.
+- Overlay hides instantly on hotkey release — `toggleRecording()` calls `api.hideOverlay()` immediately, does not wait for sidecar's `RecordingStopped` event.
 
 ### 5.4 Settings Window
 
@@ -673,7 +679,9 @@ Searchable list of past transcriptions.
 ### 6.2 Strategies
 
 - **Pre-create overlay window** on app start, keep hidden. Show/hide is ~5ms vs ~200ms for creation.
-- **Debounce audio levels** — sidecar sends at 20Hz (50ms interval), renderer batches with `requestAnimationFrame`.
+- **Full-screen transparent overlay** — the overlay window covers the entire display. CSS handles pill positioning at top-center. This avoids `setPosition()` issues on Linux/Wayland where the window manager ignores window placement. `setIgnoreMouseEvents(true)` ensures the overlay doesn't intercept clicks.
+- **Smooth audio levels** — sidecar sends at 20Hz (50ms interval), renderer smooths with exponential moving average and animates waveform bars via `requestAnimationFrame`.
+- **Instant overlay hide** — `toggleRecording()` calls `hideOverlay()` immediately when recording stops, without waiting for the sidecar's asynchronous `RecordingStopped` event.
 - **Lazy-load settings/history windows** — don't create until first opened, then keep alive (hide, don't destroy).
 - **Vite for renderer** — fast HMR in dev, tree-shaken production build.
 - **No heavy JS in main process** — main process only does IPC relay and window management. All rendering in renderer.
@@ -785,9 +793,10 @@ Custom components on top:
 | Element | Animation | Duration | Easing |
 |---------|-----------|----------|--------|
 | Recording overlay appear | slide-down + fade | 150ms | ease-out |
-| Recording overlay disappear | fade | 100ms | ease-in |
+| Recording overlay disappear | instant (no animation) | 0ms | — |
 | Recording dot | pulse (scale 0.9→1.1, opacity 0.7→1.0) | 1.5s loop | ease-in-out |
-| Audio level bar | width transition | 50ms | linear |
+| Waveform bars | height + color transition | 80ms | ease-out |
+| Audio glow | box-shadow pulse | 200ms | ease |
 | Toggle switch | slide + color change | 200ms | ease-in-out |
 | History item delete | slide-left + fade | 200ms | ease-in |
 | Window open | fade + scale(0.95→1.0) | 150ms | ease-out |
@@ -998,6 +1007,8 @@ The Rust sidecar binary (~15-20MB static) is bundled inside the Electron package
 - [x] Window state persistence (remember position/size)
 - [x] Orphan process prevention (PPID watchdog + SIGTERM handler)
 - [x] Recording overlay positioning (top-center, recalculated on show)
+- [x] Recording overlay redesign: compact pill shape with 5-bar waveform audio indicator, full-screen transparent window for Wayland compat, click-through, instant hide on release
+- [x] Overlay self-contained event listener (no state machine dependency — avoids modelReady guard blocking transitions)
 - [x] Sound effects integration (handled by sidecar via canario-core rodio; toggle in settings)
 
 **Exit criteria:** Can daily-drive the Electron app instead of the GTK app on Linux

@@ -78,6 +78,7 @@ export function createCanario(machine: AppMachine) {
         api?.showOverlay();
       } else {
         send({ type: "STOP_RECORDING" });
+        api?.hideOverlay();
       }
     }
     return res;
@@ -198,6 +199,7 @@ export function createCanario(machine: AppMachine) {
 
         case "RecordingStopped":
           send({ type: "RECORDING_STOPPED" });
+          api.hideOverlay();
           break;
 
         case "TranscriptionReady":
@@ -206,12 +208,7 @@ export function createCanario(machine: AppMachine) {
             lastDuration: event.duration_secs as number,
           });
           send({ type: "TRANSCRIPTION_READY" });
-          // Hide overlay after a brief moment
-          setTimeout(() => {
-            if (state().status === "idle") {
-              api.hideOverlay();
-            }
-          }, 500);
+          api.hideOverlay();
           break;
 
         case "AudioLevel":

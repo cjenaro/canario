@@ -54,22 +54,13 @@ function createMainWindow() {
   }
 }
 
-function getOverlayPosition(): { x: number; y: number } {
-  const display = screen.getPrimaryDisplay();
-  const { width } = display.workAreaSize;
-  // Top-center, with some padding
-  return {
-    x: Math.round(width / 2 - 130),
-    y: 20,
-  };
-}
-
 function createOverlayWindow() {
-  const pos = getOverlayPosition();
+  const display = screen.getPrimaryDisplay();
+  const { width, height } = display.workAreaSize;
 
   overlayWindow = new BrowserWindow({
-    width: 260,
-    height: 64,
+    width: width,
+    height: height,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -77,14 +68,17 @@ function createOverlayWindow() {
     skipTaskbar: true,
     resizable: false,
     show: false,
-    x: pos.x,
-    y: pos.y,
+    x: 0,
+    y: 0,
     webPreferences: {
       preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  // Click-through so the overlay doesn't block interaction with windows below
+  overlayWindow.setIgnoreMouseEvents(true);
 
   if (isDev) {
     overlayWindow.loadURL("http://localhost:5173/#overlay");
@@ -102,8 +96,7 @@ ipcMain.handle("sidecar:command", async (_e, cmd: Record<string, unknown>) => {
 
 // Show/hide overlay
 ipcMain.handle("overlay:show", () => {
-  const pos = getOverlayPosition();
-  overlayWindow?.setPosition(pos.x, pos.y);
+  // Full-screen overlay — position doesn't matter, CSS handles placement
   overlayWindow?.showInactive();
 });
 
