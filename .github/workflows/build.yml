@@ -4,101 +4,58 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version override (optional)"
-        required: false
 
 permissions:
   contents: write
 
 jobs:
-  # ── Build Rust sidecar ───────────────────────────────────────────────
+  # ── Build Rust sidecar (Linux only) ──────────────────────────────────
+  # Note: canario-core depends on evdev, x11rb, xdotool — Linux-only for now.
+  # macOS/Windows support requires adding #[cfg(target_os)] guards in core.
   build-sidecar:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            platform: linux
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: mac-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            platform: mac-x64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: sudo apt-get install -y libasound2-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
-        with:
-          target-dir: target
 
       - name: Build sidecar
-        run: cargo build --release --bin canario-electron --target ${{ matrix.target }}
+        run: cargo build --release --bin canario-electron
 
       - name: Prepare sidecar directory
-        shell: bash
         run: |
           mkdir -p canario-app/sidecar
-          if [ "${{ matrix.platform }}" = "win" ]; then
-            cp target/${{ matrix.target }}/release/canario-electron.exe canario-app/sidecar/
-          else
-            cp target/${{ matrix.target }}/release/canario-electron canario-app/sidecar/
-            chmod +x canario-app/sidecar/canario-electron
-          fi
+          cp target/release/canario-electron canario-app/sidecar/
+          chmod +x canario-app/sidecar/canario-electron
 
       - name: Upload sidecar artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sidecar-${{ matrix.platform }}
+          name: sidecar-linux
           path: canario-app/sidecar/
           retention-days: 1
 
-  # ── Build & package Electron app ─────────────────────────────────────
+  # ── Build & package Electron app (Linux only) ────────────────────────
   build-electron:
     needs: build-sidecar
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            builder_flag: --linux
-          - os: macos-latest
-            platform: mac-arm64
-            builder_flag: --mac
-          - os: macos-13
-            platform: mac-x64
-            builder_flag: --mac
-          - os: windows-latest
-            platform: win
-            builder_flag: --win
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Download sidecar
         uses: actions/download-artifact@v4
         with:
-          name: sidecar-${{ matrix.platform }}
+          name: sidecar-linux
           path: canario-app/sidecar/
 
-      - name: Make sidecar executable (Unix)
-        if: runner.os != 'Windows'
+      - name: Make sidecar executable
         run: chmod +x canario-app/sidecar/canario-electron
 
       - name: Setup Node.js
@@ -118,20 +75,17 @@ jobs:
 
       - name: Package (electron-builder)
         working-directory: canario-app
-        run: npx electron-builder ${{ matrix.builder_flag }} --publish never
+        run: npx electron-builder --linux --publish never
         env:
-          # Disable code signing on all platforms
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: canario-${{ matrix.platform }}
+          name: canario-linux
           path: |
             canario-app/dist/*.AppImage
             canario-app/dist/*.deb
-            canario-app/dist/*.dmg
-            canario-app/dist/*.exe
             canario-app/dist/*.blockmap
             canario-app/dist/latest*.yml
           retention-days: 30
@@ -161,12 +115,3 @@ jobs:
             artifacts/canario-linux/*.deb
             artifacts/canario-linux/*.blockmap
             artifacts/canario-linux/latest*.yml
-            artifacts/canario-mac-arm64/*.dmg
-            artifacts/canario-mac-arm64/*.blockmap
-            artifacts/canario-mac-arm64/latest*.yml
-            artifacts/canario-mac-x64/*.dmg
-            artifacts/canario-mac-x64/*.blockmap
-            artifacts/canario-mac-x64/latest*.yml
-            artifacts/canario-win/*.exe
-            artifacts/canario-win/*.blockmap
-            artifacts/canario-win/latest*.yml

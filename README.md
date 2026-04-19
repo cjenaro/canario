@@ -8,26 +8,24 @@ Inspired by [Hex](https://github.com/kitlangton/Hex) for macOS, powered by [NVID
 
 ## Download
 
-### Linux · macOS · Windows
+### Linux
 
-Go to the [latest release](https://github.com/cjenaro/canario/releases/latest) and download the installer for your platform:
+Go to the [latest release](https://github.com/cjenaro/canario/releases/latest) and download the installer:
 
-| Platform | File |
-|----------|------|
-| **Linux** | `Canario-0.1.2.AppImage` or `Canario-0.1.2.deb` |
-| **macOS (Apple Silicon)** | `Canario-0.1.2-arm64.dmg` |
-| **macOS (Intel)** | `Canario-0.1.2-x64.dmg` |
-| **Windows** | `Canario-Setup-0.1.2.exe` |
+| File | Notes |
+|------|-------|
+| `Canario-*.AppImage` | Self-contained, no dependencies |
+| `Canario-*.deb` | Debian/Ubuntu package |
 
 On first launch, you'll be prompted to download the ASR model (~640MB). Everything runs locally — nothing leaves your machine.
-
-**macOS:** Right-click the app → Open on first launch (unsigned build).
-
-**Windows:** Click "More info" → "Run anyway" on the SmartScreen prompt.
 
 ### Auto-update
 
 The app checks for updates automatically every 4 hours and notifies you when a new version is ready to install.
+
+### macOS / Windows
+
+Not yet available. `canario-core` depends on Linux-specific libraries (evdev, X11). Cross-platform support requires adding `#[cfg(target_os)]` guards — tracked in the PRD as future work.
 
 ### Build from source
 
