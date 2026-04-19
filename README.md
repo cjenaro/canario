@@ -14,10 +14,10 @@ Go to the [latest release](https://github.com/cjenaro/canario/releases/latest) a
 
 | Platform | File |
 |----------|------|
-| **Linux** | `Canario-0.1.0.AppImage` or `Canario-0.1.0.deb` |
-| **macOS (Apple Silicon)** | `Canario-0.1.0-arm64.dmg` |
-| **macOS (Intel)** | `Canario-0.1.0-x64.dmg` |
-| **Windows** | `Canario-Setup-0.1.0.exe` |
+| **Linux** | `Canario-0.1.2.AppImage` or `Canario-0.1.2.deb` |
+| **macOS (Apple Silicon)** | `Canario-0.1.2-arm64.dmg` |
+| **macOS (Intel)** | `Canario-0.1.2-x64.dmg` |
+| **Windows** | `Canario-Setup-0.1.2.exe` |
 
 On first launch, you'll be prompted to download the ASR model (~640MB). Everything runs locally — nothing leaves your machine.
 

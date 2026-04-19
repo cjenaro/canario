@@ -1,6 +1,6 @@
 [package]
 name = "canario-electron"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Sidecar binary for Canario Electron — JSON stdin/stdout bridge over canario-core"
 

@@ -1,6 +1,6 @@
 {
   "name": "canario-app",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Canario — cross-platform voice-to-text desktop app",
   "main": "out/main/index.js",
   "scripts": {
