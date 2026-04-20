@@ -9,15 +9,17 @@ permissions:
   contents: write
 
 jobs:
-  # ── Build Rust sidecar (Linux only) ──────────────────────────────────
-  # Note: canario-core depends on evdev, x11rb, xdotool — Linux-only for now.
-  # macOS/Windows support requires adding #[cfg(target_os)] guards in core.
+  # ── Build Rust sidecar for all platforms ─────────────────────────────
   build-sidecar:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get install -y libasound2-dev
 
       - name: Install Rust toolchain
@@ -38,80 +40,80 @@ jobs:
       - name: Upload sidecar artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sidecar-linux
+          name: sidecar-${{ matrix.os }}
           path: canario-app/sidecar/
           retention-days: 1
 
-  # ── Build & package Electron app (Linux only) ────────────────────────
-  build-electron:
-    needs: build-sidecar
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+# ── Build & package Electron app for all platforms ───────────────────
+build-electron:
+  needs: build-sidecar
+  strategy:
+    matrix:
+      os: [ubuntu-latest, macos-latest, windows-latest]
+  runs-on: ${{ matrix.os }}
+  steps:
+    - uses: actions/checkout@v4
 
-      - name: Download sidecar
-        uses: actions/download-artifact@v4
-        with:
-          name: sidecar-linux
-          path: canario-app/sidecar/
+    - name: Download sidecar
+      uses: actions/download-artifact@v4
+      with:
+        name: sidecar-${{ matrix.os }}
+        path: canario-app/sidecar/
 
-      - name: Make sidecar executable
-        run: chmod +x canario-app/sidecar/canario-electron
+    - name: Make sidecar executable
+      if: runner.os != 'Windows'
+      run: chmod +x canario-app/sidecar/canario-electron
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: canario-app/package-lock.json
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: canario-app/package-lock.json
 
-      - name: Install dependencies
-        working-directory: canario-app
-        run: npm ci
+    - name: Install dependencies
+      working-directory: canario-app
+      run: npm ci
 
-      - name: Build renderer
-        working-directory: canario-app
-        run: npm run build
+    - name: Build renderer
+      working-directory: canario-app
+      run: npm run build
 
-      - name: Package (electron-builder)
-        working-directory: canario-app
-        run: npx electron-builder --linux --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+    - name: Package (electron-builder)
+      working-directory: canario-app
+      run: npx electron-builder --${{ matrix.os }} --publish never
+      env:
+        CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: canario-linux
-          path: |
-            canario-app/dist/*.AppImage
-            canario-app/dist/*.deb
-            canario-app/dist/*.blockmap
-            canario-app/dist/latest*.yml
-          retention-days: 30
+    - name: Upload packaged artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: canario-${{ matrix.os }}
+        path: |
+          canario-app/dist/*/*
+        retention-days: 30
 
-  # ── Create GitHub Release ────────────────────────────────────────────
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-electron
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+# ── Create GitHub Release ────────────────────────────────────────────
+release:
+  if: startsWith(github.ref, 'refs/tags/v')
+  needs: build-electron
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts/
 
-      - name: List artifacts
-        run: find artifacts/ -type f | sort
+    - name: List artifacts
+      run: find artifacts/ -type f | sort
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            artifacts/canario-linux/*.AppImage
-            artifacts/canario-linux/*.deb
-            artifacts/canario-linux/*.blockmap
-            artifacts/canario-linux/latest*.yml
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        files: |
+          artifacts/canario-ubuntu-latest/**/*
+          artifacts/canario-macos-latest/**/*
+          artifacts/canario-windows-latest/**/*
