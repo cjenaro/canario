@@ -1,12 +1,5 @@
+#[cfg(target_os = "linux")]
 /// Wayland global hotkey support.
-///
-/// Wayland doesn't allow global key grabbing like X11. We use multiple strategies:
-///
-/// 1. **evdev** — Read raw keyboard events from `/dev/input/event*`. Requires the user
-///    to be in the `input` group. Full press-and-hold and double-tap support.
-///
-/// 2. **Socket-based activation** — If no raw input is available, the user can set a system
-///    keyboard shortcut that sends a command to our Unix socket.
 ///
 use std::io;
 use std::os::unix::net::UnixDatagram;

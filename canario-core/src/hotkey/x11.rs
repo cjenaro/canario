@@ -1,27 +1,6 @@
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 /// X11 global hotkey via XGrabKey.
 ///
-/// Grabs a key combination globally on the X11 root window so that
-/// key press/release events are delivered to us regardless of which
-/// app has focus.
-///
-/// Limitations:
-///   - Only works on X11 (not Wayland native sessions)
-///   - XGrabKey may conflict with other apps grabbing the same key
-///   - Modifier-only hotkeys need special handling (other keys cancel)
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-
-use anyhow::{bail, Context, Result};
-use tracing::{debug, error, info, warn};
-use x11rb::protocol::xproto::*;
-
-use super::processor::{HotkeyAction, HotkeyProcessor, ProcessorConfig};
-
-/// Callback type: fired when the processor emits an action.
-type OnAction = Arc<dyn Fn(HotkeyAction) + Send + Sync>;
-
-/// X11 key grabber. Call `start()` to begin listening (spawns a thread).
 pub struct X11Hotkey {
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -87,6 +66,7 @@ impl Drop for X11Hotkey {
 }
 
 /// The main X11 event loop. Runs on the hotkey thread.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn x11_loop(
     running: &Arc<AtomicBool>,
     key_sym: &str,

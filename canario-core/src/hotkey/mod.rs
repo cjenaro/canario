@@ -20,7 +20,9 @@
 /// }).unwrap();
 /// ```no_run
 mod processor;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod x11;
+#[cfg(target_os = "linux")]
 mod wayland;
 
 pub use processor::{HotkeyAction, ProcessorConfig};
@@ -144,10 +146,11 @@ enum DisplayServer {
 
 /// Global hotkey listener.
 ///
-/// Wraps the platform-specific backend and the shared `HotKeyProcessor`.
 pub struct HotkeyListener {
     running: Arc<AtomicBool>,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     x11: x11::X11Hotkey,
+    #[cfg(target_os = "linux")]
     wayland: wayland::WaylandHotkey,
 }
 
@@ -155,9 +158,13 @@ impl HotkeyListener {
     pub fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             x11: x11::X11Hotkey::new(),
+            #[cfg(target_os = "linux")]
             wayland: wayland::WaylandHotkey::new(),
         }
+    }
+}
     }
 
     /// Start listening for the configured hotkey.
@@ -171,33 +178,84 @@ impl HotkeyListener {
 
         self.running.store(true, Ordering::SeqCst);
 
-        let display_server = detect_display_server();
-        info!("Detected display server: {:?}", display_server);
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
+            // On Linux and Windows, try X11 first
+            let display_server = detect_display_server();
+            info!("Detected display server: {:?}", display_server);
 
-        match display_server {
-            DisplayServer::X11 => {
-                // On X11 (or XWayland), use XGrabKey
-                // Even on Wayland sessions, DISPLAY might be set for XWayland,
-                // but XGrabKey only works for X11 apps. If XDG_SESSION_TYPE is
-                // "wayland", prefer the Wayland backend.
-                self.x11.start(
-                    &config.key,
-                    &config.modifiers,
-                    config.processor,
-                    Arc::new(on_action),
-                )?;
+            match display_server {
+                DisplayServer::X11 => {
+                    // On X11 (or XWayland), use XGrabKey
+                    // Even on Wayland sessions, DISPLAY might be set for XWayland,
+                    // but XGrabKey only works for X11 apps. If XDG_SESSION_TYPE is
+                    // "wayland", prefer the Wayland backend on Linux.
+                    #[cfg(target_os = "linux")]
+                    {
+                        if matches!(display_server, DisplayServer::Wayland) {
+                            // Prefer Wayland backend on Linux Wayland sessions
+                            let evdev_key = to_evdev_key_name(&config.key);
+                            self.wayland.start(
+                                &evdev_key,
+                                &config.modifiers,
+                                config.processor,
+                                Arc::new(on_action),
+                            )?;
+                        } else {
+                            // Use X11 backend
+                            self.x11.start(
+                                &config.key,
+                                &config.modifiers,
+                                config.processor,
+                                Arc::new(on_action),
+                            )?;
+                        }
+                    }
+                    
+                    #[cfg(target_os = "windows")]
+                    {
+                        // On Windows, always use X11 (which is actually Win32 via x11rb)
+                        self.x11.start(
+                            &config.key,
+                            &config.modifiers,
+                            config.processor,
+                            Arc::new(on_action),
+                        )?;
+                    }
+                }
+                DisplayServer::Wayland | DisplayServer::Unknown => {
+                    // On Wayland (Linux only), try evdev with socket fallback
+                    // The key name format differs: evdev uses KEY_LEFTMETA etc.
+                    #[cfg(target_os = "linux")]
+                    {
+                        let evdev_key = to_evdev_key_name(&config.key);
+                        self.wayland.start(
+                            &evdev_key,
+                            &config.modifiers,
+                            config.processor,
+                            Arc::new(on_action),
+                        )?;
+                    }
+                    
+                    #[cfg(target_os = "windows")]
+                    {
+                        // On Windows, fallback to X11 if display server detection failed
+                        self.x11.start(
+                            &config.key,
+                            &config.modifiers,
+                            config.processor,
+                            Arc::new(on_action),
+                        )?;
+                    }
+                }
             }
-            DisplayServer::Wayland | DisplayServer::Unknown => {
-                // On Wayland, try evdev with socket fallback
-                // The key name format differs: evdev uses KEY_LEFTMETA etc.
-                let evdev_key = to_evdev_key_name(&config.key);
-                self.wayland.start(
-                    &evdev_key,
-                    &config.modifiers,
-                    config.processor,
-                    Arc::new(on_action),
-                )?;
-            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // TODO: Implement macOS hotkey support
+            // For now, we'll just not register any hotkeys on macOS
+            info!("Hotkey support not yet implemented for macOS");
         }
 
         Ok(())
@@ -206,7 +264,9 @@ impl HotkeyListener {
     /// Stop listening.
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.x11.stop();
+        #[cfg(target_os = "linux")]
         self.wayland.stop();
     }
 }
