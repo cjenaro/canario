@@ -99,6 +99,33 @@ chmod +x dist/Canario-*.AppImage
 The AppImage runs directly; no system installation is needed. If your system
 does not have FUSE support, launch it with `--appimage-extract-and-run`.
 
+#### Chromium sandbox on restricted kernels
+
+Ubuntu ≥ 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`, which
+blocks Chromium's namespace sandbox. An AppImage mounts as your own user, so
+its bundled `chrome-sandbox` can never be setuid root and the app aborts at
+startup with a SUID-sandbox `FATAL` error. Pick one of:
+
+```bash
+# 1. Launch the AppImage with the sandbox disabled
+./dist/Canario-*.AppImage --no-sandbox
+
+# 2. Prefer a real install: the .deb postinst chmods chrome-sandbox 4755
+sudo apt install ./dist/canario-app_*_amd64.deb
+
+# 3. Or re-enable unprivileged user namespaces system-wide (keeps the sandbox)
+echo kernel.apparmor_restrict_unprivileged_userns=0 | \
+  sudo tee /etc/sysctl.d/99-canario-userns.conf && sudo sysctl --system
+```
+
+Build both installers in one invocation — electron-builder removes artifacts
+of targets not named on the command line:
+
+```bash
+npx electron-builder --linux AppImage deb --publish never
+```
+
+
 ### Model-backed smoke test
 
 The regular Rust tests do not require a downloaded model. To also exercise the
