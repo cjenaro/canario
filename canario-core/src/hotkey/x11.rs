@@ -1,6 +1,16 @@
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 /// X11 global hotkey via XGrabKey.
 ///
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use tracing::{debug, error, info, warn};
+use x11rb::protocol::xproto::{ConnectionExt, GrabMode, Keycode, ModMask};
+
+use super::processor::{HotkeyProcessor, ProcessorConfig};
+use super::OnAction;
+
 pub struct X11Hotkey {
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -40,7 +50,8 @@ impl X11Hotkey {
         let handle = std::thread::Builder::new()
             .name("x11-hotkey".into())
             .spawn(move || {
-                if let Err(e) = x11_loop(&running, &key_sym, &modifiers, processor_config, on_action)
+                if let Err(e) =
+                    x11_loop(&running, &key_sym, &modifiers, processor_config, on_action)
                 {
                     if !e.to_string().contains("Connection refused") {
                         error!("X11 hotkey loop error: {}", e);
@@ -66,7 +77,6 @@ impl Drop for X11Hotkey {
 }
 
 /// The main X11 event loop. Runs on the hotkey thread.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn x11_loop(
     running: &Arc<AtomicBool>,
     key_sym: &str,
@@ -127,9 +137,7 @@ fn x11_loop(
 
     while running.load(Ordering::SeqCst) {
         // Poll for events with a timeout
-        let event = conn
-            .poll_for_event()
-            .context("Failed to poll X11 events")?;
+        let event = conn.poll_for_event().context("Failed to poll X11 events")?;
 
         if let Some(event) = event {
             match event {
@@ -160,19 +168,17 @@ fn x11_loop(
                     }
                 }
                 // Key release
-                x11rb::protocol::Event::KeyRelease(kr) => {
-                    if kr.detail == keycode {
-                        debug!("Hotkey key release detected");
-                        if let Some(action) = processor.on_key_release() {
-                            on_action(action);
-                        }
-                        // Ungrab keyboard if no longer recording
-                        if !processor.is_recording() && key_grabbed {
-                            let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
-                            let _ = conn.flush();
-                            key_grabbed = false;
-                            debug!("Keyboard ungrabbed (release)");
-                        }
+                x11rb::protocol::Event::KeyRelease(kr) if kr.detail == keycode => {
+                    debug!("Hotkey key release detected");
+                    if let Some(action) = processor.on_key_release() {
+                        on_action(action);
+                    }
+                    // Ungrab keyboard if no longer recording
+                    if !processor.is_recording() && key_grabbed {
+                        let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+                        let _ = conn.flush();
+                        key_grabbed = false;
+                        debug!("Keyboard ungrabbed (release)");
                     }
                 }
                 _ => {
@@ -235,22 +241,19 @@ fn grab_keyboard_if_needed<C: x11rb::connection::Connection>(
 }
 
 /// Parse an X11 keysym name to a keycode.
-fn keysym_to_keycode<C: x11rb::connection::Connection>(
-    conn: &C,
-    name: &str,
-) -> Result<Keycode> {
+fn keysym_to_keycode<C: x11rb::connection::Connection>(conn: &C, name: &str) -> Result<Keycode> {
     let keysym: u32 = match name {
-        "Super_L" | "Super" => 0xFFEB,      // XK_Super_L
-        "Super_R" => 0xFFEC,                 // XK_Super_R
-        "Alt_L" | "Alt" => 0xFFE9,           // XK_Alt_L
-        "Alt_R" => 0xFFEA,                   // XK_Alt_R
+        "Super_L" | "Super" => 0xFFEB,              // XK_Super_L
+        "Super_R" => 0xFFEC,                        // XK_Super_R
+        "Alt_L" | "Alt" => 0xFFE9,                  // XK_Alt_L
+        "Alt_R" => 0xFFEA,                          // XK_Alt_R
         "Control_L" | "Control" | "Ctrl" => 0xFFE3, // XK_Control_L
-        "Control_R" => 0xFFE4,               // XK_Control_R
-        "Shift_L" | "Shift" => 0xFFE1,       // XK_Shift_L
-        "Shift_R" => 0xFFE2,                 // XK_Shift_R
-        "space" | "Space" => 0x0020,         // XK_space
-        "Hyper_L" => 0xFFED,                 // XK_Hyper_L
-        "Meta_L" | "Meta" => 0xFFE7,         // XK_Meta_L
+        "Control_R" => 0xFFE4,                      // XK_Control_R
+        "Shift_L" | "Shift" => 0xFFE1,              // XK_Shift_L
+        "Shift_R" => 0xFFE2,                        // XK_Shift_R
+        "space" | "Space" => 0x0020,                // XK_space
+        "Hyper_L" => 0xFFED,                        // XK_Hyper_L
+        "Meta_L" | "Meta" => 0xFFE7,                // XK_Meta_L
         other => {
             // Try to parse as a single character keysym
             if other.len() == 1 {
@@ -279,7 +282,11 @@ fn keysym_to_keycode<C: x11rb::connection::Connection>(
         }
     }
 
-    bail!("Could not find keycode for keysym '{}' (0x{:X})", name, keysym)
+    bail!(
+        "Could not find keycode for keysym '{}' (0x{:X})",
+        name,
+        keysym
+    )
 }
 
 /// Parse modifier names to an X11 modifier mask.

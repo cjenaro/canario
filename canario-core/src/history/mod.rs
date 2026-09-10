@@ -2,7 +2,6 @@
 ///
 /// Each entry records the timestamp, text, duration, and optionally
 /// the source application. History is browseable from the settings UI.
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -116,12 +115,7 @@ impl History {
 
     /// Get recent entries (most recent first), owned.
     pub fn recent_owned(&self, limit: usize) -> Vec<HistoryEntry> {
-        self.entries
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        self.entries.iter().rev().take(limit).cloned().collect()
     }
 
     /// Search entries by text content, owned.

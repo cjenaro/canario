@@ -1,9 +1,7 @@
-#[cfg(target_os = "linux")]
 /// Wayland global hotkey support.
 ///
 use std::io;
 use std::os::unix::net::UnixDatagram;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,9 +10,7 @@ use anyhow::{bail, Context, Result};
 use tracing::{debug, error, info, warn};
 
 use super::processor::{HotkeyAction, HotkeyProcessor, ProcessorConfig};
-
-/// Callback type: fired when the processor emits an action.
-type OnAction = Arc<dyn Fn(HotkeyAction) + Send + Sync>;
+use super::OnAction;
 
 /// Wayland hotkey listener. Tries multiple strategies.
 pub struct WaylandHotkey {
@@ -54,7 +50,7 @@ impl WaylandHotkey {
         let key_name = key_name.to_string();
         let modifiers = modifiers.to_vec();
 
-        let on_action: Arc<dyn Fn(HotkeyAction) + Send + Sync> = Arc::from(on_action);
+        let on_action: Arc<dyn Fn(HotkeyAction) + Send + Sync> = on_action;
 
         let handle = std::thread::Builder::new()
             .name("wayland-hotkey".into())
@@ -72,7 +68,13 @@ impl WaylandHotkey {
                     .ok();
 
                 // Try evdev for real key listening
-                if try_evdev(&running, &key_name, &modifiers, &processor_config, &on_action) {
+                if try_evdev(
+                    &running,
+                    &key_name,
+                    &modifiers,
+                    &processor_config,
+                    &on_action,
+                ) {
                     return;
                 }
 
@@ -93,14 +95,13 @@ impl WaylandHotkey {
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         // Send a dummy signal to the socket to unblock the read
-        let socket_path = socket_path();
+        let socket_path = super::hotkey_socket_path();
         if socket_path.exists() {
             if let Ok(sock) = UnixDatagram::unbound() {
                 let _ = sock.send_to(b"x", &socket_path);
             }
         }
     }
-
 }
 
 impl Drop for WaylandHotkey {
@@ -312,13 +313,12 @@ fn socket_loop(
     running: &Arc<AtomicBool>,
     on_action: &Arc<dyn Fn(HotkeyAction) + Send + Sync>,
 ) -> Result<()> {
-    let socket_path = socket_path();
+    let socket_path = super::hotkey_socket_path();
 
     // Clean up stale socket
     let _ = std::fs::remove_file(&socket_path);
 
-    let sock = UnixDatagram::bind(&socket_path)
-        .context("Failed to bind hotkey socket")?;
+    let sock = UnixDatagram::bind(&socket_path).context("Failed to bind hotkey socket")?;
 
     sock.set_nonblocking(true)?;
 
@@ -372,8 +372,4 @@ fn socket_loop(
     let _ = std::fs::remove_file(&socket_path);
     info!("Socket listener stopped");
     Ok(())
-}
-
-fn socket_path() -> PathBuf {
-    std::env::temp_dir().join("canario-hotkey.sock")
 }

@@ -11,26 +11,30 @@
 ///
 /// Usage:
 /// ```no_run
-/// use canario::hotkey::{HotkeyListener, HotkeyConfig};
+/// use canario_core::{HotkeyConfig, HotkeyListener};
 ///
 /// let config = HotkeyConfig::default();
-/// let listener = HotkeyListener::new();
+/// let mut listener = HotkeyListener::new();
 /// listener.start(config, |action| {
 ///     println!("Hotkey action: {:?}", action);
 /// }).unwrap();
-/// ```no_run
+/// ```
 mod processor;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-mod x11;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
 mod wayland;
+#[cfg(all(target_os = "linux", feature = "x11"))]
+mod x11;
 
 pub use processor::{HotkeyAction, ProcessorConfig};
 
 use anyhow::{bail, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use tracing::info;
+
+/// Callback type: fired when the processor emits an action.
+pub(crate) type OnAction = Arc<dyn Fn(HotkeyAction) + Send + Sync>;
 
 /// Configuration for the global hotkey.
 #[derive(Debug, Clone)]
@@ -61,7 +65,7 @@ impl HotkeyConfig {
         hotkey: &[String],
         minimum_key_time: f64,
         double_tap_lock: bool,
-        _double_tap_only: bool,
+        double_tap_only: bool,
     ) -> Self {
         if hotkey.is_empty() {
             return Self::default();
@@ -85,10 +89,25 @@ impl HotkeyConfig {
             processor: ProcessorConfig {
                 minimum_key_time: std::time::Duration::from_secs_f64(minimum_key_time),
                 double_tap_lock,
+                double_tap_only,
                 is_modifier,
             },
         }
     }
+}
+
+/// Path of the Unix datagram socket used for external hotkey control
+/// (e.g. `canario-cli --toggle-external`).
+///
+/// Prefers `$XDG_RUNTIME_DIR` (per-user tmpfs, not world-writable like
+/// `/tmp`, so no symlink/squatting risk) and falls back to the system
+/// temp dir when it is unset. Both the listener and any client MUST use
+/// this function so the two sides can't drift apart.
+pub fn hotkey_socket_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("canario-hotkey.sock")
 }
 
 /// Check if a key name is a modifier key.
@@ -114,7 +133,8 @@ fn is_modifier_key(key: &str) -> bool {
 }
 
 /// Detect the current display server.
-fn detect_display_server() -> DisplayServer {
+#[cfg(target_os = "linux")]
+pub(crate) fn detect_display_server() -> DisplayServer {
     // Check XDG_SESSION_TYPE first
     if let Ok(session_type) = std::env::var("XDG_SESSION_TYPE") {
         match session_type.as_str() {
@@ -137,8 +157,9 @@ fn detect_display_server() -> DisplayServer {
     DisplayServer::Unknown
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum DisplayServer {
+pub(crate) enum DisplayServer {
     X11,
     Wayland,
     Unknown,
@@ -148,23 +169,27 @@ enum DisplayServer {
 ///
 pub struct HotkeyListener {
     running: Arc<AtomicBool>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(target_os = "linux", feature = "x11"))]
     x11: x11::X11Hotkey,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "linux-input"))]
     wayland: wayland::WaylandHotkey,
+}
+
+impl Default for HotkeyListener {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HotkeyListener {
     pub fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(all(target_os = "linux", feature = "x11"))]
             x11: x11::X11Hotkey::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "linux-input"))]
             wayland: wayland::WaylandHotkey::new(),
         }
-    }
-}
     }
 
     /// Start listening for the configured hotkey.
@@ -178,84 +203,67 @@ impl HotkeyListener {
 
         self.running.store(true, Ordering::SeqCst);
 
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        let on_action: OnAction = Arc::new(on_action);
+
+        #[cfg(target_os = "linux")]
         {
-            // On Linux and Windows, try X11 first
             let display_server = detect_display_server();
             info!("Detected display server: {:?}", display_server);
 
             match display_server {
                 DisplayServer::X11 => {
                     // On X11 (or XWayland), use XGrabKey
-                    // Even on Wayland sessions, DISPLAY might be set for XWayland,
-                    // but XGrabKey only works for X11 apps. If XDG_SESSION_TYPE is
-                    // "wayland", prefer the Wayland backend on Linux.
-                    #[cfg(target_os = "linux")]
+                    #[cfg(feature = "x11")]
                     {
-                        if matches!(display_server, DisplayServer::Wayland) {
-                            // Prefer Wayland backend on Linux Wayland sessions
-                            let evdev_key = to_evdev_key_name(&config.key);
-                            self.wayland.start(
-                                &evdev_key,
-                                &config.modifiers,
-                                config.processor,
-                                Arc::new(on_action),
-                            )?;
-                        } else {
-                            // Use X11 backend
-                            self.x11.start(
+                        info!("Using X11 hotkey backend (XGrabKey)");
+                        self.x11
+                            .start(
                                 &config.key,
                                 &config.modifiers,
-                                config.processor,
-                                Arc::new(on_action),
-                            )?;
-                        }
+                                config.processor.clone(),
+                                on_action.clone(),
+                            )
+                            .map_err(|e| {
+                                tracing::error!("X11 hotkey backend failed to start: {}", e);
+                                e
+                            })?;
                     }
-                    
-                    #[cfg(target_os = "windows")]
-                    {
-                        // On Windows, always use X11 (which is actually Win32 via x11rb)
-                        self.x11.start(
-                            &config.key,
-                            &config.modifiers,
-                            config.processor,
-                            Arc::new(on_action),
-                        )?;
-                    }
+                    #[cfg(not(feature = "x11"))]
+                    bail!("X11 hotkey support not compiled in (enable the `x11` feature)");
                 }
                 DisplayServer::Wayland | DisplayServer::Unknown => {
-                    // On Wayland (Linux only), try evdev with socket fallback
+                    // On Wayland, try evdev with socket fallback.
                     // The key name format differs: evdev uses KEY_LEFTMETA etc.
-                    #[cfg(target_os = "linux")]
+                    #[cfg(feature = "linux-input")]
                     {
+                        info!("Using evdev hotkey backend (Wayland)");
                         let evdev_key = to_evdev_key_name(&config.key);
-                        self.wayland.start(
-                            &evdev_key,
-                            &config.modifiers,
-                            config.processor,
-                            Arc::new(on_action),
-                        )?;
+                        self.wayland
+                            .start(
+                                &evdev_key,
+                                &config.modifiers,
+                                config.processor.clone(),
+                                on_action.clone(),
+                            )
+                            .map_err(|e| {
+                                tracing::error!("evdev hotkey backend failed to start: {}", e);
+                                e
+                            })?;
                     }
-                    
-                    #[cfg(target_os = "windows")]
-                    {
-                        // On Windows, fallback to X11 if display server detection failed
-                        self.x11.start(
-                            &config.key,
-                            &config.modifiers,
-                            config.processor,
-                            Arc::new(on_action),
-                        )?;
-                    }
+                    #[cfg(not(feature = "linux-input"))]
+                    bail!(
+                        "Wayland hotkey support not compiled in (enable the `linux-input` feature)"
+                    );
                 }
             }
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(not(target_os = "linux"))]
         {
-            // TODO: Implement macOS hotkey support
-            // For now, we'll just not register any hotkeys on macOS
-            info!("Hotkey support not yet implemented for macOS");
+            // TODO: macOS/Windows hotkey backends (separate epic)
+            let _ = &on_action;
+            let _ = &config;
+            bail!("Global hotkey is not yet supported on this platform");
         }
 
         Ok(())
@@ -264,14 +272,15 @@ impl HotkeyListener {
     /// Stop listening.
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(all(target_os = "linux", feature = "x11"))]
         self.x11.stop();
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "linux-input"))]
         self.wayland.stop();
     }
 }
 
 /// Convert a human key name to evdev-style name.
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
 fn to_evdev_key_name(key: &str) -> String {
     match key {
         "Super" | "Super_L" => "KEY_LEFTMETA".into(),

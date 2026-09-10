@@ -3,7 +3,6 @@
 /// On first launch (or when requested), installs the .desktop file
 /// to `~/.local/share/applications/` and optionally creates a symlink
 /// in `~/.config/autostart/` to start Canario on login.
-
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -32,7 +31,7 @@ Name=Canario
 GenericName=Voice to Text
 Comment=Native Linux voice-to-text using Parakeet TDT
 Exec=canario
-Icon=canario
+Icon=com.canario.Canario
 Terminal=false
 Categories=Utility;AudioVideo;
 Keywords=voice;speech;text;transcription;dictation;
@@ -117,7 +116,7 @@ pub fn icon_install_path() -> PathBuf {
         .join("hicolor")
         .join("scalable")
         .join("apps")
-        .join("canario.svg")
+        .join("com.canario.Canario.svg")
 }
 
 /// Install the SVG icon to the system icon path.
@@ -138,6 +137,6 @@ mod tests {
         // Basic sanity: should start with [Desktop Entry]
         assert!(DESKTOP_CONTENTS.starts_with("[Desktop Entry]"));
         assert!(DESKTOP_CONTENTS.contains("Exec=canario"));
-        assert!(DESKTOP_CONTENTS.contains("Icon=canario"));
+        assert!(DESKTOP_CONTENTS.contains("Icon=com.canario.Canario"));
     }
 }

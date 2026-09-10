@@ -24,11 +24,11 @@
 ///         _ => {}
 ///     }
 /// }
-/// ```no_run
-
+/// ```
 mod audio;
 mod canario;
 mod config;
+pub mod diagnostics;
 mod event;
 mod history;
 mod hotkey;
@@ -39,17 +39,18 @@ mod recording;
 // ── Public API ─────────────────────────────────────────────────────────────
 
 pub use canario::Canario;
-pub use config::{AppConfig, AudioBehavior, ModelVariant};
+pub use config::{AppConfig, AudioBehavior, ModelPaths, ModelVariant};
 pub use event::Event;
 pub use history::{History, HistoryEntry};
+pub use hotkey::hotkey_socket_path;
 pub use hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener};
 pub use inference::postprocess::{PostProcessor, WordRemapping, WordRemoval};
 pub use paste::paste_text;
 
 // Re-export for convenience
-pub use recording::RecordingHandle;
-pub use inference::TranscriptionEngine;
 pub use inference::read_wav;
+pub use inference::TranscriptionEngine;
+pub use recording::RecordingHandle;
 
 // Re-export submodules that frontends need
 pub mod autostart {

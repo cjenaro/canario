@@ -39,13 +39,9 @@ enum ProcessorState {
     /// Idle — no key activity
     Idle,
     /// Key is physically held down
-    KeyDown {
-        pressed_at: Instant,
-    },
+    KeyDown { pressed_at: Instant },
     /// Key was released; waiting to see if it's a double-tap
-    WaitingForSecondTap {
-        released_at: Instant,
-    },
+    WaitingForSecondTap { released_at: Instant },
     /// Recording is locked ON (double-tap) — stays on until explicit stop
     LockedRecording,
     /// Recording via press-and-hold (key still held)
@@ -60,6 +56,9 @@ pub struct ProcessorConfig {
     pub minimum_key_time: Duration,
     /// Enable double-tap to lock recording on.
     pub double_tap_lock: bool,
+    /// Only double-tap controls recording: press-and-hold never starts
+    /// one. Implies double-tap detection even if `double_tap_lock` is off.
+    pub double_tap_only: bool,
     /// Is the hotkey a modifier key? (affects cancellation logic)
     pub is_modifier: bool,
 }
@@ -69,6 +68,7 @@ impl Default for ProcessorConfig {
         Self {
             minimum_key_time: Duration::from_millis(200),
             double_tap_lock: true,
+            double_tap_only: false,
             is_modifier: true,
         }
     }
@@ -91,6 +91,13 @@ impl HotkeyProcessor {
         }
     }
 
+    /// Double-tap detection is active when either double-tap mode is on.
+    /// `double_tap_only` implies it: the setting would be meaningless
+    /// (recording could never start) if it didn't.
+    fn double_tap_enabled(&self) -> bool {
+        self.config.double_tap_lock || self.config.double_tap_only
+    }
+
     /// Call when the hotkey is pressed (key down).
     /// Returns any action that should be taken.
     pub fn on_key_press(&mut self) -> Option<HotkeyAction> {
@@ -102,9 +109,7 @@ impl HotkeyProcessor {
                 None
             }
             ProcessorState::WaitingForSecondTap { released_at } => {
-                if self.config.double_tap_lock
-                    && released_at.elapsed() < DOUBLE_TAP_TIMEOUT
-                {
+                if self.double_tap_enabled() && released_at.elapsed() < DOUBLE_TAP_TIMEOUT {
                     // Double-tap detected — lock recording ON
                     self.state = ProcessorState::LockedRecording;
                     self.recording = true;
@@ -123,7 +128,7 @@ impl HotkeyProcessor {
                 self.recording = false;
                 Some(HotkeyAction::StopRecording)
             }
-            ProcessorState::KeyDown { .. } | ProcessorState::HoldRecording { .. } => {
+            ProcessorState::KeyDown { .. } | ProcessorState::HoldRecording => {
                 // Already in a key-down state, ignore repeat
                 None
             }
@@ -139,7 +144,7 @@ impl HotkeyProcessor {
 
                 if held < self.config.minimum_key_time {
                     // Too short — if double-tap is enabled, wait for second tap
-                    if self.config.double_tap_lock {
+                    if self.double_tap_enabled() {
                         self.state = ProcessorState::WaitingForSecondTap {
                             released_at: Instant::now(),
                         };
@@ -171,7 +176,7 @@ impl HotkeyProcessor {
                     }
                 }
             }
-            ProcessorState::HoldRecording { .. } => {
+            ProcessorState::HoldRecording => {
                 // Key released after hold recording → stop
                 self.state = ProcessorState::Idle;
                 self.recording = false;
@@ -190,7 +195,12 @@ impl HotkeyProcessor {
     /// before starting recording.
     ///
     /// Returns `StartRecording` when the hold threshold is first exceeded.
+    /// Never starts a recording in `double_tap_only` mode.
     pub fn on_tick(&mut self) -> Option<HotkeyAction> {
+        if self.config.double_tap_only {
+            // Press-and-hold is disabled — only double-tap-to-lock works.
+            return None;
+        }
         match &self.state {
             ProcessorState::KeyDown { pressed_at } => {
                 let held = pressed_at.elapsed();
@@ -224,7 +234,7 @@ impl HotkeyProcessor {
                     self.state = ProcessorState::Idle;
                     None
                 }
-                ProcessorState::HoldRecording { .. } => {
+                ProcessorState::HoldRecording => {
                     // Already recording — other keys typed during recording are fine
                     // (user might be typing while dictating, but that's OK)
                     None
@@ -239,8 +249,7 @@ impl HotkeyProcessor {
     /// Call when Escape is pressed — cancels any active recording.
     pub fn on_escape(&mut self) -> Option<HotkeyAction> {
         match self.state {
-            ProcessorState::HoldRecording { .. }
-            | ProcessorState::LockedRecording => {
+            ProcessorState::HoldRecording | ProcessorState::LockedRecording => {
                 self.state = ProcessorState::Idle;
                 self.recording = false;
                 Some(HotkeyAction::CancelRecording)
@@ -275,6 +284,7 @@ mod tests {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
             double_tap_lock: false,
+            double_tap_only: false,
             is_modifier: false,
         });
 
@@ -294,6 +304,7 @@ mod tests {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(200),
             double_tap_lock: false,
+            double_tap_only: false,
             is_modifier: false,
         });
 
@@ -308,6 +319,7 @@ mod tests {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
             double_tap_lock: true,
+            double_tap_only: false,
             is_modifier: false,
         });
 
@@ -329,6 +341,7 @@ mod tests {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(10),
             double_tap_lock: false,
+            double_tap_only: false,
             is_modifier: false,
         });
 
@@ -346,6 +359,7 @@ mod tests {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
             double_tap_lock: false,
+            double_tap_only: false,
             is_modifier: true,
         });
 
@@ -355,5 +369,82 @@ mod tests {
         assert!(!proc.is_recording());
         // Now tick should not start recording
         assert_eq!(proc.on_tick(), None);
+    }
+
+    #[test]
+    fn test_double_tap_only_disables_press_and_hold() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            minimum_key_time: Duration::from_millis(50),
+            double_tap_lock: true,
+            double_tap_only: true,
+            is_modifier: false,
+        });
+
+        // Press and hold well past the threshold — tick must NOT start recording
+        assert_eq!(proc.on_key_press(), None);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(proc.on_tick(), None);
+        assert!(!proc.is_recording());
+        // Releasing the long press must not produce a Stop either
+        // (no recording was ever started, and a long press is not a tap).
+        assert_eq!(proc.on_key_release(), None);
+        assert!(!proc.is_recording());
+    }
+
+    #[test]
+    fn test_double_tap_only_still_locks_on_double_tap() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            minimum_key_time: Duration::from_millis(50),
+            double_tap_lock: true,
+            double_tap_only: true,
+            is_modifier: false,
+        });
+
+        // First tap
+        assert_eq!(proc.on_key_press(), None);
+        assert_eq!(proc.on_key_release(), None); // enters WaitingForSecondTap
+
+        // Second tap quickly → locked recording
+        assert_eq!(proc.on_key_press(), Some(HotkeyAction::StartRecording));
+        assert!(proc.is_recording());
+        assert_eq!(proc.on_key_release(), None); // release after lock is irrelevant
+
+        // Tap again to stop
+        assert_eq!(proc.on_key_press(), Some(HotkeyAction::StopRecording));
+        assert!(!proc.is_recording());
+    }
+
+    /// double_tap_only implies double-tap detection even when
+    /// double_tap_lock is off — otherwise recording could never start.
+    #[test]
+    fn test_double_tap_only_implies_double_tap_detection() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            minimum_key_time: Duration::from_millis(50),
+            double_tap_lock: false,
+            double_tap_only: true,
+            is_modifier: false,
+        });
+
+        assert_eq!(proc.on_key_press(), None);
+        assert_eq!(proc.on_key_release(), None); // still waits for second tap
+        assert_eq!(proc.on_key_press(), Some(HotkeyAction::StartRecording));
+        assert!(proc.is_recording());
+    }
+
+    /// Escape must still cancel a locked recording in double_tap_only mode.
+    #[test]
+    fn test_double_tap_only_escape_cancels_locked_recording() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            minimum_key_time: Duration::from_millis(50),
+            double_tap_lock: false,
+            double_tap_only: true,
+            is_modifier: false,
+        });
+
+        assert_eq!(proc.on_key_press(), None);
+        assert_eq!(proc.on_key_release(), None);
+        assert_eq!(proc.on_key_press(), Some(HotkeyAction::StartRecording));
+        assert_eq!(proc.on_escape(), Some(HotkeyAction::CancelRecording));
+        assert!(!proc.is_recording());
     }
 }

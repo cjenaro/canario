@@ -13,40 +13,34 @@ pub enum Event {
     /// Recording has stopped (mic released, about to transcribe)
     RecordingStopped,
 
+    /// Recording was cancelled (Escape). The audio was discarded —
+    /// no transcription will follow. Frontends should hide any
+    /// recording UI; do NOT paste or store in history.
+    RecordingCancelled,
+
     /// Transcription is ready (after post-processing).
     /// `text` is the final processed string.
     /// `duration_secs` is the recording length in seconds.
-    TranscriptionReady {
-        text: String,
-        duration_secs: f64,
-    },
+    TranscriptionReady { text: String, duration_secs: f64 },
 
     /// Recording/transcription error. Do NOT paste or store in history.
     #[serde(rename = "Error")]
-    Error {
-        message: String,
-    },
+    Error { message: String },
 
     // ── Real-time feedback ──────────────────────────────────────────
     /// Audio level update during recording (0.0 = silence, 1.0 = clipping)
-    AudioLevel {
-        level: f64,
-    },
+    AudioLevel { level: f64 },
 
     // ── Model management ────────────────────────────────────────────
     /// Model download progress (0.0 to 1.0)
-    ModelDownloadProgress {
-        progress: f64,
-    },
+    ModelDownloadProgress { progress: f64 },
 
     /// Model download completed successfully
     ModelDownloadComplete,
 
     /// Model download failed
     #[serde(rename = "ModelDownloadFailed")]
-    ModelDownloadFailed {
-        error: String,
-    },
+    ModelDownloadFailed { error: String },
 
     // ── Hotkey ──────────────────────────────────────────────────────
     /// Global hotkey was triggered — frontend should toggle recording

@@ -8,6 +8,7 @@
 /// Returns Ok(true) if auto-typed, Ok(false) if only copied to clipboard.
 use anyhow::Result;
 use std::process::Command;
+use std::sync::OnceLock;
 use tracing::{debug, warn};
 
 /// Paste text: copy to clipboard + attempt auto-type.
@@ -32,30 +33,55 @@ pub fn paste_text(text: &str) -> Result<bool> {
     }
 
     // Step 2: Try auto-typing (best-effort)
-    if try_auto_type(text) {
+    if let Some(tool) = try_auto_type(text) {
+        tracing::info!("Pasted via auto-type ({})", tool);
         return Ok(true);
     }
 
     // Step 3: Try simulating Ctrl+V (best-effort)
-    if try_simulate_paste() {
+    if let Some(tool) = try_simulate_paste() {
+        tracing::info!("Pasted via simulated Ctrl+V ({})", tool);
         return Ok(true);
     }
 
     // Clipboard has the text — user can Ctrl+V manually
+    tracing::info!("No paste tool succeeded — text is on the clipboard only");
     Ok(false)
 }
 
-/// Check if a command exists on PATH
+/// Check if a command exists on PATH.
+///
+/// Result is cached per tool: `which` is only spawned once per process
+/// instead of on every paste. (Tools are not expected to appear or
+/// disappear mid-session.)
 fn command_exists(name: &str) -> bool {
-    Command::new("which")
+    static XDOTOOL: OnceLock<bool> = OnceLock::new();
+    static WTYPE: OnceLock<bool> = OnceLock::new();
+    static YDOTOOL: OnceLock<bool> = OnceLock::new();
+
+    let cell = match name {
+        "xdotool" => &XDOTOOL,
+        "wtype" => &WTYPE,
+        "ydotool" => &YDOTOOL,
+        _ => return detect_command(name),
+    };
+    *cell.get_or_init(|| detect_command(name))
+}
+
+/// Actually probe for a command on PATH.
+fn detect_command(name: &str) -> bool {
+    let found = Command::new("which")
         .arg(name)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    debug!("paste tool detection: {} -> {}", name, found);
+    found
 }
 
 /// Try to auto-type text using external tools.
-fn try_auto_type(text: &str) -> bool {
+/// Returns the name of the tool that succeeded.
+fn try_auto_type(text: &str) -> Option<&'static str> {
     // xdotool (X11)
     if command_exists("xdotool") {
         if let Ok(status) = Command::new("xdotool")
@@ -65,7 +91,7 @@ fn try_auto_type(text: &str) -> bool {
             .status()
         {
             if status.success() {
-                return true;
+                return Some("xdotool");
             }
         }
     }
@@ -78,7 +104,7 @@ fn try_auto_type(text: &str) -> bool {
             .status()
         {
             if status.success() {
-                return true;
+                return Some("wtype");
             }
         }
     }
@@ -92,16 +118,17 @@ fn try_auto_type(text: &str) -> bool {
             .status()
         {
             if status.success() {
-                return true;
+                return Some("ydotool");
             }
         }
     }
 
-    false
+    None
 }
 
-/// Try to simulate Ctrl+V paste
-fn try_simulate_paste() -> bool {
+/// Try to simulate Ctrl+V paste.
+/// Returns the name of the tool that succeeded.
+fn try_simulate_paste() -> Option<&'static str> {
     // xdotool (X11)
     if command_exists("xdotool") {
         if let Ok(status) = Command::new("xdotool")
@@ -110,7 +137,7 @@ fn try_simulate_paste() -> bool {
             .status()
         {
             if status.success() {
-                return true;
+                return Some("xdotool");
             }
         }
     }
@@ -124,10 +151,10 @@ fn try_simulate_paste() -> bool {
             .status()
         {
             if status.success() {
-                return true;
+                return Some("ydotool");
             }
         }
     }
 
-    false
+    None
 }

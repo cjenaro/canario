@@ -3,7 +3,6 @@
 /// Applies user-defined substitutions to the raw transcription output
 /// before it's pasted or stored in history. Inspired by Hex's
 /// WordRemapping / WordRemoval feature.
-
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -35,8 +34,14 @@ impl Default for PostProcessor {
         Self {
             remappings: vec![
                 // Common ASR misrecognitions
-                WordRemapping { from: "I llama".into(), to: "I'll ama".into() },
-                WordRemapping { from: "Imma".into(), to: "I'm going to".into() },
+                WordRemapping {
+                    from: "I llama".into(),
+                    to: "I'll ama".into(),
+                },
+                WordRemapping {
+                    from: "Imma".into(),
+                    to: "I'm going to".into(),
+                },
             ],
             removals: vec![
                 // Filler words
@@ -44,12 +49,22 @@ impl Default for PostProcessor {
                 WordRemoval { word: "um".into() },
                 WordRemoval { word: "ah".into() },
                 WordRemoval { word: "er".into() },
-                WordRemoval { word: "like like".into() },
-                WordRemoval { word: "you know".into() },
+                WordRemoval {
+                    word: "like like".into(),
+                },
+                WordRemoval {
+                    word: "you know".into(),
+                },
                 // ASR artifacts
-                WordRemoval { word: "(inaudible)".into() },
-                WordRemoval { word: "[music]".into() },
-                WordRemoval { word: "[laughter]".into() },
+                WordRemoval {
+                    word: "(inaudible)".into(),
+                },
+                WordRemoval {
+                    word: "[music]".into(),
+                },
+                WordRemoval {
+                    word: "[laughter]".into(),
+                },
             ],
         }
     }
@@ -182,7 +197,10 @@ mod tests {
             }],
             removals: vec![],
         };
-        assert_eq!(pp.process("I llama going to the store"), "I'll ama going to the store");
+        assert_eq!(
+            pp.process("I llama going to the store"),
+            "I'll ama going to the store"
+        );
     }
 
     #[test]
@@ -203,11 +221,12 @@ mod tests {
     fn test_word_removal() {
         let pp = PostProcessor {
             remappings: vec![],
-            removals: vec![WordRemoval {
-                word: "um".into(),
-            }],
+            removals: vec![WordRemoval { word: "um".into() }],
         };
-        assert_eq!(pp.process("um I think um that's right"), "I think that's right");
+        assert_eq!(
+            pp.process("um I think um that's right"),
+            "I think that's right"
+        );
     }
 
     #[test]
@@ -230,9 +249,7 @@ mod tests {
                 from: "canario".into(),
                 to: "Canario".into(),
             }],
-            removals: vec![WordRemoval {
-                word: "uh".into(),
-            }],
+            removals: vec![WordRemoval { word: "uh".into() }],
         };
         assert_eq!(pp.process("uh canario is great"), "Canario is great");
     }
