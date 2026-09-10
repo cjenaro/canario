@@ -91,7 +91,7 @@ cp -f target/release/canario-electron canario-app/sidecar/
 cd canario-app
 npm ci
 npm run build
-npx electron-builder --linux AppImage --publish never
+npm run package:linux
 chmod +x dist/Canario-*.AppImage
 ./dist/Canario-*.AppImage
 ```
@@ -103,20 +103,21 @@ does not have FUSE support, launch it with `--appimage-extract-and-run`.
 
 Ubuntu ≥ 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`, which
 blocks Chromium's namespace sandbox. An AppImage mounts as your own user, so
-its bundled `chrome-sandbox` can never be setuid root and the app aborts at
-startup with a SUID-sandbox `FATAL` error. Pick one of:
+its bundled `chrome-sandbox` can never be setuid root and a stock build would
+abort at startup with a SUID-sandbox `FATAL` error. The build pipeline
+patches this automatically: `npm run package:linux` runs
+`scripts/patchAppImage.cjs`, which injects `ELECTRON_DISABLE_SANDBOX=1` into
+the AppImage's `AppRun` and repacks it — flagless launches just work, from a
+terminal or a menu entry.
 
-```bash
-# 1. Launch the AppImage with the sandbox disabled
-./dist/Canario-*.AppImage --no-sandbox
+Notes:
 
-# 2. Prefer a real install: the .deb postinst chmods chrome-sandbox 4755
-sudo apt install ./dist/canario-app_*_amd64.deb
-
-# 3. Or re-enable unprivileged user namespaces system-wide (keeps the sandbox)
-echo kernel.apparmor_restrict_unprivileged_userns=0 | \
-  sudo tee /etc/sysctl.d/99-canario-userns.conf && sudo sysctl --system
-```
+- Prefer a real install to keep the actual sandbox: the `.deb` postinst
+  chmods `chrome-sandbox` 4755. `sudo apt install ./dist/canario-app_*_amd64.deb`
+- To re-enable the sandbox system-wide (all Electron apps):
+  `echo kernel.apparmor_restrict_unprivileged_userns=0 | sudo tee /etc/sysctl.d/99-canario-userns.conf && sudo sysctl --system`
+- The repacked AppImage carries no embedded blockmap (differential-update
+  data); auto-update falls back to full downloads.
 
 Build both installers in one invocation — electron-builder removes artifacts
 of targets not named on the command line:

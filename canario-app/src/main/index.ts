@@ -9,16 +9,6 @@ import { autoPasteText } from "./autoPaste.js";
 import { initUpdater, cleanupUpdater, checkForUpdatesManual } from "./updater.js";
 import { checkVersion, getVersionInfo } from "./version.js";
 
-// Disable Chromium's OS sandbox before any child process spawns.
-//
-// Ubuntu >= 24.04 restricts unprivileged user namespaces, so Chromium falls
-// back to its SUID helper — which cannot work inside an AppImage (mounted as
-// the user) or when launched from a menu/desktop entry that can't carry CLI
-// flags (AppImageLauncher etc.). Without this the app aborts with a
-// setuid_sandbox_host FATAL on those systems. The renderer loads only local
-// content, and dev mode already ran with --no-sandbox.
-app.commandLine.appendSwitch("no-sandbox");
-
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 
