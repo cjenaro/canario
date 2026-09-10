@@ -171,6 +171,25 @@ export function OnboardingPage() {
     }
   }
 
+  // Insert a transcription into the practice textarea at the caret. The
+  // app already HAS the text — never depend on the main process's
+  // simulated Ctrl+V, which pastes whatever the compositor clipboard
+  // holds if Electron's clipboard write hasn't propagated yet (stale-
+  // content paste, canario-fhm).
+  function fillPracticeArea(text: string) {
+    const el = practiceRef;
+    if (!el || !text) return;
+    const atEnd =
+      el.selectionStart === el.selectionEnd && el.selectionStart === el.value.length;
+    if (atEnd) {
+      el.value = el.value ? `${el.value} ${text}` : text;
+      el.selectionStart = el.selectionEnd = el.value.length;
+    } else {
+      el.setRangeText(text, el.selectionStart, el.selectionEnd, "end");
+    }
+    el.focus();
+  }
+
   onMount(async () => {
     try {
       applyTheme(await canario.getTheme());
@@ -214,8 +233,10 @@ export function OnboardingPage() {
             if (micTesting()) setLevel(event.level as number);
             break;
           case "TranscriptionReady":
-            // Practice area: main process auto-pastes into the focused
-            // textarea; nothing extra to do here.
+            // Practice area: fill directly from the event — the main
+            // process skips its simulated paste whenever one of our own
+            // windows is focused, so this is the only writer.
+            fillPracticeArea((event.text as string ?? "").trim());
             break;
         }
       });
