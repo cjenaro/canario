@@ -10,7 +10,12 @@ Inspired by [Hex](https://github.com/kitlangton/Hex) for macOS, powered by [NVID
 
 ### Linux
 
-Go to the [latest release](https://github.com/cjenaro/canario/releases/latest) and download the installer:
+> **Note:** The release pipeline is currently being rebuilt, so prebuilt
+> installers are not available yet. For now, [build from source](#build-from-source)
+> (it's quick — see below).
+
+Once releases are published again, you'll be able to grab an installer from
+the [latest release](https://github.com/cjenaro/canario/releases/latest):
 
 | File | Notes |
 |------|-------|
@@ -21,7 +26,10 @@ On first launch, you'll be prompted to download the ASR model (~640MB). Everythi
 
 ### Auto-update
 
-The app checks for updates automatically every 4 hours and notifies you when a new version is ready to install.
+The Electron app includes auto-update support (checks GitHub Releases every
+4 hours and notifies when a new version is ready), but it only works with
+published releases — which are not currently available while the release
+pipeline is being fixed.
 
 ### macOS / Windows
 
@@ -44,22 +52,64 @@ cargo run --release --bin canario
 </details>
 
 <details>
-<summary>Cross-platform (Electron)</summary>
+<summary>Linux (Electron development build)</summary>
 
 ```bash
-# Build Rust sidecar
-cargo build --release --bin canario-electron
+# From the repository root, build the debug sidecar used by dev mode
+cargo build --bin canario-electron
 
-# Build Electron app (requires Node.js 22+)
+# Install frontend dependencies (requires Node.js 22+)
 cd canario-app
 npm ci
-npm run build
 
-# Run in dev mode
+# Build and launch the Electron app in dev mode
 npm run dev
 ```
 
+Dev mode loads `target/debug/canario-electron`, so a release-only Rust build
+will not work here. After changing Rust code, rebuild the sidecar and restart
+the app. Frontend edits reload automatically.
+
+On first launch, download a model. Test recording with the **Record** button,
+then test the global hotkey and auto-paste into a text editor. Run one Canario
+frontend at a time so they do not compete for the hotkey or microphone.
+
+To test the native GTK frontend instead, run `cargo run --bin canario` from
+the repository root (requires the GTK development packages listed above).
+
 </details>
+
+### Build a local Linux AppImage
+
+To run a packaged app without the development server, build and stage the
+release sidecar, then package the frontend (from the repository root):
+
+```bash
+cargo build --release --bin canario-electron
+mkdir -p canario-app/sidecar
+cp -f target/release/canario-electron canario-app/sidecar/
+cd canario-app
+npm ci
+npm run build
+npx electron-builder --linux AppImage --publish never
+chmod +x dist/Canario-*.AppImage
+./dist/Canario-*.AppImage
+```
+
+The AppImage runs directly; no system installation is needed. If your system
+does not have FUSE support, launch it with `--appimage-extract-and-run`.
+
+### Model-backed smoke test
+
+The regular Rust tests do not require a downloaded model. To also exercise the
+actual ONNX recognizer with a synthetic WAV, point this opt-in test at an
+existing model directory (it does not download or modify model files):
+
+```bash
+CANARIO_TEST_MODEL_DIR="$HOME/.local/share/canario/models/sherpa-parakeet-tdt-v3" \
+  cargo test -p canario-core --test wav_integration \
+  transcribes_synthetic_wav_with_cached_model -- --ignored
+```
 
 ## How it works
 

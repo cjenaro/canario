@@ -17,6 +17,8 @@ extraResources:
     to: sidecar
     filter:
       - "**/*"
+  - from: resources/icon.png
+    to: icon.png
 
 # Files to include in the app
 files:
@@ -39,15 +41,16 @@ linux:
   category: Utility
   icon: resources/icon.png
   desktop:
-    Name: Canario
-    Comment: Voice-to-text
-    Categories: Utility
-    StartupWMClass: canario
-    SingleMainWindow: true
+    entry:
+      Name: Canario
+      Comment: Voice-to-text
+      Categories: Utility;
+      StartupWMClass: canario
+      SingleMainWindow: true
 
 # AppImage-specific settings
 appImage:
-  license: LICENSE
+  license: ../LICENSE
 
 # deb-specific settings
 deb:
@@ -128,6 +131,6 @@ nsis:
 # GitHub Releases for auto-update (Phase 4)
 publish:
   provider: github
-  owner: jenaro
+  owner: cjenaro
   repo: canario
   # No token needed for public repos

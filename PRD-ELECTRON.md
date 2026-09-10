@@ -1108,7 +1108,36 @@ Full list of commands the sidecar accepts, with their parameters and responses:
 | `stop_hotkey` | — | — | Stops listener |
 | `restart_hotkey` | — | — | Reloads config + restarts |
 | `ping` | — | `{ pong: true, version: "0.1.2" }` | Health check |
+| `diagnostics` | — | `Diagnostics` JSON (see below) | Reads log tail, probes tools |
 | `shutdown` | — | — | Stops recording + hotkey, exits |
+
+`diagnostics` returns a snapshot for support bundles / the "Copy diagnostics"
+button. Shape (all best-effort, fields degrade to `null`/`false`):
+
+```json
+{
+  "core_version": "0.1.2",
+  "frontend": { "name": "canario-electron", "version": "0.1.2" },
+  "system": { "os": "linux", "arch": "x86_64", "kernel": "Linux 6.x", "display_server": "wayland" },
+  "config_path": "~/.config/canario/config.json",
+  "config": { "...": "full AppConfig (local only, nothing redacted)" },
+  "model": {
+    "variant": "ParakeetV3",
+    "downloaded": true,
+    "paths_error": null,
+    "files": [{ "path": "…/encoder.int8.onnx", "exists": true, "size_bytes": 123 }]
+  },
+  "tools": { "xdotool": true, "wtype": false, "ydotool": false, "pactl": true },
+  "logs": {
+    "dir": "~/.local/state/canario/logs",
+    "latest_file": "~/.local/state/canario/logs/canario.log.2026-09-10",
+    "tail": ["last ~50 log lines"]
+  }
+}
+```
+
+The same blob is available on the CLI via `canario-cli --diagnostics`
+(frontend name `canario-cli`).
 
 ## Appendix B: Event Reference
 

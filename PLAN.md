@@ -2,6 +2,22 @@
 
 > Native Linux voice-to-text using Parakeet TDT, inspired by [Hex](https://github.com/kitlangton/Hex) for macOS.
 
+> **⚠ Status: historical.** This document was written when Canario was a
+> single-crate project and still describes that layout (`src/...`) and some
+> since-removed features. The code has since been split into a Cargo
+> workspace (`canario-core`, `canario-cli`, `canario-gtk`, `canario-electron`)
+> plus an Electron/SolidJS app (`canario-app`). Known stale items:
+>
+> - **VAD streaming** was removed (commit `7656c4a`) in favor of simple
+>   record-then-transcribe. Sections about Silero VAD are historical.
+> - **Audio capture** no longer lives in `src/audio/mod.rs`; recording is in
+>   `canario-core/src/recording.rs` (cpal). `canario-core/src/audio/` now
+>   only contains `effects.rs` (sound effects).
+> - **relm4 was never adopted** — the GTK app is raw gtk4-rs + libadwaita.
+>
+> Treat the phase write-ups below as a record of what was built, not a map
+> of the current codebase.
+
 ## What Works (v0.1.0)
 
 ### CLI (`canario-cli`)
@@ -9,7 +25,7 @@
 - ✅ Downloads INT8 quantized Parakeet TDT v3 model from HuggingFace (~640MB)
 - ✅ `sherpa-onnx` Rust bindings for ONNX inference + TDT decoding
 - ✅ Audio capture via `cpal`, resampling, WAV reading/writing
-- ✅ VAD-based streaming mic with Silero VAD
+- ✅ Mic recording (record-then-transcribe; VAD streaming was removed in `7656c4a`)
 - ✅ Toggle mode (press Enter to start/stop)
 - ✅ Auto-paste transcription into focused app
 
@@ -26,16 +42,16 @@
 ### CLI
 
 ```bash
-# Download model (ASR + VAD)
+# Download model (ASR)
 ./target/release/canario-cli --download
 
 # Transcribe a WAV file
 ./target/release/canario-cli --wav recording.wav
 
-# Stream from mic with VAD auto-detect (speak naturally)
+# Record from mic until Ctrl+C, then transcribe
 ./target/release/canario-cli --mic
 
-# Stream from mic + auto-paste into focused app
+# Record from mic + auto-paste into focused app
 ./target/release/canario-cli --mic --paste
 
 # Toggle mode: press Enter to start/stop recording
@@ -122,6 +138,11 @@ are pre-installed on virtually every GNOME desktop.
 
 ## Architecture
 
+> **Historical** — this is the original single-crate layout. The code is now
+> a Cargo workspace: `canario-core` (hotkey, recording, inference, config,
+> history, paste), `canario-cli`, `canario-gtk` (tray app), `canario-electron`
+> (sidecar), and the Electron/SolidJS frontend in `canario-app/`.
+
 ```
 src/
 ├── main.rs                 # GTK4 + Adwaita app entry point
@@ -144,9 +165,9 @@ src/
 
 | Crate | Purpose |
 |-------|---------|
-| `sherpa-onnx` | ONNX Runtime inference + TDT decoding + VAD (C++ via FFI) |
+| `sherpa-onnx` | ONNX Runtime inference + TDT decoding (C++ via FFI) |
 | `cpal` | Cross-platform audio capture |
-| `gtk4` + `adw` + `relm4` | GTK4 GUI with Adwaita + declarative state management |
+| `gtk4` + `adw` | GTK4 GUI with Adwaita (raw gtk4-rs; relm4 was considered but never adopted) |
 | `reqwest` | Download models from HuggingFace |
 | `parking_lot` | Fast mutex for shared audio buffer |
 
@@ -160,6 +181,9 @@ src/
 Stored at: `~/.local/share/canario/models/sherpa-parakeet-tdt-v3/`
 
 ### VAD Model
+
+> **Historical** — VAD streaming was removed in commit `7656c4a` in favor of
+> record-then-transcribe. The Silero VAD model is no longer downloaded or used.
 
 | Model | Source | Size |
 |-------|--------|------|
@@ -177,7 +201,7 @@ Hex uses:
 - **Auto-paste** via NSPasteboard
 
 Our Linux equivalent:
-- **GTK4 + Relm4** instead of SwiftUI + TCA
+- **GTK4 + libadwaita** (raw gtk4-rs) instead of SwiftUI + TCA
 - **sherpa-onnx** instead of FluidAudio/Core ML
 - **cpal** instead of AVAudioEngine
 - **evdev/X11/Wayland** instead of Sauce
@@ -190,7 +214,9 @@ Our Linux equivalent:
 ### Phase 1: Make the CLI Genuinely Useful
 
 #### 1.1 Streaming mic with VAD (auto-detect speech)
-**Status:** ✅ Done
+**Status:** ✅ Done — later removed in commit `7656c4a`, which replaced VAD
+streaming with simple record-then-transcribe (record until Ctrl+C / toggle,
+then transcribe). Kept here for historical context.
 **Difficulty:** Medium
 **Files:** `src/bin/canario-cli.rs`, `src/audio/mod.rs`
 
@@ -467,6 +493,10 @@ The most practical approach for v1:
 ---
 
 ## File Structure Plan (Target)
+
+> **Historical** — this was the planned single-crate layout. The actual code
+> now lives in the Cargo workspace crates (`canario-core`, `canario-cli`,
+> `canario-gtk`, `canario-electron`) and `canario-app/`.
 
 ```
 src/

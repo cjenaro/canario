@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Rust checks: fmt, check, clippy, test ────────────────────────────
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache sherpa-onnx prebuilt libs
+        id: sherpa-cache
+        uses: actions/cache@v4
+        with:
+          # sherpa-onnx-sys' build script auto-downloads the matching
+          # prebuilt archive into target/sherpa-onnx-prebuilt/ and reuses
+          # it if the extracted lib/ dir already exists.
+          path: target/sherpa-onnx-prebuilt
+          key: sherpa-onnx-prebuilt-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Download sherpa-onnx prebuilt libs
+        if: steps.sherpa-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # Version is pinned by Cargo.lock (sherpa-onnx-sys == sherpa-onnx).
+          version=$(awk '/^name = "sherpa-onnx-sys"$/{getline; print; exit}' Cargo.lock | sed -E 's/^version = "(.*)"$/\1/')
+          echo "sherpa-onnx version: $version"
+          archive="sherpa-onnx-v${version}-linux-x64-static-lib.tar.bz2"
+          url="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${version}/${archive}"
+          mkdir -p target/sherpa-onnx-prebuilt
+          curl -fL "$url" -o "target/sherpa-onnx-prebuilt/${archive}"
+          tar -xjf "target/sherpa-onnx-prebuilt/${archive}" -C target/sherpa-onnx-prebuilt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo clippy
+        # NOTE: -D warnings assumes the codebase is clippy-clean; if the
+        # concurrent canario-core fix lands with warnings, drop -D warnings.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  # ── Electron app: install + typecheck ────────────────────────────────
+  electron:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: canario-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: canario-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build

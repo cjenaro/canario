@@ -16,6 +16,8 @@ canario-debug.log
 canario-app/node_modules/
 canario-app/out/
 canario-app/dist/
+# Staged sidecar binary for electron-builder (built from target/release)
+canario-app/sidecar/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

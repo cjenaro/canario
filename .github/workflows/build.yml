@@ -28,6 +28,14 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Cache sherpa-onnx prebuilt libs
+        uses: actions/cache@v4
+        with:
+          # sherpa-onnx-sys build.rs auto-downloads the matching prebuilt
+          # archive into target/sherpa-onnx-prebuilt/ on first build.
+          path: target/sherpa-onnx-prebuilt
+          key: sherpa-onnx-prebuilt-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+
       - name: Build sidecar
         run: cargo build --release --bin canario-electron
 
@@ -44,76 +52,82 @@ jobs:
           path: canario-app/sidecar/
           retention-days: 1
 
-# ── Build & package Electron app for all platforms ───────────────────
-build-electron:
-  needs: build-sidecar
-  strategy:
-    matrix:
-      os: [ubuntu-latest, macos-latest, windows-latest]
-  runs-on: ${{ matrix.os }}
-  steps:
-    - uses: actions/checkout@v4
+  # ── Build & package Electron app for all platforms ───────────────────
+  build-electron:
+    needs: build-sidecar
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            builder-flag: --linux
+          - os: macos-latest
+            builder-flag: --mac
+          - os: windows-latest
+            builder-flag: --win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
 
-    - name: Download sidecar
-      uses: actions/download-artifact@v4
-      with:
-        name: sidecar-${{ matrix.os }}
-        path: canario-app/sidecar/
+      - name: Download sidecar
+        uses: actions/download-artifact@v4
+        with:
+          name: sidecar-${{ matrix.os }}
+          path: canario-app/sidecar/
 
-    - name: Make sidecar executable
-      if: runner.os != 'Windows'
-      run: chmod +x canario-app/sidecar/canario-electron
+      - name: Make sidecar executable
+        if: runner.os != 'Windows'
+        run: chmod +x canario-app/sidecar/canario-electron
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 22
-        cache: npm
-        cache-dependency-path: canario-app/package-lock.json
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: canario-app/package-lock.json
 
-    - name: Install dependencies
-      working-directory: canario-app
-      run: npm ci
+      - name: Install dependencies
+        working-directory: canario-app
+        run: npm ci
 
-    - name: Build renderer
-      working-directory: canario-app
-      run: npm run build
+      - name: Build renderer
+        working-directory: canario-app
+        run: npm run build
 
-    - name: Package (electron-builder)
-      working-directory: canario-app
-      run: npx electron-builder --${{ matrix.os }} --publish never
-      env:
-        CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Package (electron-builder)
+        working-directory: canario-app
+        run: npx electron-builder ${{ matrix.builder-flag }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
-    - name: Upload packaged artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: canario-${{ matrix.os }}
-        path: |
-          canario-app/dist/*/*
-        retention-days: 30
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: canario-${{ matrix.os }}
+          path: |
+            canario-app/dist/*/*
+          retention-days: 30
 
-# ── Create GitHub Release ────────────────────────────────────────────
-release:
-  if: startsWith(github.ref, 'refs/tags/v')
-  needs: build-electron
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v4
+  # ── Create GitHub Release ────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-electron
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts/
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
 
-    - name: List artifacts
-      run: find artifacts/ -type f | sort
+      - name: List artifacts
+        run: find artifacts/ -type f | sort
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        generate_release_notes: true
-        files: |
-          artifacts/canario-ubuntu-latest/**/*
-          artifacts/canario-macos-latest/**/*
-          artifacts/canario-windows-latest/**/*
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/canario-ubuntu-latest/**/*
+            artifacts/canario-macos-latest/**/*
+            artifacts/canario-windows-latest/**/*
