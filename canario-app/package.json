@@ -12,6 +12,7 @@
   },
   "keywords": [],
   "author": "Jenaro",
+  "homepage": "https://github.com/cjenaro/canario",
   "license": "MIT",
   "type": "module",
   "dependencies": {

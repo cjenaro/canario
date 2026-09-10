@@ -40,6 +40,8 @@ linux:
         - x64
   category: Utility
   icon: resources/icon.png
+  maintainer: Jenaro <cjenaro@users.noreply.github.com>
+  vendor: Jenaro
   desktop:
     entry:
       Name: Canario
