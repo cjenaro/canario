@@ -1,7 +1,6 @@
 /// GTK4 Application — thin wrapper around canario-core.
 ///
 /// Translates between the core's `Event` channel and GTK4 widgets.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -26,16 +25,15 @@ pub struct CanarioGtkApp {
     tray_handle: Arc<Mutex<Option<TrayHandle>>>,
     is_recording_flag: Arc<AtomicBool>,
     tray_rx: std::sync::mpsc::Receiver<TrayAction>,
+    tray_visibility_tx: std::sync::mpsc::Sender<bool>,
 }
 
 impl CanarioGtkApp {
     pub fn new(canario: Canario, rx: Receiver<Event>) -> Self {
-        let app = adw::Application::new(
-            Some("com.canario.Canario"),
-            ApplicationFlags::FLAGS_NONE,
-        );
+        let app = adw::Application::new(Some("com.canario.Canario"), ApplicationFlags::FLAGS_NONE);
         let is_recording_flag = Arc::new(AtomicBool::new(false));
         let (tray_tx, tray_rx) = std::sync::mpsc::channel();
+        let (tray_visibility_tx, tray_visibility_rx) = std::sync::mpsc::channel();
 
         let gtk_app = Self {
             app,
@@ -44,16 +42,35 @@ impl CanarioGtkApp {
             tray_handle: Arc::new(Mutex::new(None)),
             is_recording_flag,
             tray_rx,
+            tray_visibility_tx,
         };
 
-        gtk_app.setup_signals(tray_tx);
+        // Serialize tray creation and removal off the GTK thread. A visibility
+        // change during D-Bus startup is applied as soon as startup finishes.
+        let flag = gtk_app.is_recording_flag.clone();
+        let handle = gtk_app.tray_handle.clone();
+        std::thread::spawn(move || {
+            while let Ok(visible) = tray_visibility_rx.recv() {
+                if visible {
+                    match start_tray(flag.clone(), tray_tx.clone()) {
+                        Ok(tray) => *handle.lock().unwrap() = Some(tray),
+                        Err(e) => tracing::error!("Tray icon failed: {}", e),
+                    }
+                } else if let Some(tray) = handle.lock().unwrap().take() {
+                    tray.shutdown().wait();
+                }
+            }
+            if let Some(tray) = handle.lock().unwrap().take() {
+                tray.shutdown().wait();
+            }
+        });
+
+        gtk_app.setup_signals();
         gtk_app
     }
 
-    fn setup_signals(&self, tray_tx: std::sync::mpsc::Sender<TrayAction>) {
+    fn setup_signals(&self) {
         let canario = self.canario.clone();
-        let tx_tray = self.is_recording_flag.clone();
-        let tray_handle = self.tray_handle.clone();
 
         self.app.connect_startup(move |app| {
             tracing::info!("Canario GTK startup");
@@ -63,29 +80,24 @@ impl CanarioGtkApp {
                 tracing::warn!("Hotkey listener failed to start: {}", e);
             }
 
-            // Start system tray
-            let flag = tx_tray.clone();
-            let th = tray_handle.clone();
-            let tt = tray_tx.clone();
-            std::thread::spawn(move || {
-                match start_tray(flag, tt) {
-                    Ok(handle) => {
-                        *th.lock().unwrap() = Some(handle);
-                        tracing::info!("System tray icon started");
-                    }
-                    Err(e) => {
-                        tracing::error!("Tray icon failed: {}", e);
-                    }
-                }
-            });
-
+            // Keep the application alive for the entire tray lifetime.
+            //
+            // Canario is a tray app: most of the time it has NO windows open,
+            // and GTK exits the main loop when the last window closes. Holding
+            // a use-count on the Application prevents that. The hold is
+            // intentionally never released — the guard lives until process
+            // exit, when the OS reclaims it. `std::mem::forget` just makes
+            // that "leak on purpose" explicit; there is no cleaner GTK idiom
+            // for "run forever with zero windows".
             std::mem::forget(app.hold());
         });
 
-        // BUG-002: Auto-open Settings on first launch when no model downloaded
+        // On first launch (no model downloaded yet), open Settings so the
+        // user is prompted to download the ASR model.
         let canario_activate = self.canario.clone();
         self.app.connect_activate(move |app| {
-            if !canario_activate.is_model_downloaded() {
+            if !canario_activate.is_model_downloaded() || !canario_activate.config().show_tray_icon
+            {
                 SettingsWindow::present(app, &canario_activate);
             }
         });
@@ -98,11 +110,19 @@ impl CanarioGtkApp {
         let canario = self.canario;
         let tray_handle = self.tray_handle;
         let is_recording_flag = self.is_recording_flag;
+        let tray_visibility_tx = self.tray_visibility_tx;
+        let mut tray_visible = None;
 
         let app_clone = app.clone();
 
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            // BUG-001: Poll tray action channel
+            let visible = canario.config().show_tray_icon;
+            if tray_visible != Some(visible) {
+                let _ = tray_visibility_tx.send(visible);
+                tray_visible = Some(visible);
+            }
+
+            // Drain pending tray actions (sent from the ksni tray thread).
             while let Ok(action) = tray_rx.try_recv() {
                 match action {
                     TrayAction::ToggleRecording => {
@@ -175,7 +195,19 @@ fn handle_event(
             refresh_tray(tray_handle);
         }
 
-        Event::TranscriptionReady { text, duration_secs } => {
+        Event::RecordingCancelled => {
+            // Recording was discarded (Escape) — hide the indicator,
+            // reset the tray, and do NOT paste or add to history.
+            tracing::info!("Recording cancelled — audio discarded");
+            is_recording_flag.store(false, Ordering::SeqCst);
+            RecordingIndicator::hide(app);
+            refresh_tray(tray_handle);
+        }
+
+        Event::TranscriptionReady {
+            text,
+            duration_secs,
+        } => {
             tracing::info!("✅ Transcription: {}", text);
 
             let config = canario.config();
@@ -207,37 +239,20 @@ fn handle_event(
             RecordingIndicator::update_level(app, level);
         }
 
-        // BUG-003: Model download progress — find by widget name
+        // Model download events are routed straight to the settings window's
+        // registered download-status widgets (see model_manager.rs).
         Event::ModelDownloadProgress { progress: p } => {
-            if let Some(win) = app
-                .windows()
-                .into_iter()
-                .find(|w| w.widget_name() == "canario-settings")
-            {
-                update_download_progress(&win, p);
-            }
+            crate::ui::model_manager::download_progress(p);
         }
 
         Event::ModelDownloadComplete => {
             tracing::info!("Model download complete");
-            if let Some(win) = app
-                .windows()
-                .into_iter()
-                .find(|w| w.widget_name() == "canario-settings")
-            {
-                update_download_complete(&win);
-            }
+            crate::ui::model_manager::download_complete();
         }
 
         Event::ModelDownloadFailed { error: err } => {
             tracing::error!("Model download failed: {}", err);
-            if let Some(win) = app
-                .windows()
-                .into_iter()
-                .find(|w| w.widget_name() == "canario-settings")
-            {
-                update_download_failed(&win, &err);
-            }
+            crate::ui::model_manager::download_failed(&err);
         }
 
         Event::HotkeyTriggered => {
@@ -249,79 +264,4 @@ fn handle_event(
 /// Play confirmation beep (callable without &self)
 pub fn app_beep_confirm() {
     canario_core::audio_effects::beep_confirm();
-}
-
-// ── BUG-003: Widget-tree helpers that search by widget name ──────────────
-
-fn find_widget_by_name(widget: &gtk4::Widget, name: &str) -> Option<gtk4::Widget> {
-    if widget.widget_name() == name {
-        return Some(widget.clone());
-    }
-    let mut child = widget.first_child();
-    while let Some(c) = child {
-        if let Some(found) = find_widget_by_name(&c, name) {
-            return Some(found);
-        }
-        child = c.next_sibling();
-    }
-    None
-}
-
-fn update_download_progress(win: &gtk4::Window, progress: f64) {
-    if let Some(pb) = find_widget_by_name(win.upcast_ref(), "model-download-progress")
-        .and_then(|w| w.downcast::<gtk4::ProgressBar>().ok())
-    {
-        pb.set_visible(true);
-        pb.set_fraction(progress);
-        pb.set_show_text(true);
-    }
-}
-
-fn update_download_complete(win: &gtk4::Window) {
-    if let Some(pb) = find_widget_by_name(win.upcast_ref(), "model-download-progress")
-        .and_then(|w| w.downcast::<gtk4::ProgressBar>().ok())
-    {
-        pb.set_fraction(1.0);
-        pb.set_visible(false);
-    }
-    if let Some(label) = find_widget_by_name(win.upcast_ref(), "model-status-label")
-        .and_then(|w| w.downcast::<gtk4::Label>().ok())
-    {
-        label.set_label("✅ Ready");
-    }
-    if let Some(dl_btn) = find_widget_by_name(win.upcast_ref(), "model-download-btn")
-        .and_then(|w| w.downcast::<gtk4::Button>().ok())
-    {
-        dl_btn.set_visible(false);
-        dl_btn.set_sensitive(true);
-    }
-    if let Some(del_btn) = find_widget_by_name(win.upcast_ref(), "model-delete-btn")
-        .and_then(|w| w.downcast::<gtk4::Button>().ok())
-    {
-        del_btn.set_visible(true);
-    }
-}
-
-fn update_download_failed(win: &gtk4::Window, err: &str) {
-    if let Some(pb) = find_widget_by_name(win.upcast_ref(), "model-download-progress")
-        .and_then(|w| w.downcast::<gtk4::ProgressBar>().ok())
-    {
-        pb.set_visible(false);
-    }
-    if let Some(label) = find_widget_by_name(win.upcast_ref(), "model-status-label")
-        .and_then(|w| w.downcast::<gtk4::Label>().ok())
-    {
-        label.set_label(&format!("❌ Failed: {}", err));
-    }
-    if let Some(dl_btn) = find_widget_by_name(win.upcast_ref(), "model-download-btn")
-        .and_then(|w| w.downcast::<gtk4::Button>().ok())
-    {
-        dl_btn.set_visible(true);
-        dl_btn.set_sensitive(true);
-    }
-    if let Some(del_btn) = find_widget_by_name(win.upcast_ref(), "model-delete-btn")
-        .and_then(|w| w.downcast::<gtk4::Button>().ok())
-    {
-        del_btn.set_visible(false);
-    }
 }

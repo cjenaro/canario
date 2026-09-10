@@ -1,24 +1,37 @@
 // Settings / Main page for Canario Electron
 // Phase 2: Polish - animations, error states, empty states, autostart
-import { createSignal, Show, For, onMount, createEffect } from "solid-js";
+import { createSignal, Show, For, onMount, onCleanup, createEffect } from "solid-js";
+import { createVirtualizer } from "@tanstack/solid-virtual";
 import { useAppState } from "../state/context";
 import { createCanario } from "../primitives/createCanario";
 import { HotkeyCapture, toAccelerator } from "../components/HotkeyCapture";
 import { WordRemapping } from "../components/WordRemapping";
 import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
+import { applyTheme } from "../theme";
+import {
+  CUSTOM_MODEL_ID,
+  customModelStatus,
+  customPathConfigKey,
+  pickFileFilters,
+  type CustomModelPaths,
+} from "../primitives/customModel";
 
 const MODELS = [
   { id: "ParakeetV3", name: "Parakeet TDT v3", desc: "Multilingual · ~640MB" },
   { id: "ParakeetV2", name: "Parakeet TDT v2", desc: "English only · ~640MB" },
 ] as const;
 
+// Local-only variant — no download; core resolves custom_*_path files.
+const CUSTOM_MODEL = { id: CUSTOM_MODEL_ID, name: "Custom model", desc: "Local sherpa-onnx files · no download" };
+const ALL_MODELS = [...MODELS, CUSTOM_MODEL];
+
 type HistoryEntry = { id: string; text: string; duration_secs: number; timestamp: string };
 
 export function AppPage() {
   const machine = useAppState();
   const canario = createCanario(machine);
-  const { state, context, updateContext } = machine;
+  const { state, context, updateContext, send } = machine;
 
   const [history, setHistory] = createSignal<HistoryEntry[]>([]);
   const [selectedModel, setSelectedModel] = createSignal("ParakeetV3");
@@ -35,7 +48,9 @@ export function AppPage() {
   const [autoPaste, setAutoPaste] = createSignal(true);
   const [soundEffects, setSoundEffects] = createSignal(true);
   const [autostart, setAutostart] = createSignal(false);
+  const [showTrayIcon, setShowTrayIcon] = createSignal(true);
   const [audioBehavior, setAudioBehavior] = createSignal<string>("DoNothing");
+  const [customPaths, setCustomPaths] = createSignal<CustomModelPaths>({ encoder: "", decoder: "", tokens: "" });
   const [remappings, setRemappings] = createSignal<{ from: string; to: string }[]>([]);
   const [removals, setRemovals] = createSignal<{ word: string }[]>([]);
   const [platform, setPlatform] = createSignal<{ isLinux: boolean; isMac: boolean; isWindows: boolean }>({ isLinux: true, isMac: false, isWindows: false });
@@ -66,26 +81,11 @@ export function AppPage() {
   }
 
   async function checkModelDownloaded(modelId: string): Promise<boolean> {
-    await canario.updateConfig({ model: modelId });
-    const res = await canario.command("is_model_downloaded");
+    const res = await canario.command("is_model_downloaded", { model: modelId });
     return !!(res?.ok) && res.data === true;
   }
 
   // Apply theme
-  function applyTheme(t: string) {
-    const root = document.documentElement;
-    if (t === "light") {
-      root.style.setProperty("color-scheme", "light");
-      root.setAttribute("data-theme", "light");
-    } else if (t === "system") {
-      root.style.removeProperty("color-scheme");
-      root.removeAttribute("data-theme");
-    } else {
-      root.style.setProperty("color-scheme", "dark");
-      root.setAttribute("data-theme", "dark");
-    }
-  }
-
   createEffect(() => {
     applyTheme(theme());
   });
@@ -106,7 +106,7 @@ export function AppPage() {
     if (query) {
       res = await canario.searchHistory(query);
     } else {
-      res = await canario.getHistory(50);
+      res = await canario.getHistory(1000);
     }
     if (res?.ok && Array.isArray(res.data)) {
       setHistory(res.data as HistoryEntry[]);
@@ -133,7 +133,13 @@ export function AppPage() {
         setAutoPaste((config.auto_paste as boolean) ?? true);
         setSoundEffects((config.sound_effects as boolean) ?? true);
         setAutostart((config.autostart as boolean) ?? false);
+        setShowTrayIcon((config.show_tray_icon as boolean) ?? true);
         setAudioBehavior((config.recording_audio_behavior as string) || "DoNothing");
+        setCustomPaths({
+          encoder: (config.custom_encoder_path as string) || "",
+          decoder: (config.custom_decoder_path as string) || "",
+          tokens: (config.custom_tokens_path as string) || "",
+        });
 
         // Post-processor
         const pp = config.post_processor as Record<string, unknown> | undefined;
@@ -153,13 +159,19 @@ export function AppPage() {
         }
       }
 
-      // Restore original model selection
+      // Inventory checks leave the selected model unchanged.
       const originalModel = (cfg as Record<string, unknown>)?.model as string || "ParakeetV3";
-      await canario.updateConfig({ model: originalModel });
       setSelectedModel(originalModel);
 
-      // 3. Update app state
-      const currentReady = downloadedModels().has(originalModel);
+      // 3. Update app state — Custom is local-only, so ask the core whether
+      // the resolved custom_*_path files exist instead of the download set.
+      let currentReady: boolean;
+      if (originalModel === CUSTOM_MODEL_ID) {
+        const res = await canario.command("is_model_downloaded");
+        currentReady = !!(res?.ok) && res.data === true;
+      } else {
+        currentReady = downloadedModels().has(originalModel);
+      }
       updateContext({ modelReady: currentReady });
       setInitialModelCheck(true);
 
@@ -174,6 +186,39 @@ export function AppPage() {
       showToast("Failed to initialize. Check that canario-electron sidecar is running.", "error", 8000);
     }
     setLoading(false);
+  });
+
+  // Tray "History" menu item — scroll the History section into view
+  onMount(() => {
+    const unsub = canario.onNavigateHistory(() => {
+      requestAnimationFrame(() => {
+        historySectionRef?.scrollIntoView({ behavior: "smooth", block: "start" });
+        historySectionRef?.focus({ preventScroll: true });
+      });
+    });
+    onCleanup(unsub);
+  });
+
+  // A download finished (possibly for a variant other than the one now
+  // selected): refresh the per-variant readiness set so the Model section
+  // flips from "Download" to "Ready" without a remount, and re-derive
+  // readiness for the current selection.
+  onMount(() => {
+    const unsub = canario.onModelDownloadComplete(() => {
+      void (async () => {
+        const modelId = selectedModel();
+        if (modelId === CUSTOM_MODEL_ID) {
+          await canario.checkModel();
+          return;
+        }
+        const ready = await checkModelDownloaded(modelId);
+        if (ready) {
+          setDownloadedModels((prev) => new Set([...prev, modelId]));
+        }
+        updateContext({ modelReady: ready });
+      })();
+    });
+    onCleanup(unsub);
   });
 
   async function handleToggle() {
@@ -191,8 +236,23 @@ export function AppPage() {
   async function handleSelectModel(modelId: string) {
     setSelectedModel(modelId);
     await canario.updateConfig({ model: modelId });
-    const ready = downloadedModels().has(modelId);
-    updateContext({ modelReady: ready });
+    if (modelId === CUSTOM_MODEL_ID) {
+      // Local-only: readiness = the core finds all resolved custom files
+      await canario.checkModel();
+    } else {
+      const ready = downloadedModels().has(modelId);
+      updateContext({ modelReady: ready });
+    }
+  }
+
+  // Custom model: pick one of the three local sherpa-onnx files
+  async function handlePickCustomPath(field: keyof CustomModelPaths) {
+    const path = await canario.pickFile(pickFileFilters(field));
+    if (!path) return; // dialog cancelled
+    setCustomPaths((prev) => ({ ...prev, [field]: path }));
+    await canario.updateConfig({ [customPathConfigKey(field)]: path });
+    // Refresh readiness — the core verifies the resolved files exist
+    await canario.checkModel();
   }
 
   async function handleDownload() {
@@ -218,6 +278,12 @@ export function AppPage() {
     await canario.updateConfig({ [field]: value });
     if (field === "auto_paste") setAutoPaste(value);
     if (field === "sound_effects") setSoundEffects(value);
+    if (field === "show_tray_icon") {
+      setShowTrayIcon(value);
+      if (!value) {
+        showToast("Tray icon hidden — relaunch Canario to reopen this window", "info", 5000);
+      }
+    }
     if (field === "autostart") {
       setAutostart(value);
       const ok = await canario.setAutostart(value);
@@ -270,8 +336,62 @@ export function AppPage() {
     await canario.setTheme(t);
   }
 
+  // Re-run the onboarding wizard (PRD §5.1): clear the persisted flag and
+  // move the state machine back into `onboarding` — App.tsx routes on it.
+  async function handleRerunOnboarding() {
+    await canario.setOnboardingCompleted(false);
+    send({ type: "START_ONBOARDING" });
+  }
+
   const currentModelDownloaded = () => downloadedModels().has(selectedModel());
-  const currentModel = () => MODELS.find(m => m.id === selectedModel()) || MODELS[0];
+  const currentModel = () => ALL_MODELS.find(m => m.id === selectedModel()) || MODELS[0];
+
+  // Custom model status — derived from the configured paths + the core's
+  // is_model_downloaded verdict (context().modelReady while Custom is selected)
+  const customStatus = () => customModelStatus(customPaths(), context().modelReady);
+  const customMissing = () => {
+    const s = customStatus();
+    return s.kind === "missing-paths" ? s.missing : null;
+  };
+
+  // ── Virtualized history list ────────────────────────────────────
+  // The list lives inside the page-level scroll container (below several
+  // conditional sections), so the virtualizer tracks that scroller plus a
+  // scrollMargin equal to the list's offset within it.
+  const [scrollEl, setScrollEl] = createSignal<HTMLDivElement | null>(null);
+  const [historyListEl, setHistoryListEl] = createSignal<HTMLDivElement | null>(null);
+  const [historyListOffset, setHistoryListOffset] = createSignal(0);
+  let historySectionRef: HTMLElement | undefined;
+
+  const historyVirtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
+    get count() {
+      return history().length;
+    },
+    getScrollElement: () => scrollEl(),
+    estimateSize: () => 86,
+    overscan: 6,
+    gap: 8,
+    get scrollMargin() {
+      return historyListOffset();
+    },
+  });
+
+  // Recompute the list offset when any layout above it can shift.
+  createEffect(() => {
+    history();
+    loading();
+    context().lastTranscription;
+    context().modelReady;
+    initialModelCheck();
+    downloadedModels();
+    state().status;
+    const list = historyListEl();
+    const scroller = scrollEl();
+    if (!list || !scroller) return;
+    setHistoryListOffset(
+      list.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+    );
+  });
 
   // Reusable styles
   const sectionStyle = { "background-color": "var(--surface)", "border-color": "var(--border)" } as const;
@@ -279,7 +399,7 @@ export function AppPage() {
   const sectionHeaderStyle = { color: "var(--text-secondary)" } as const;
 
   return (
-    <div class="h-screen overflow-y-auto" style={{ "background-color": "var(--bg)", color: "var(--text-primary)" }}>
+    <div ref={setScrollEl} class="h-screen overflow-y-auto" style={{ "background-color": "var(--bg)", color: "var(--text-primary)" }}>
       {/* Header bar */}
       <div
         class="sticky top-0 z-10 flex items-center h-12 px-5 border-b"
@@ -327,7 +447,7 @@ export function AppPage() {
             <h2 class={sectionHeader} style={sectionHeaderStyle}>Model</h2>
 
             <div class="flex flex-col gap-2 mb-4">
-              <For each={MODELS}>
+              <For each={ALL_MODELS}>
                 {(model) => (
                   <button
                     class="flex items-center justify-between p-3 rounded-lg border transition-colors cursor-pointer"
@@ -358,6 +478,69 @@ export function AppPage() {
               </For>
             </div>
 
+            <Show
+              when={selectedModel() !== CUSTOM_MODEL_ID}
+              fallback={
+                /* Custom model: local-only — no Download button (the core
+                   rejects download_model for Custom). Configure the three
+                   sherpa-onnx paths instead. */
+                <div class="flex flex-col gap-3">
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                    Point Canario at your own sherpa-onnx files. joiner.int8.onnx must sit next to the encoder.
+                  </p>
+                  <For each={(["encoder", "decoder", "tokens"] as const)}>
+                    {(field) => (
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs w-16 shrink-0 capitalize" style={{ color: "var(--text-secondary)" }}>
+                          {field}
+                        </span>
+                        <input
+                          type="text"
+                          readOnly
+                          value={customPaths()[field]}
+                          placeholder="Not set"
+                          title={customPaths()[field]}
+                          class="flex-1 min-w-0 px-2 py-1.5 rounded-lg border text-xs"
+                          style={{
+                            "background-color": "var(--bg)",
+                            "border-color": "var(--border)",
+                            color: "var(--text-primary)",
+                            outline: "none",
+                          }}
+                        />
+                        <button
+                          class="px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:opacity-80 shrink-0"
+                          style={{
+                            "background-color": "var(--bg)",
+                            "border-color": "var(--border)",
+                            color: "var(--text-primary)",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => handlePickCustomPath(field)}
+                        >
+                          Browse…
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                  <Show when={customMissing()}>
+                    <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                      ⚠ Set the {customMissing()!.join(", ")} path{customMissing()!.length > 1 ? "s" : ""} — recording will fail until all three are configured.
+                    </p>
+                  </Show>
+                  <Show when={customStatus().kind === "files-missing"}>
+                    <p class="text-xs" style={{ color: "var(--error)" }}>
+                      ⚠ One or more model files weren't found on disk — check the paths above.
+                    </p>
+                  </Show>
+                  <Show when={customStatus().kind === "ready"}>
+                    <p class="text-sm font-medium py-1" style={{ color: "var(--success)" }}>
+                      ✓ Custom model is ready
+                    </p>
+                  </Show>
+                </div>
+              }
+            >
             <Show
               when={currentModelDownloaded()}
               fallback={
@@ -422,6 +605,7 @@ export function AppPage() {
                 </button>
               </div>
             </Show>
+            </Show>
           </section>
 
           {/* ── Quick Record ──────────────────────────────────────── */}
@@ -478,10 +662,20 @@ export function AppPage() {
             <div class="rounded-xl border p-4 flex items-start gap-3" style={{ "background-color": "rgba(239, 68, 68, 0.06)", "border-color": "rgba(239, 68, 68, 0.2)" }}>
               <span class="text-lg leading-none mt-0.5">🎙️</span>
               <div class="flex-1">
-                <p class="text-sm font-medium" style={{ color: "var(--error)" }}>No model downloaded</p>
-                <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                  Download a speech recognition model above to start transcribing.
-                </p>
+                <p class="text-sm font-medium" style={{ color: "var(--error)" }}>Model not ready</p>
+                <Show
+                  when={selectedModel() === CUSTOM_MODEL_ID}
+                  fallback={
+                    <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                      Download a speech recognition model above to start transcribing.
+                    </p>
+                  }
+                >
+                  <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                    Point Canario at your local model files above (encoder, decoder, tokens — plus
+                    joiner.int8.onnx next to the encoder) to start transcribing.
+                  </p>
+                </Show>
               </div>
             </div>
           </Show>
@@ -545,6 +739,14 @@ export function AppPage() {
                 <Toggle checked={soundEffects()} onChange={(v) => handleConfigToggle("sound_effects", v)} />
               </div>
 
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Show tray icon</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Show Canario in the system tray</p>
+                </div>
+                <Toggle checked={showTrayIcon()} onChange={(v) => handleConfigToggle("show_tray_icon", v)} />
+              </div>
+
               {/* Autostart */}
               <div class="flex items-center justify-between">
                 <div>
@@ -575,6 +777,13 @@ export function AppPage() {
                   <option value="Mute">Mute system audio</option>
                 </select>
               </div>
+              <Show when={audioBehavior() === "Mute"}>
+                <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                  Mute mutes the default audio output via pactl (PulseAudio/PipeWire) while recording and restores
+                  its previous state when the recording stops or is cancelled. If pactl isn't available (e.g. macOS,
+                  Windows, or a minimal Linux install), audio simply stays on and a warning is logged.
+                </p>
+              </Show>
             </div>
           </section>
 
@@ -649,6 +858,19 @@ export function AppPage() {
                   </div>
                 </Show>
               </div>
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Onboarding</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Replay the first-launch setup wizard</p>
+                </div>
+                <button
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:opacity-80"
+                  style={{ "background-color": "var(--bg)", "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
+                  onClick={handleRerunOnboarding}
+                >
+                  Re-run
+                </button>
+              </div>
               <Show when={updateAvailable()}>
                 <div class="rounded-lg p-3 flex items-start gap-2" style={{ "background-color": "rgba(74, 222, 128, 0.06)", border: "1px solid rgba(74, 222, 128, 0.2)" }}>
                   <span class="text-sm leading-none mt-0.5">🎉</span>
@@ -664,7 +886,13 @@ export function AppPage() {
           </section>
 
           {/* ── History ───────────────────────────────────────────── */}
-          <section class="rounded-xl border p-5" style={sectionStyle}>
+          <section
+            ref={historySectionRef}
+            id="history-section"
+            tabindex="-1"
+            class="rounded-xl border p-5 scroll-mt-14 outline-none"
+            style={sectionStyle}
+          >
             <div class="flex items-center justify-between mb-3">
               <h2 class={sectionHeader} style={sectionHeaderStyle}>History</h2>
               <Show when={history().length > 0}>
@@ -734,45 +962,67 @@ export function AppPage() {
                 </Show>
               </div>
             }>
-              <div class="flex flex-col gap-2">
-                <For each={history()}>
-                  {(entry) => (
-                    <div
-                      class="group p-3 rounded-lg border transition-colors"
-                      classList={{
-                        "animate-slide-left": deletingIds().has(entry.id),
-                      }}
-                      style={{ "background-color": "var(--bg)", "border-color": "var(--border)" }}
-                    >
-                      <p class="text-sm leading-relaxed">{entry.text}</p>
-                      <div class="flex items-center justify-between mt-1.5">
-                        <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                          {entry.duration_secs.toFixed(1)}s · {formatTimestamp(entry.timestamp)}
-                        </p>
-                        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                          <button
-                            class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
-                            style={{ color: "var(--text-secondary)", cursor: "pointer" }}
-                            onClick={() => {
-                              navigator.clipboard.writeText(entry.text);
-                              showToast("Copied to clipboard", "success", 2000);
-                            }}
-                            title="Copy"
-                          >
-                            📋
-                          </button>
-                          <button
-                            class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
-                            style={{ color: "var(--text-secondary)", cursor: "pointer" }}
-                            onClick={() => handleDeleteHistory(entry.id)}
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
+              <div
+                ref={setHistoryListEl}
+                style={{
+                  height: `${historyVirtualizer.getTotalSize()}px`,
+                  width: "100%",
+                  position: "relative",
+                }}
+              >
+                <For each={historyVirtualizer.getVirtualItems()}>
+                  {(virtualRow) => {
+                    const entry = history()[virtualRow.index];
+                    return (
+                      <div
+                        data-index={virtualRow.index}
+                        ref={historyVirtualizer.measureElement}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${virtualRow.start - historyVirtualizer.options.scrollMargin}px)`,
+                        }}
+                      >
+                        <div
+                          class="group p-3 rounded-lg border transition-colors"
+                          classList={{
+                            "animate-slide-left": deletingIds().has(entry.id),
+                          }}
+                          style={{ "background-color": "var(--bg)", "border-color": "var(--border)" }}
+                        >
+                          <p class="text-sm leading-relaxed">{entry.text}</p>
+                          <div class="flex items-center justify-between mt-1.5">
+                            <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                              {entry.duration_secs.toFixed(1)}s · {formatTimestamp(entry.timestamp)}
+                            </p>
+                            <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                              <button
+                                class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
+                                style={{ color: "var(--text-secondary)", cursor: "pointer" }}
+                                onClick={() => {
+                                  navigator.clipboard.writeText(entry.text);
+                                  showToast("Copied to clipboard", "success", 2000);
+                                }}
+                                title="Copy"
+                              >
+                                📋
+                              </button>
+                              <button
+                                class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
+                                style={{ color: "var(--text-secondary)", cursor: "pointer" }}
+                                onClick={() => handleDeleteHistory(entry.id)}
+                                title="Delete"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  }}
                 </For>
               </div>
             </Show>

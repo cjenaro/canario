@@ -3,9 +3,16 @@
 /// Appears when recording starts, shows an audio level meter,
 /// changes to "Transcribing…" when done, then disappears after paste.
 ///
-/// Note: In GTK4, true overlay positioning requires gtk4-layer-shell.
-/// For now this is a simple undecorated popup window. Phase 4 can add
-/// proper layer-shell integration for Wayland.
+/// Positioning limitations: GTK4 deliberately offers no API to position
+/// top-level windows, keep them above others, or make them click-through —
+/// on Wayland that is exclusively layer-shell territory. So this window:
+/// - is undecorated and small (240x80), and
+/// - never accepts keyboard focus (it must not steal focus from the app
+///   the user is dictating into).
+///
+/// Its on-screen position is left to the compositor. Proper top-center
+/// overlay placement (active-monitor workarea) + keep-on-top require
+/// gtk4-layer-shell — tracked as bead canario-7ah.10.
 use gtk4::prelude::*;
 use libadwaita as adw;
 
@@ -16,9 +23,10 @@ pub struct RecordingIndicator;
 impl RecordingIndicator {
     /// Show the recording indicator. Creates one if none exists.
     pub fn show(app: &adw::Application) {
-        let existing = app.windows().into_iter().find(|w| {
-            w.widget_name() == "canario-indicator"
-        });
+        let existing = app
+            .windows()
+            .into_iter()
+            .find(|w| w.widget_name() == "canario-indicator");
         if existing.is_some() {
             return;
         }
@@ -29,9 +37,10 @@ impl RecordingIndicator {
 
     /// Hide the recording indicator
     pub fn hide(app: &adw::Application) {
-        let existing = app.windows().into_iter().find(|w| {
-            w.widget_name() == "canario-indicator"
-        });
+        let existing = app
+            .windows()
+            .into_iter()
+            .find(|w| w.widget_name() == "canario-indicator");
         if let Some(win) = existing {
             win.close();
         }
@@ -39,9 +48,10 @@ impl RecordingIndicator {
 
     /// Update the audio level meter (0.0 – 1.0)
     pub fn update_level(app: &adw::Application, level: f64) {
-        let existing = app.windows().into_iter().find(|w| {
-            w.widget_name() == "canario-indicator"
-        });
+        let existing = app
+            .windows()
+            .into_iter()
+            .find(|w| w.widget_name() == "canario-indicator");
         if let Some(win) = existing {
             // Walk the widget tree to find the progress bar
             find_and_update_progress(win.upcast_ref::<gtk4::Widget>(), level);
@@ -70,6 +80,10 @@ fn build_indicator_window(app: &adw::Application) -> gtk4::Window {
     win.set_default_size(240, 80);
     win.set_decorated(false);
     win.set_resizable(false);
+    // No focus steal: the indicator is passive UI; it must never pull
+    // keyboard focus away from the app receiving the transcription.
+    win.set_can_focus(false);
+    win.set_focusable(false);
 
     let container = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     container.set_margin_start(12);

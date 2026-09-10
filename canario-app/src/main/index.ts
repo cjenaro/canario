@@ -1,8 +1,8 @@
 // Canario Electron — main process entry
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage, screen } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen } from "electron";
 import { join } from "path";
-import { createTray, setSettingsWindow, updateTrayMenu } from "./tray.js";
-import { startSidecar, stopSidecar, sendCommand, onSidecarEvent } from "./sidecar.js";
+import { createTray, setSettingsWindow, setTrayVisible, updateTrayMenu } from "./tray.js";
+import { startSidecar, stopSidecar, sendCommand, onSidecarEvent, onCommandResponse } from "./sidecar.js";
 import { loadWindowState, saveWindowState, trackWindowState } from "./windowState.js";
 import { setAutostart } from "./autostart.js";
 import { autoPasteText } from "./autoPaste.js";
@@ -61,9 +61,18 @@ function createMainWindow() {
   }
 }
 
+// Size + position the overlay to cover the display containing the cursor.
+// Re-evaluated every time the overlay is shown so multi-monitor setups work.
+function positionOverlayWindow() {
+  if (!overlayWindow) return;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const { x, y, width, height } = display.bounds;
+  overlayWindow.setBounds({ x, y, width, height });
+}
+
 function createOverlayWindow() {
   const display = screen.getPrimaryDisplay();
-  const { width, height } = display.workAreaSize;
+  const { x, y, width, height } = display.bounds;
 
   overlayWindow = new BrowserWindow({
     width: width,
@@ -75,8 +84,8 @@ function createOverlayWindow() {
     skipTaskbar: true,
     resizable: false,
     show: false,
-    x: 0,
-    y: 0,
+    x: x,
+    y: y,
     webPreferences: {
       preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
@@ -103,7 +112,9 @@ ipcMain.handle("sidecar:command", async (_e, cmd: Record<string, unknown>) => {
 
 // Show/hide overlay
 ipcMain.handle("overlay:show", () => {
-  // Full-screen overlay — position doesn't matter, CSS handles placement
+  // Full-screen overlay — re-position onto the display with the cursor each
+  // time it's shown (multi-monitor), CSS handles placement within it.
+  positionOverlayWindow();
   overlayWindow?.showInactive();
 });
 
@@ -153,6 +164,28 @@ ipcMain.handle("theme:set", (_e, theme: string) => {
   } catch { /* ignore */ }
 });
 
+// Onboarding completion persistence (mirrors theme persistence above).
+// Stored in a small JSON file rather than the sidecar's AppConfig so the
+// renderer can gate first-launch routing without a protocol change.
+ipcMain.handle("onboarding:get", () => {
+  try {
+    const path = join(app.getPath("userData"), "onboarding.json");
+    const { readFileSync, existsSync } = require("fs");
+    if (existsSync(path)) {
+      return !!JSON.parse(readFileSync(path, "utf-8")).completed;
+    }
+  } catch { /* ignore */ }
+  return false; // default: onboarding not completed → first launch
+});
+
+ipcMain.handle("onboarding:set", (_e, completed: boolean) => {
+  try {
+    const { writeFileSync } = require("fs");
+    const path = join(app.getPath("userData"), "onboarding.json");
+    writeFileSync(path, JSON.stringify({ completed }));
+  } catch { /* ignore */ }
+});
+
 // Auto-paste: copy text to clipboard + simulate Ctrl/Cmd+V
 ipcMain.handle("auto-paste", async (_e, text: string) => {
   return autoPasteText(text);
@@ -189,6 +222,16 @@ ipcMain.handle("app:checkUpdate", async () => {
   return checkForUpdatesManual();
 });
 
+// File picker (e.g. custom model paths) — returns the chosen path or null
+ipcMain.handle("dialog:pickFile", async (_e, filters?: { name: string; extensions: string[] }[]) => {
+  if (!mainWindow) return null;
+  const res = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters,
+  });
+  return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0];
+});
+
 // ── App lifecycle ────────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
@@ -205,7 +248,9 @@ app.whenReady().then(async () => {
       updateTrayState("recording");
     } else if (event.event === "TranscriptionReady" || event.event === "RecordingStopped") {
       updateTrayState("transcribing");
-    } else if (event.event === "Error") {
+    } else if (event.event === "RecordingCancelled" || event.event === "Error") {
+      // Cancel: straight back to idle — updateTrayState also cancels any
+      // pending 2s "return to idle" timer from a previous transcription.
       updateTrayState("idle");
     }
 
@@ -224,8 +269,26 @@ app.whenReady().then(async () => {
     overlayWindow?.webContents.send("sidecar:event", event);
   });
 
-  // Fetch config from sidecar (for auto-paste flag, etc.)
-  fetchConfig();
+  // The sidecar transcribes inside its recording thread and only emits
+  // TranscriptionReady / RecordingStopped once it's done — so the
+  // "transcribing" phase is signalled by a successful stop COMMAND, not by
+  // an event. All stop paths funnel through sendCommand here in the main
+  // process (tray toggle, global shortcut, UI button, and the Linux hotkey
+  // via the sidecar's HotkeyTriggered event → renderer toggle_recording).
+  onCommandResponse((cmd, res) => {
+    const name = cmd.cmd as string;
+    const stopped =
+      (name === "stop_recording" && res.ok === true) ||
+      (name === "toggle_recording" &&
+        res.ok === true &&
+        (res.data as { recording?: boolean } | undefined)?.recording === false);
+    if (stopped) {
+      overlayWindow?.webContents.send("overlay:status", "transcribing");
+    }
+  });
+
+  // Fetch config from sidecar (for auto-paste flag, tray visibility, etc.)
+  await fetchConfig();
 
   createMainWindow();
   createOverlayWindow();
@@ -239,8 +302,10 @@ app.whenReady().then(async () => {
     app.dock?.hide();
   }
 
-  // Create tray (needs windows to exist)
-  createTray();
+  // Create tray (needs windows to exist) — respects the show_tray_icon config
+  if (cachedConfig?.show_tray_icon !== false) {
+    createTray();
+  }
 
   // Start sidecar hotkey listener on Linux
   if (process.platform === "linux") {
@@ -274,16 +339,34 @@ async function fetchConfig() {
   }
 }
 
+// The renderer sends partial config updates (only the keys that changed) —
+// merge them into the cache rather than replacing it, so unrelated fields
+// (e.g. auto_paste) survive an update that doesn't mention them.
 ipcMain.handle("config:update-cache", (_e, config: Record<string, unknown>) => {
-  cachedConfig = config;
+  cachedConfig = { ...(cachedConfig ?? {}), ...config };
+  // Live-apply tray visibility when the setting changes from the settings UI
+  if ("show_tray_icon" in config) {
+    setTrayVisible(config.show_tray_icon !== false);
+  }
 });
 
 // Tray state updates from sidecar events
+let trayIdleTimer: ReturnType<typeof setTimeout> | null = null;
+
 function updateTrayState(state: "idle" | "recording" | "transcribing") {
+  // Any newer state supersedes a pending "return to idle" timer — otherwise a
+  // new recording started within the 2s window would get snapped to idle.
+  if (trayIdleTimer) {
+    clearTimeout(trayIdleTimer);
+    trayIdleTimer = null;
+  }
   updateTrayMenu(state);
   // After a transcription completes, go back to idle after a beat
   if (state === "transcribing") {
-    setTimeout(() => updateTrayMenu("idle"), 2000);
+    trayIdleTimer = setTimeout(() => {
+      trayIdleTimer = null;
+      updateTrayMenu("idle");
+    }, 2000);
   }
 }
 

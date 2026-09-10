@@ -32,7 +32,7 @@ impl HistoryWidget {
         header_row.add_suffix(&btn_box);
         group.add(&header_row);
 
-        // BUG-009: Search bar for filtering history entries
+        // Search bar for filtering history entries
         let search_entry = gtk4::SearchEntry::new();
         search_entry.set_placeholder_text(Some("Search transcriptions…"));
         search_entry.set_hexpand(true);
@@ -60,7 +60,7 @@ impl HistoryWidget {
         let entries = canario.recent_history(50);
         populate_list(&list_box, &entries, canario);
 
-        // Search: BUG-009
+        // Search: re-filter the list as the query changes
         let c_search = canario.clone();
         let lb_search = list_box.clone();
         search_entry.connect_search_changed(move |entry| {
@@ -92,7 +92,7 @@ impl HistoryWidget {
         }
     }
 
-    /// BUG-008: Refresh history entries (call when settings window is re-shown).
+    /// Refresh history entries (called when the settings window is re-shown).
     pub fn refresh(&self) {
         let query = self.search_entry.text().to_string();
         let entries = if query.is_empty() {
@@ -106,7 +106,11 @@ impl HistoryWidget {
     }
 }
 
-fn populate_list(list_box: &gtk4::ListBox, entries: &[canario_core::HistoryEntry], _canario: &Canario) {
+fn populate_list(
+    list_box: &gtk4::ListBox,
+    entries: &[canario_core::HistoryEntry],
+    _canario: &Canario,
+) {
     while let Some(child) = list_box.first_child() {
         list_box.remove(&child);
     }
@@ -118,8 +122,8 @@ fn populate_list(list_box: &gtk4::ListBox, entries: &[canario_core::HistoryEntry
 
     for entry in entries {
         let row = adw::ActionRow::builder()
-            .title(&truncate(&entry.text, 80))
-            .subtitle(&format!(
+            .title(truncate(&entry.text, 80))
+            .subtitle(format!(
                 "{}  •  {:.1}s",
                 entry
                     .timestamp

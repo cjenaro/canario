@@ -17,12 +17,17 @@ interface CanarioAPI {
   getPlatform: () => Promise<{ platform: string; isMac: boolean; isWindows: boolean; isLinux: boolean }>;
   getTheme: () => Promise<string>;
   setTheme: (theme: string) => Promise<void>;
+  getOnboardingCompleted: () => Promise<boolean>;
+  setOnboardingCompleted: (completed: boolean) => Promise<void>;
+  hideSettings: () => Promise<void>;
   autoPaste: (text: string) => Promise<boolean>;
   setAutostart: (enabled: boolean) => Promise<boolean>;
   updateConfigCache: (config: Record<string, unknown>) => Promise<void>;
   getVersion: () => Promise<{ electron: string; sidecar: string | null; mismatch: boolean }>;
   checkForUpdate: () => Promise<{ available: boolean; version?: string }>;
+  pickFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
   onUpdateAvailable: (callback: (info: { version: string }) => void) => () => void;
+  onNavigateHistory: (callback: () => void) => () => void;
 }
 
 declare global {
@@ -82,7 +87,8 @@ export function createCanario(machine: AppMachine) {
         api?.showOverlay();
       } else {
         send({ type: "STOP_RECORDING" });
-        api?.hideOverlay();
+        // Don't hide the overlay here — RecordingStopped keeps it alive in
+        // the "Transcribing…" state until TranscriptionReady / Error.
       }
     }
     return res;
@@ -124,8 +130,9 @@ export function createCanario(machine: AppMachine) {
     return ready;
   }
 
-  // Get history
-  async function getHistory(limit = 50) {
+  // Get history (the store caps at 1000 entries — the virtualized list
+  // handles the full cap, so fetch it all)
+  async function getHistory(limit = 1000) {
     return command("get_history", { limit });
   }
 
@@ -178,6 +185,20 @@ export function createCanario(machine: AppMachine) {
     await api?.setTheme(theme);
   }
 
+  // Onboarding completion flag
+  async function getOnboardingCompleted(): Promise<boolean> {
+    return (await api?.getOnboardingCompleted()) ?? true;
+  }
+
+  async function setOnboardingCompleted(completed: boolean) {
+    await api?.setOnboardingCompleted(completed);
+  }
+
+  // Hide the settings window (minimize to tray)
+  async function hideSettings() {
+    await api?.hideSettings();
+  }
+
   // Auto-paste
   async function autoPaste(text: string): Promise<boolean | undefined> {
     return api?.autoPaste(text);
@@ -198,6 +219,39 @@ export function createCanario(machine: AppMachine) {
     return api?.checkForUpdate();
   }
 
+  // File picker (custom model paths) — returns the chosen path or null
+  async function pickFile(filters?: { name: string; extensions: string[] }[]): Promise<string | null> {
+    return (await api?.pickFile(filters)) ?? null;
+  }
+
+  // Tray "History" item navigation
+  function onNavigateHistory(callback: () => void): () => void {
+    return api?.onNavigateHistory(callback) ?? (() => {});
+  }
+
+  // ── Model-download listeners ───────────────────────────────────────
+  // Pages (AppPage) keep per-variant readiness (the downloadedModels set)
+  // that the shared state machine doesn't know about; this hook lets them
+  // refresh it when a download finishes.
+  const downloadCompleteListeners = new Set<() => void>();
+
+  function onModelDownloadComplete(callback: () => void): () => void {
+    downloadCompleteListeners.add(callback);
+    return () => {
+      downloadCompleteListeners.delete(callback);
+    };
+  }
+
+  function notifyDownloadComplete() {
+    for (const listener of downloadCompleteListeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error("Model-download listener error:", err);
+      }
+    }
+  }
+
   // ── Event listener ─────────────────────────────────────────────────
 
   onMount(() => {
@@ -215,6 +269,8 @@ export function createCanario(machine: AppMachine) {
 
         case "RecordingStopped":
           send({ type: "RECORDING_STOPPED" });
+          // Final event of every record→transcribe pipeline (also the only
+          // event for too-short / no-speech recordings) — hide the overlay.
           api.hideOverlay();
           break;
 
@@ -227,13 +283,22 @@ export function createCanario(machine: AppMachine) {
           api.hideOverlay();
           break;
 
+        case "RecordingCancelled":
+          // Escape-cancel: audio discarded, no TranscriptionReady follows —
+          // return straight to idle and hide the overlay.
+          send({ type: "RECORDING_CANCELLED" });
+          api.hideOverlay();
+          break;
+
         case "AudioLevel":
-          window.dispatchEvent(new CustomEvent("canario:audiolevel", { detail: event.level }));
+          // No-op: nothing consumes per-frame audio levels yet.
           break;
 
         case "Error":
           updateContext({ lastError: event.message as string });
           send({ type: "ERROR" });
+          // Reset the overlay in case an error interrupted recording/transcribing
+          api.hideOverlay();
           break;
 
         case "ModelDownloadProgress":
@@ -241,13 +306,20 @@ export function createCanario(machine: AppMachine) {
           break;
 
         case "ModelDownloadComplete":
-          updateContext({ modelReady: true });
           send({ type: "DOWNLOAD_COMPLETE" });
+          // The event carries no model identity and the user may have
+          // switched selection mid-download — re-derive readiness from
+          // the core for whatever is selected NOW (Custom included).
+          checkModel();
+          notifyDownloadComplete();
           break;
 
         case "ModelDownloadFailed":
-          updateContext({ modelReady: false, lastError: event.error as string });
+          updateContext({ lastError: event.error as string });
           send({ type: "DOWNLOAD_FAILED" });
+          // Don't assume the selected model is unusable: the failure may
+          // belong to a different variant than the one now selected.
+          checkModel();
           break;
 
         case "HotkeyTriggered":
@@ -291,10 +363,16 @@ export function createCanario(machine: AppMachine) {
       getPlatform,
       getTheme,
       setTheme,
+      getOnboardingCompleted,
+      setOnboardingCompleted,
+      hideSettings,
       autoPaste,
       setAutostart,
       getVersion,
       checkForUpdate,
+      pickFile,
+      onNavigateHistory,
+      onModelDownloadComplete,
     };
 }
 

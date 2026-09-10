@@ -7,7 +7,8 @@
     "dev": "electron-vite dev -- --no-sandbox --disable-gpu-sandbox",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "Jenaro",
@@ -15,6 +16,7 @@
   "type": "module",
   "dependencies": {
     "@jitsi/robotjs": "^0.6.22",
+    "@tanstack/solid-virtual": "^3.13.38",
     "electron-updater": "^6.8.3"
   },
   "devDependencies": {
@@ -23,12 +25,13 @@
     "concurrently": "^9.2.1",
     "electron": "^41.2.1",
     "electron-builder": "^26.0.12",
-    "electron-vite": "^6.0.0",
+    "electron-vite": "6.0.0-beta.1",
     "solid-js": "^1.9.12",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.3",
     "vite": "^8.0.8",
     "vite-plugin-solid": "^2.11.12",
+    "vitest": "5.0.0",
     "wait-on": "^9.0.5"
   }
 }

@@ -34,14 +34,38 @@ export function OverlayPage() {
           setStartedAt(Date.now());
           setElapsed("0:00");
           break;
+        // NOTE: the sidecar transcribes in its recording thread and only
+        // emits TranscriptionReady (then RecordingStopped) once it's done.
+        // RecordingStopped is therefore the FINAL event of every pipeline —
+        // the "transcribing" state is entered via the "overlay:status" push
+        // from the main process when a stop command succeeds (see below).
         case "RecordingStopped":
         case "TranscriptionReady":
+        case "RecordingCancelled":
         case "Error":
           setStatus("hidden");
           break;
         case "AudioLevel":
           setAudioLevel(event.level as number);
           break;
+      }
+    });
+
+    onCleanup(unsub);
+  });
+
+  // ── Transcribing state pushed by the main process ────────────────
+  // Sent when a stop/toggle-stop command succeeds; covers every stop path
+  // (tray, global shortcut, UI button, Linux hotkey via HotkeyTriggered).
+  onMount(() => {
+    const onStatus = (window as any).canario?.onOverlayStatus as
+      | ((cb: (status: string) => void) => () => void)
+      | undefined;
+    if (!onStatus) return;
+
+    const unsub = onStatus((s) => {
+      if (s === "transcribing" && status() === "recording") {
+        setStatus("transcribing");
       }
     });
 
@@ -96,6 +120,7 @@ export function OverlayPage() {
   };
 
   const isRecording = () => status() === "recording";
+  const isTranscribing = () => status() === "transcribing";
   const isVisible = () => status() !== "hidden";
 
   return (
@@ -138,14 +163,28 @@ export function OverlayPage() {
                 )}
               </For>
             </div>
+
+            <span
+              class="text-[11px] font-medium tabular-nums flex-shrink-0"
+              style={{ color: "rgba(232, 232, 240, 0.9)" }}
+            >
+              {elapsed()}
+            </span>
           </Show>
 
-          <span
-            class="text-[11px] font-medium tabular-nums flex-shrink-0"
-            style={{ color: "rgba(232, 232, 240, 0.9)" }}
-          >
-            {elapsed()}
-          </span>
+          <Show when={isTranscribing()}>
+            {/* Spinner — same accent treatment as the recording dot */}
+            <div
+              class="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0"
+              style={{ "border-color": "rgba(233, 69, 96, 0.35)", "border-top-color": "var(--accent)" }}
+            />
+            <span
+              class="text-[11px] font-medium flex-shrink-0"
+              style={{ color: "rgba(232, 232, 240, 0.9)" }}
+            >
+              Transcribing…
+            </span>
+          </Show>
         </div>
       </div>
     </Show>

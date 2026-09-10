@@ -17,6 +17,14 @@ const api = {
   showOverlay: () => ipcRenderer.invoke("overlay:show"),
   hideOverlay: () => ipcRenderer.invoke("overlay:hide"),
 
+  // Overlay status pushed from the main process (e.g. "transcribing" after
+  // a successful stop command — the sidecar emits no event for that phase)
+  onOverlayStatus: (callback: (status: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, status: string) => callback(status);
+    ipcRenderer.on("overlay:status", handler);
+    return () => ipcRenderer.removeListener("overlay:status", handler);
+  },
+
   // Window control
   showSettings: () => ipcRenderer.invoke("window:showSettings"),
   hideSettings: () => ipcRenderer.invoke("window:hideSettings"),
@@ -39,6 +47,10 @@ const api = {
   getTheme: () => ipcRenderer.invoke("theme:get"),
   setTheme: (theme: string) => ipcRenderer.invoke("theme:set", theme),
 
+  // Onboarding completion flag (persisted in main process, mirrors theme.json)
+  getOnboardingCompleted: () => ipcRenderer.invoke("onboarding:get"),
+  setOnboardingCompleted: (completed: boolean) => ipcRenderer.invoke("onboarding:set", completed),
+
   // Auto-paste (clipboard + simulated keystroke)
   autoPaste: (text: string) => ipcRenderer.invoke("auto-paste", text),
 
@@ -54,11 +66,22 @@ const api = {
   // Manual update check
   checkForUpdate: () => ipcRenderer.invoke("app:checkUpdate"),
 
+  // File picker (custom model paths) — returns the chosen path or null
+  pickFile: (filters?: { name: string; extensions: string[] }[]) =>
+    ipcRenderer.invoke("dialog:pickFile", filters),
+
   // Listen for update-downloaded event from main process
   onUpdateAvailable: (callback: (info: { version: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, info: { version: string }) => callback(info);
     ipcRenderer.on("update:available", handler);
     return () => ipcRenderer.removeListener("update:available", handler);
+  },
+
+  // Tray "History" item — scroll the settings window to the History section
+  onNavigateHistory: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("navigate:history", handler);
+    return () => ipcRenderer.removeListener("navigate:history", handler);
   },
 };
 

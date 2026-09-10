@@ -4,8 +4,8 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use canario_core::{Canario, WordRemapping, WordRemoval};
 
@@ -22,7 +22,9 @@ impl WordRemappingWidget {
     pub fn new(canario: &Canario) -> Rc<Self> {
         let group = adw::PreferencesGroup::new();
         group.set_title("Word Remapping");
-        group.set_description(Some("Automatically replace or remove words in transcriptions"));
+        group.set_description(Some(
+            "Automatically replace or remove words in transcriptions",
+        ));
 
         let widget = Rc::new(Self {
             group,
@@ -55,9 +57,11 @@ impl WordRemappingWidget {
         add_btn.set_valign(gtk4::Align::Center);
         header_row.add_suffix(&add_btn);
         group.add(&header_row);
-        self.added_rows.borrow_mut().push(header_row.upcast::<gtk4::Widget>());
+        self.added_rows
+            .borrow_mut()
+            .push(header_row.upcast::<gtk4::Widget>());
 
-        // BUG-006: Wire the add button to show a dialog
+        // Wire the add button to show a dialog
         let w = Rc::clone(self);
         add_btn.connect_clicked(move |btn| {
             if let Some(win) = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok()) {
@@ -73,21 +77,24 @@ impl WordRemappingWidget {
         for removal in &config.post_processor.removals {
             self.add_removal_row(&removal.word);
         }
-        if config.post_processor.remappings.is_empty() && config.post_processor.removals.is_empty() {
+        if config.post_processor.remappings.is_empty() && config.post_processor.removals.is_empty()
+        {
             let empty = adw::ActionRow::builder()
                 .title("No rules yet")
                 .subtitle("Click + to add a word replacement or removal")
                 .build();
             empty.add_css_class("dim-label");
             group.add(&empty);
-            self.added_rows.borrow_mut().push(empty.upcast::<gtk4::Widget>());
+            self.added_rows
+                .borrow_mut()
+                .push(empty.upcast::<gtk4::Widget>());
         }
     }
 
-    /// BUG-007: Row with a delete button for a remapping rule.
+    /// Row with a delete button for a remapping rule.
     fn add_remapping_row(self: &Rc<Self>, from: &str, to: &str) {
         let row = adw::ActionRow::builder()
-            .title(&format!("↔  {}  →  {}", from, to))
+            .title(format!("↔  {}  →  {}", from, to))
             .subtitle("Remapping")
             .build();
 
@@ -112,13 +119,15 @@ impl WordRemappingWidget {
         });
 
         self.group.add(&row);
-        self.added_rows.borrow_mut().push(row.upcast::<gtk4::Widget>());
+        self.added_rows
+            .borrow_mut()
+            .push(row.upcast::<gtk4::Widget>());
     }
 
-    /// BUG-007: Row with a delete button for a removal rule.
+    /// Row with a delete button for a removal rule.
     fn add_removal_row(self: &Rc<Self>, word: &str) {
         let row = adw::ActionRow::builder()
-            .title(&format!("✕  {}", word))
+            .title(format!("✕  {}", word))
             .subtitle("Removal")
             .build();
 
@@ -140,16 +149,15 @@ impl WordRemappingWidget {
         });
 
         self.group.add(&row);
-        self.added_rows.borrow_mut().push(row.upcast::<gtk4::Widget>());
+        self.added_rows
+            .borrow_mut()
+            .push(row.upcast::<gtk4::Widget>());
     }
 }
 
-/// BUG-006: Dialog for adding a new word remapping or removal rule.
+/// Dialog for adding a new word remapping or removal rule.
 #[allow(deprecated)]
-fn show_add_remapping_dialog(
-    parent: &gtk4::Window,
-    widget: &Rc<WordRemappingWidget>,
-) {
+fn show_add_remapping_dialog(parent: &gtk4::Window, widget: &Rc<WordRemappingWidget>) {
     let dialog = gtk4::Window::new();
     dialog.set_transient_for(Some(parent));
     dialog.set_modal(true);
@@ -256,9 +264,7 @@ fn show_add_remapping_dialog(
                 }
             } else {
                 // Removal
-                cfg.post_processor
-                    .removals
-                    .push(WordRemoval { word: from });
+                cfg.post_processor.removals.push(WordRemoval { word: from });
             }
         });
 

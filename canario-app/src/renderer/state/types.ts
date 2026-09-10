@@ -9,6 +9,8 @@ export type AppState =
   | { status: "downloading"; progress: number };
 
 export type AppEvent =
+  | { type: "START_ONBOARDING" }
+  | { type: "WIZARD_GOTO"; step: number }
   | { type: "WIZARD_COMPLETE" }
   | { type: "START_RECORDING" }
   | { type: "STOP_RECORDING" }
@@ -18,6 +20,7 @@ export type AppEvent =
   | { type: "DOWNLOAD_FAILED" }
   | { type: "TRANSCRIPTION_READY" }
   | { type: "RECORDING_STOPPED" }
+  | { type: "RECORDING_CANCELLED" }
   | { type: "ERROR" };
 
 export type AppContext = {
@@ -44,9 +47,17 @@ type TransitionMap = Record<AppState["status"], Partial<Record<AppEvent["type"],
 
 export const transitions: TransitionMap = {
   onboarding: {
+    // Absolute step navigation (1-3) — the component computes the target
+    // step from the current state, keeping transition fns stateless.
+    WIZARD_GOTO: (_ctx, event) => {
+      if (event.type !== "WIZARD_GOTO") return undefined;
+      if (event.step < 1 || event.step > 3) return undefined;
+      return { status: "onboarding", step: event.step };
+    },
     WIZARD_COMPLETE: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   idle: {
+    START_ONBOARDING: () => ({ status: "onboarding", step: 1 }),
     START_RECORDING: (ctx) => {
       if (!ctx.modelReady) return undefined;
       return { status: "recording", startedAt: Date.now() };
@@ -55,6 +66,8 @@ export const transitions: TransitionMap = {
   },
   recording: {
     STOP_RECORDING: () => ({ status: "transcribing", startedAt: Date.now() }),
+    // Escape-cancel from the core: audio discarded, no transcription/paste
+    RECORDING_CANCELLED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
     ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   transcribing: {

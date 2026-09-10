@@ -24,6 +24,7 @@ gio = { version = "0.19", optional = true }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 anyhow = "1"
 parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde"] }

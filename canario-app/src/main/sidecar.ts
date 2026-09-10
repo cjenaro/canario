@@ -5,6 +5,7 @@ import { app } from "electron";
 
 let sidecar: ChildProcess | null = null;
 let eventListeners: Set<(event: Record<string, unknown>) => void> = new Set();
+let commandResponseListeners: Set<(cmd: Record<string, unknown>, res: Record<string, unknown>) => void> = new Set();
 let buffer = "";
 
 function getSidecarPath(): string {
@@ -127,6 +128,13 @@ export function sendCommand(cmd: Record<string, unknown>): Promise<Record<string
       if (event.id === id) {
         clearTimeout(timeout);
         eventListeners.delete(onResponse);
+        for (const listener of commandResponseListeners) {
+          try {
+            listener(cmd, event);
+          } catch (err) {
+            console.error("Command response listener error:", err);
+          }
+        }
         resolve(event);
       }
     }
@@ -139,4 +147,11 @@ export function sendCommand(cmd: Record<string, unknown>): Promise<Record<string
 
 export function onSidecarEvent(callback: (event: Record<string, unknown>) => void): void {
   eventListeners.add(callback);
+}
+
+/** Observe every sidecar command response (e.g. to detect a recording stop). */
+export function onCommandResponse(
+  callback: (cmd: Record<string, unknown>, res: Record<string, unknown>) => void
+): void {
+  commandResponseListeners.add(callback);
 }

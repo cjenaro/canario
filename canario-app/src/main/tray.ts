@@ -4,6 +4,7 @@ import { join } from "path";
 import { sendCommand } from "./sidecar.js";
 
 let tray: Tray | null = null;
+let currentState: "idle" | "recording" | "transcribing" = "idle";
 let settingsWindow: BrowserWindow | null = null;
 
 /** Called from main.ts so tray can reference the settings window */
@@ -37,12 +38,32 @@ export function createTray(): Tray {
   tray = new Tray(icon);
   tray.setToolTip("Canario — Voice to Text");
 
-  updateTrayMenu("idle");
+  updateTrayMenu(currentState);
 
   return tray;
 }
 
+/** Create or destroy the tray icon to match the show_tray_icon config. */
+export function setTrayVisible(visible: boolean): void {
+  if (visible) {
+    if (!tray) createTray();
+  } else if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+}
+
+/** Show + focus the settings window (and restore the Dock icon on macOS). */
+function showSettingsWindow() {
+  settingsWindow?.show();
+  settingsWindow?.focus();
+  if (process.platform === "darwin") {
+    app.dock?.show();
+  }
+}
+
 export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
+  currentState = state;
   if (!tray) return;
 
   const statusLabel =
@@ -63,14 +84,17 @@ export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
     },
     { type: "separator" },
     {
+      label: "📜 History",
+      click: () => {
+        showSettingsWindow();
+        // Tell the renderer to scroll to the History section (PRD §5.2)
+        settingsWindow?.webContents.send("navigate:history");
+      },
+    },
+    {
       label: "⚙ Settings",
       click: () => {
-        settingsWindow?.show();
-        settingsWindow?.focus();
-        // macOS: show in Dock when settings opens from tray
-        if (process.platform === "darwin") {
-          app.dock?.show();
-        }
+        showSettingsWindow();
       },
     },
     { type: "separator" },
