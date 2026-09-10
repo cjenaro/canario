@@ -1,6 +1,5 @@
 // Cross-platform auto-paste
-// All platforms: clipboard.writeText + simulated paste keystroke
-//   Linux:   xdotool key ctrl+v (or wtype/ydotool)
+// Linux:   type text directly (wtype/xdotool/ydotool), clipboard+Ctrl+V fallback
 //   macOS:   robotjs keyTap("v", "command") — requires Accessibility permissions
 //   Windows: robotjs keyTap("v", "control")
 
@@ -33,15 +32,16 @@ function loadRobot(): any {
 export async function autoPasteText(text: string): Promise<boolean> {
   if (!text) return false;
 
-  // Always copy to clipboard first
+  // Always copy to clipboard first: a manual Ctrl+V fallback if typing
+  // fails, and users generally expect the last dictation on the clipboard.
   clipboard.writeText(text);
+
+  if (process.platform === "linux") {
+    return linuxPaste(text);
+  }
 
   // Small delay to ensure clipboard is settled before keystroke
   await new Promise((r) => setTimeout(r, 50));
-
-  if (process.platform === "linux") {
-    return linuxPaste();
-  }
 
   // macOS / Windows: use robotjs
   const r = loadRobot();
@@ -66,9 +66,43 @@ export async function autoPasteText(text: string): Promise<boolean> {
   }
 }
 
-// ── Linux paste: try xdotool key ctrl+v, wtype, ydotool ──────────────
+// ── Linux paste: type the text directly, clipboard+Ctrl+V as fallback ──
 
-function linuxPaste(): Promise<boolean> {
+/**
+ * Deliver `text` to the focused window.
+ *
+ * Preferred: type the actual characters (wtype on Wayland, xdotool/ydotool
+ * elsewhere) — direct typing reads nothing from the clipboard, so it is
+ * immune to the clipboard-propagation race where a simulated Ctrl+V pastes
+ * stale clipboard content (canario-fhm), and it doesn't depend on the
+ * target app honoring a paste keystroke.
+ *
+ * Fallback: clipboard + simulated Ctrl+V (the text was already copied).
+ */
+function linuxPaste(text: string): Promise<boolean> {
+  // Run `tool` and resolve true when it exits successfully.
+  const attempt = (file: string, args: string[]): Promise<boolean> =>
+    new Promise((resolve) => {
+      execFile(file, args, (err) => resolve(!err));
+    });
+
+  return (async () => {
+    // Direct typing, cheapest and race-free first.
+    if (process.env.WAYLAND_DISPLAY) {
+      if (await attempt("wtype", ["--", text])) return true;
+    }
+    if (await attempt("xdotool", ["type", "--clearmodifiers", "--", text])) return true;
+    if (await attempt("ydotool", ["type", "--", text])) return true;
+
+    // Last resort: simulate Ctrl+V. Give the clipboard write a moment to
+    // propagate through the compositor before the keystroke lands.
+    await new Promise((r) => setTimeout(r, 50));
+    return simulatedCtrlV();
+  })();
+}
+
+/** Clipboard + Ctrl+V keystroke (xdotool, then ydotool). */
+function simulatedCtrlV(): Promise<boolean> {
   return new Promise((resolve) => {
     // xdotool key ctrl+v (X11)
     execFile("xdotool", ["key", "--clearmodifiers", "ctrl+v"], (err) => {
@@ -86,7 +120,7 @@ function linuxPaste(): Promise<boolean> {
           return;
         }
 
-        console.warn("[autoPaste] Linux paste failed: no xdotool or ydotool available");
+        console.warn("[autoPaste] Linux paste failed: no wtype, xdotool or ydotool available");
         resolve(false);
       });
     });
