@@ -3,8 +3,14 @@
 // Downloads in background, notifies user to restart.
 
 import { app, BrowserWindow, Notification, dialog } from "electron";
-import { autoUpdater } from "electron-updater";
+// electron-updater is CommonJS-only and stays externalized in the built ESM
+// bundle, so it must go through the default import — a named
+// `import { autoUpdater }` fails ESM/CJS interop at runtime in the packaged
+// app ("Named export 'autoUpdater' not found").
+import electronUpdater from "electron-updater";
 import { join } from "path";
+
+const { autoUpdater } = electronUpdater;
 
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 let mainWindow: BrowserWindow | null = null;
