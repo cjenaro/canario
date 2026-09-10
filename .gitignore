@@ -16,3 +16,9 @@ canario-debug.log
 canario-app/node_modules/
 canario-app/out/
 canario-app/dist/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/

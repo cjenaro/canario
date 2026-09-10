@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "canario",
+  "project_id": "1a08173c-6fe4-4e85-bbb3-9fbfd91c84d3"
+}
