@@ -263,6 +263,7 @@ impl HotkeyProcessor {
     }
 
     /// Is the processor currently in a recording state?
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     pub fn is_recording(&self) -> bool {
         self.recording
     }

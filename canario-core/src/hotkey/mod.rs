@@ -22,6 +22,8 @@
 mod processor;
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
 mod wayland;
+#[cfg(target_os = "windows")]
+mod windows;
 #[cfg(all(target_os = "linux", feature = "x11"))]
 mod x11;
 
@@ -30,7 +32,7 @@ pub use processor::{HotkeyAction, ProcessorConfig};
 use anyhow::{bail, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use tracing::info;
 
 /// Callback type: fired when the processor emits an action.
@@ -100,6 +102,17 @@ impl HotkeyStatus {
     fn x11() -> Self {
         Self {
             backend: "x11".into(),
+            permission_denied: false,
+            fix_command: None,
+            detail: None,
+        }
+    }
+
+    /// Windows RegisterHotKey + raw-input backend is active.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn windows() -> Self {
+        Self {
+            backend: "register-hotkey".into(),
             permission_denied: false,
             fix_command: None,
             detail: None,
@@ -258,6 +271,8 @@ pub struct HotkeyListener {
     x11: x11::X11Hotkey,
     #[cfg(all(target_os = "linux", feature = "linux-input"))]
     wayland: wayland::WaylandHotkey,
+    #[cfg(target_os = "windows")]
+    windows: windows::WindowsHotkey,
 }
 
 impl Default for HotkeyListener {
@@ -275,6 +290,8 @@ impl HotkeyListener {
             x11: x11::X11Hotkey::new(),
             #[cfg(all(target_os = "linux", feature = "linux-input"))]
             wayland: wayland::WaylandHotkey::new(),
+            #[cfg(target_os = "windows")]
+            windows: windows::WindowsHotkey::new(),
         }
     }
 
@@ -367,15 +384,33 @@ impl HotkeyListener {
             Ok(())
         })();
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        let result = {
+            info!("Using RegisterHotKey backend (Windows)");
+            self.windows
+                .start(
+                    &config.key,
+                    &config.modifiers,
+                    config.processor.clone(),
+                    on_action,
+                )
+                .map_err(|e| {
+                    tracing::error!("Windows hotkey backend failed to start: {}", e);
+                    e
+                })?;
+            *lock(&self.status) = HotkeyStatus::windows();
+            Ok(())
+        };
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
-            // TODO: macOS/Windows hotkey backends (separate epic)
+            // TODO: macOS hotkey backend (canario-7x5.1)
             let _ = &on_action;
             let _ = &config;
             bail!("Global hotkey is not yet supported on this platform");
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         result
     }
 
@@ -386,6 +421,8 @@ impl HotkeyListener {
         self.x11.stop();
         #[cfg(all(target_os = "linux", feature = "linux-input"))]
         self.wayland.stop();
+        #[cfg(target_os = "windows")]
+        self.windows.stop();
     }
 }
 
