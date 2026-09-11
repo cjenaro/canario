@@ -116,6 +116,16 @@ enum Command {
     RestartHotkey { id: String },
     #[serde(rename = "hotkey_status")]
     HotkeyStatus { id: String },
+    #[serde(rename = "paste_text")]
+    PasteText {
+        id: String,
+        /// The text to deliver to the focused window. The sidecar's
+        /// native paste (Linux xdotool/wtype/ydotool, macOS
+        /// CoreGraphics, Windows SendInput — canario-7x5.3) synthesizes
+        /// the paste chord against the clipboard the frontend just
+        /// wrote; `text` itself only rides the typing fallback.
+        text: String,
+    },
     #[serde(rename = "set_transform_credential")]
     SetTransformCredential {
         id: String,
@@ -469,6 +479,16 @@ fn handle_command(
             let status = canario.hotkey_status();
             write_json(&ok_data(&id, serde_json::to_value(&status).unwrap()));
         }
+        // Native paste on the sidecar's platform backends (canario-ubb):
+        // the frontend owns the clipboard write + verification; this
+        // synthesizes the paste chord (and types as fallback where the
+        // platform path does). `pasted: false` — not an error — when no
+        // delivery backend is available or they all fail: the text is
+        // already on the clipboard for a manual paste.
+        Command::PasteText { id, text } => match canario_core::paste_text(&text) {
+            Ok(pasted) => write_json(&ok_data(&id, serde_json::json!({ "pasted": pasted }))),
+            Err(e) => write_json(&err(&id, e.to_string())),
+        },
         // Memory-only credential handoff (fgm.1 D2): the Electron main
         // process persists the key via safeStorage and pushes it here.
         // The response reports whether a key is now held — never the

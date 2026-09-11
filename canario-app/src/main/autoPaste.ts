@@ -1,26 +1,19 @@
 // Cross-platform auto-paste
 // Linux:   clipboard + simulated Ctrl+V first (verified read-back), typing fallback
-//   macOS:   robotjs keyTap("v", "command") — requires Accessibility permissions
-//   Windows: robotjs keyTap("v", "control")
+//   macOS / Windows: clipboard (verified read-back) + the sidecar's native
+//   paste chord (CoreGraphics / SendInput — canario-7x5.3, exposed as the
+//   paste_text command by canario-ubb). robotjs is gone: it was the only
+//   native node module, and every Electron upgrade re-broke its ABI/
+//   toolchain (node-abi gap, X11 headers, libpng, MSVC discovery).
 
 import { clipboard, systemPreferences, dialog, BrowserWindow } from "electron";
 import { execFile } from "child_process";
+import { sendCommand } from "./sidecar.js";
 
-let robot: any = null;
-let robotLoadAttempted = false;
+/** Marker for tests: which arm a platform takes. */
+export type PasteArm = "linux-tools" | "sidecar-native";
+
 let accessibilityPrompted = false;
-
-function loadRobot(): any {
-  if (robotLoadAttempted) return robot;
-  robotLoadAttempted = true;
-
-  try {
-    robot = require("@jitsi/robotjs");
-  } catch {
-    console.warn("[autoPaste] @jitsi/robotjs not available — auto-paste via robotjs disabled");
-  }
-  return robot;
-}
 
 /**
  * Auto-paste text into the focused application.
@@ -42,25 +35,29 @@ export async function autoPasteText(text: string): Promise<boolean> {
     return linuxPaste(text);
   }
 
-  // Small delay to ensure clipboard is settled before keystroke
+  // macOS / Windows: the sidecar's native paste chord (canario-ubb).
+  // The clipboard must verify first — an early chord pastes whatever
+  // was there before (the canario-fhm stale-clipboard bug), so an
+  // unverified clipboard returns false (text stays on the clipboard
+  // for a manual paste) rather than risk pasting stale content.
   await new Promise((r) => setTimeout(r, 50));
-
-  // macOS / Windows: use robotjs
-  const r = loadRobot();
-  if (!r) {
-    console.warn("[autoPaste] robotjs not loaded — text copied to clipboard but not auto-pasted");
+  if (!(await clipboardHoldsText(text))) {
+    console.warn("[autoPaste] clipboard did not verify — skipping the paste chord");
     return false;
   }
 
   try {
-    if (process.platform === "darwin") {
-      r.keyTap("v", "command");
-    } else {
-      r.keyTap("v", "control");
+    const res = await sendCommand({ id: `paste-${Date.now()}`, cmd: "paste_text", text });
+    const pasted: boolean =
+      res?.ok === true && (res.data as { pasted?: unknown } | undefined)?.pasted === true;
+    if (!pasted && process.platform === "darwin") {
+      // The CoreGraphics chord needs Accessibility trust — same prompt
+      // the robotjs path used to show.
+      promptAccessibilityPermission();
     }
-    return true;
+    return pasted;
   } catch (err) {
-    console.error("[autoPaste] robotjs key tap failed:", err);
+    console.error("[autoPaste] sidecar paste failed:", err);
     if (process.platform === "darwin") {
       promptAccessibilityPermission();
     }
@@ -211,8 +208,12 @@ function promptAccessibilityPermission(): void {
 
 /**
  * Check if auto-paste is available and working.
+ *
+ * True everywhere now (canario-ubb): Linux has its toolchain plan
+ * (probed per-delivery, with fallbacks), macOS/Windows route through
+ * the sidecar's native backends. Per-dictation failures surface as a
+ * `false` return with the text left on the clipboard.
  */
 export function isAutoPasteAvailable(): boolean {
-  if (process.platform === "linux") return true; // xdotool/ydotool
-  return !!loadRobot();
+  return true;
 }

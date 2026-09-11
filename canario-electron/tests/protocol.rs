@@ -1329,6 +1329,28 @@ fn transform_test_fails_gracefully_without_a_server() {
     );
 }
 
+// ── canario-ubb: native paste through the sidecar ──────────────────────
+
+/// `paste_text` answers ok with a `pasted` bool. Empty text is the
+/// documented no-op (`Ok(false)`, no clipboard touch, no injection) —
+/// this test pins the WIRE SHAPE without side effects; the delivery
+/// backends themselves are unit-tested in canario-core's paste tests
+/// and measured by the pipeline benchmark's paste stage.
+#[test]
+fn paste_text_empty_is_an_ok_no_op() {
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({ "cmd": "paste_text", "id": "paste-1", "text": "" }));
+    let resp = sidecar.wait_for("paste-1");
+
+    assert_eq!(
+        resp["ok"],
+        json!(true),
+        "no-op paste must not error: {resp}"
+    );
+    assert_eq!(resp["data"]["pasted"], json!(false));
+}
+
 #[test]
 fn shutdown_responds_ok_and_exits() {
     let mut sidecar = Sidecar::spawn();
