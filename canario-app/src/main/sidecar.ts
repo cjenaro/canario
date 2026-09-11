@@ -153,7 +153,11 @@ export async function startSidecar(): Promise<void> {
     }
 
     eventListeners.add(onPong);
-    sendCommand({ id: "init", cmd: "ping" });
+    // Fire-and-forget by design: the outer promise owns error reporting
+    // (startupFailure + timeout below). Without this .catch, a spawn
+    // failure makes failPendingCommands reject the ping promise with no
+    // handler attached — an unhandled rejection (fails CI's vitest run).
+    sendCommand({ id: "init", cmd: "ping" }).catch(() => {});
   });
 }
 
