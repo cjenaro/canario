@@ -64,6 +64,25 @@ export function AppPage() {
   const [updateChecking, setUpdateChecking] = createSignal(false);
   const [updateAvailable, setUpdateAvailable] = createSignal(false);
   const [updateVersion, setUpdateVersion] = createSignal("");
+  const [copyingDiagnostics, setCopyingDiagnostics] = createSignal(false);
+
+  async function handleCopyDiagnostics() {
+    if (copyingDiagnostics()) return;
+    setCopyingDiagnostics(true);
+    try {
+      const response = await canario.command("diagnostics");
+      if (response?.ok !== true || !response.data || typeof response.data !== "object") {
+        showToast("Could not collect diagnostics. Check that the sidecar is running.", "error");
+        return;
+      }
+      await navigator.clipboard.writeText(JSON.stringify(response.data, null, 2));
+      showToast("Diagnostics copied to clipboard", "success", 3000);
+    } catch {
+      showToast("Could not copy diagnostics to the clipboard", "error");
+    } finally {
+      setCopyingDiagnostics(false);
+    }
+  }
 
   async function handleCheckUpdate() {
     setUpdateChecking(true);
@@ -881,6 +900,21 @@ export function AppPage() {
                   onClick={handleRerunOnboarding}
                 >
                   Re-run
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-sm font-medium">Diagnostics</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Copy system info, configuration, and recent logs</p>
+                </div>
+                <button
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:opacity-80 disabled:opacity-50"
+                  style={{ "background-color": "var(--bg)", "border-color": "var(--border)", color: "var(--text-primary)", cursor: copyingDiagnostics() ? "wait" : "pointer" }}
+                  disabled={copyingDiagnostics()}
+                  aria-busy={copyingDiagnostics()}
+                  onClick={handleCopyDiagnostics}
+                >
+                  {copyingDiagnostics() ? "Copying…" : "Copy diagnostics"}
                 </button>
               </div>
               <Show when={updateAvailable()}>
