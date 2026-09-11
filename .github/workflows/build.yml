@@ -69,6 +69,17 @@ jobs:
 
       - name: Prepare sidecar directory (Linux/macOS)
         if: matrix.upload && runner.os != 'Windows'
+        # Deliberately NOT scripts/stageSidecar.cjs (canario-7ah.13
+        # evaluation): the two paths guard different risks. CI's copy is
+        # fresh by construction — the binary was built from this exact
+        # checkout seconds earlier, so a staleness check could only add
+        # failure modes (runner clock skew, checkout mtimes) with zero
+        # safety gained. stageSidecar.cjs exists precisely for the local
+        # flow, where a stale target/release binary is the real hazard;
+        # it also stages from target/release (host triple) while CI
+        # stages from the cross-target dir below. Kept as two small,
+        # individually obvious steps instead of a shared abstraction
+        # with mode flags.
         shell: bash
         run: |
           mkdir -p canario-app/sidecar

@@ -15,6 +15,13 @@
 // separate job, downloads the artifact into canario-app/sidecar/, and calls
 // `npx electron-builder` directly — this script never runs there.
 //
+// The CI/local split is INTENTIONAL (canario-7ah.13 evaluation): CI's copy
+// is fresh by construction (same-job build from the exact checkout), so the
+// staleness validation here would only add failure modes there. This script
+// exists for the local flow, where a stale target/release binary is the
+// hazard it guards against. See the comment on build.yml's
+// "Prepare sidecar directory" step before "unifying" them.
+//
 // Usage: node scripts/stageSidecar.cjs   (chained by `npm run package:linux`)
 
 "use strict";
