@@ -11,6 +11,7 @@ import { checkVersion, getVersionInfo } from "./version.js";
 import { acquireSingleInstanceLock } from "./singleInstance.js";
 import { parseLegacyOnboardingFile } from "./onboarding.js";
 import { decideHotkeyRouting } from "./hotkeyRouting.js";
+import { initTransformCredential, saveTransformCredential } from "./transformCredential.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -320,6 +321,14 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     return autoPasteText(text);
   });
 
+  // Transform provider API key (fgm.2 D2): persist via safeStorage
+  // (userData/transform-key.bin, never config.json) and push into the
+  // sidecar's memory. The renderer learns only whether a key is now
+  // held — never the key itself.
+  ipcMain.handle("transform:setKey", async (_e, key: unknown) => {
+    return saveTransformCredential(typeof key === "string" ? key : "");
+  });
+
   // Global shortcut for macOS/Windows
   ipcMain.handle("shortcut:register", async (_e, accelerator: string) => {
     globalShortcut.unregisterAll();
@@ -378,6 +387,12 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
 
     // Check sidecar version matches Electron
     await checkVersion();
+
+    // Push the persisted transform API key (if any) into the sidecar's
+    // memory (fgm.2 D2): safeStorage decrypt here, memory-only copy
+    // there. Best effort — a missing key leaves local endpoints working
+    // (they need none) and the settings section re-pushes on change.
+    await initTransformCredential();
 
     // Forward sidecar events to all renderer windows
     onSidecarEvent(async (event) => {

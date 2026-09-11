@@ -1,6 +1,16 @@
 // Preload script — exposes IPC bridge to renderer via contextBridge
 import { contextBridge, ipcRenderer } from "electron";
 
+// Ids only need uniqueness while a response is pending (the sidecar
+// matches responses by id) — a module counter suffices, same pattern
+// as createCanario.ts nextId().
+let preloadCommandSeq = 0;
+
+function nextPreloadId(label: string): string {
+  preloadCommandSeq += 1;
+  return `preload-${label}-${preloadCommandSeq}`;
+}
+
 const api = {
   // Send a command to the sidecar, returns the response promise
   sendCommand: (cmd: Record<string, unknown>) =>
@@ -82,6 +92,25 @@ const api = {
 
   // Auto-paste (clipboard + simulated keystroke)
   autoPaste: (text: string) => ipcRenderer.invoke("auto-paste", text),
+
+  // ── Transformation provider (canario-fgm.2) ────────────────────────────
+  // Status and the connection probe are plain sidecar commands — they
+  // pass through the generic channel with unique ids so concurrent
+  // invokes can't collide on a response. The API key takes a DEDICATED
+  // handler: safeStorage persistence is main-process only (fgm.1 D2)
+  // and the key is never echoed back to the renderer (write-only field).
+  transformStatus: () =>
+    ipcRenderer.invoke("sidecar:command", {
+      id: nextPreloadId("transform-status"),
+      cmd: "transform_status",
+    }),
+  transformTest: () =>
+    ipcRenderer.invoke("sidecar:command", {
+      id: nextPreloadId("transform-test"),
+      cmd: "transform_test",
+    }),
+  // Store (non-empty) or clear (empty) the provider API key.
+  setTransformKey: (key: string) => ipcRenderer.invoke("transform:setKey", key),
 
   // Autostart on login
   setAutostart: (enabled: boolean) => ipcRenderer.invoke("app:setAutostart", enabled),

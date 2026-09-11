@@ -34,6 +34,9 @@ interface CanarioAPI {
   pickFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
   onUpdateAvailable: (callback: (info: { version: string }) => void) => () => void;
   onNavigateHistory: (callback: () => void) => () => void;
+  transformStatus: () => Promise<Record<string, unknown> | null>;
+  transformTest: () => Promise<Record<string, unknown> | null>;
+  setTransformKey: (key: string) => Promise<{ ok: boolean; stored: boolean; error?: string } | null>;
 }
 
 declare global {
@@ -276,6 +279,25 @@ export function createCanario(machine: AppMachine) {
     return (await api?.pickFile(filters)) ?? null;
   }
 
+  // ── Transformation provider (canario-fgm.2) ────────────────────────
+  // Status/probe delegate to the preload wrappers (plain sidecar
+  // commands); the key goes to the MAIN process, which owns safeStorage
+  // persistence and pushes it into the sidecar's memory (fgm.1 D2) —
+  // the renderer only learns whether a key is held.
+  async function transformStatus(): Promise<Record<string, unknown> | null> {
+    return (await api?.transformStatus()) ?? null;
+  }
+
+  async function transformTest(): Promise<Record<string, unknown> | null> {
+    return (await api?.transformTest()) ?? null;
+  }
+
+  async function setTransformKey(
+    key: string,
+  ): Promise<{ ok: boolean; stored: boolean; error?: string } | null> {
+    return (await api?.setTransformKey(key)) ?? null;
+  }
+
   // Tray "History" item navigation
   function onNavigateHistory(callback: () => void): () => void {
     return api?.onNavigateHistory(callback) ?? (() => {});
@@ -460,6 +482,9 @@ export function createCanario(machine: AppMachine) {
       pickFile,
       onNavigateHistory,
       onModelDownloadComplete,
+      transformStatus,
+      transformTest,
+      setTransformKey,
     };
 }
 

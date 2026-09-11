@@ -11,6 +11,7 @@ import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
 import { AppearanceSection } from "../components/AppearanceSection";
 import { MotionSection } from "../components/MotionSection";
+import { TransformSection } from "../components/TransformSection";
 import { applyAppearance, cacheAppearanceForNextBoot, readCachedAppearance } from "../theme";
 import {
   applyAnimations,
@@ -42,6 +43,13 @@ import {
   pickFileFilters,
   type CustomModelPaths,
 } from "../primitives/customModel";
+import {
+  transformConfigPayload,
+  transformFromConfig,
+  transformTestResultFromResponse,
+  type TransformSettings,
+  type TransformTestState,
+} from "../primitives/transform";
 
 const MODELS = [
   { id: "ParakeetV3", name: "Parakeet TDT v3", desc: "Multilingual · ~640MB" },
@@ -108,6 +116,13 @@ export function AppPage() {
   // guidance in the Hotkey section.
   const [hotkeyStatus, setHotkeyStatus] = createSignal<HotkeyStatusInfo | null>(null);
 
+  // Transformation provider (canario-fgm.2): settings live in
+  // AppConfig's transform block; credential PRESENCE comes from the
+  // sidecar's transform_status (the key itself never crosses the
+  // bridge — the field in the section is write-only, fgm.1 D2).
+  const [transformSettings, setTransformSettings] = createSignal<TransformSettings>(transformFromConfig(null));
+  const [transformCredentialPresent, setTransformCredentialPresent] = createSignal(false);
+
   // Track whether the initial model check is done
   const [initialModelCheck, setInitialModelCheck] = createSignal(false);
 
@@ -166,6 +181,18 @@ export function AppPage() {
   async function refreshHotkeyStatus() {
     const res = await canario.command("hotkey_status");
     setHotkeyStatus(res?.ok ? parseHotkeyStatus(res.data) : null);
+  }
+
+  // Sidecar truth about the credential (present/absent — never the
+  // value). Called on mount and after every key commit so the section's
+  // status line tracks the backend, not optimistic local state.
+  async function refreshTransformStatus() {
+    const res = await canario.transformStatus();
+    if (res?.ok && res.data) {
+      setTransformCredentialPresent(
+        (res.data as { credential_present?: unknown }).credential_present === true
+      );
+    }
   }
 
   // Apply appearance live (theme mode + accent override)
@@ -252,8 +279,16 @@ export function AppPage() {
           setRemovals((pp.removals as { word: string }[]) || []);
         }
 
+        // Transformation provider settings (fgm.2): provider metadata
+        // only — the key never lives in config.json (D2).
+        setTransformSettings(transformFromConfig(config));
+
         updateContext({ config });
       }
+
+      // Credential presence from the sidecar (also re-checked after
+      // every key commit; safe to fire-and-forget at mount).
+      void refreshTransformStatus();
 
       // Appearance — AppConfig (`theme` + `accent_color`) is the source
       // of truth. theme.json (main process) is mirrored on every change
@@ -501,6 +536,32 @@ export function AppPage() {
         removals: pp.removals,
       },
     });
+  }
+
+  // ── Transformation provider (canario-fgm.2) ──────────────────────────
+
+  async function handleTransformChange(next: TransformSettings) {
+    setTransformSettings(next);
+    // update_config merges top-level keys wholesale — the payload
+    // always carries the FULL transform block (rules included), so no
+    // sibling field is reset to its default (see transformConfigPayload).
+    await canario.updateConfig(transformConfigPayload(next));
+  }
+
+  async function handleTransformKeyCommit(action: "store" | "clear", key: string) {
+    const res = await canario.setTransformKey(action === "store" ? key : "");
+    if (res?.ok) {
+      setTransformCredentialPresent(res.stored);
+      showToast(res.stored ? "API key saved" : "API key removed", "success", 2500);
+    } else {
+      showToast(res?.error || "Could not save the API key — try again", "error");
+    }
+    // Sync with the sidecar's own view (covers clear-after-failure etc.).
+    void refreshTransformStatus();
+  }
+
+  async function handleTransformTest(): Promise<TransformTestState> {
+    return transformTestResultFromResponse(await canario.transformTest());
   }
 
   async function handleDeleteHistory(id: string) {
@@ -1157,6 +1218,18 @@ export function AppPage() {
               remappings={remappings()}
               removals={removals()}
               onChange={handlePostProcessorChange}
+            />
+          </section>
+
+          {/* ── Transformation ───────────────────────────────────── */}
+          <section class="rounded-xl border p-5" style={sectionStyle}>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>Transformation</h2>
+            <TransformSection
+              settings={transformSettings()}
+              credentialPresent={transformCredentialPresent()}
+              onSettingsChange={handleTransformChange}
+              onKeyCommit={handleTransformKeyCommit}
+              onTest={handleTransformTest}
             />
           </section>
 
