@@ -319,6 +319,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
+ "core-foundation 0.10.1",
  "core-graphics",
  "cpal 0.16.0",
  "dirs",

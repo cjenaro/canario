@@ -55,9 +55,11 @@ tempfile = "3"
 x11rb = { version = "0.13", optional = true }
 evdev = { version = "0.13", optional = true }
 
-# macOS paste injection: CoreGraphics CGEvent (Cmd+V)
+# macOS paste injection + hotkey backend: CoreGraphics CGEvent (Cmd+V,
+# CGEventTap) + CoreFoundation runloop servicing for the tap
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
+core-foundation = "0.10"
 
 # Windows paste injection + hotkey backend: Win32 SendInput, RegisterHotKey, raw input
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -1,10 +1,14 @@
-/// Global hotkey handling for Linux.
+/// Global hotkey handling.
 ///
-/// Automatically detects the display server (X11 vs Wayland) and uses
+/// On Linux, automatically detects the display server (X11 vs Wayland) and uses
 /// the appropriate backend:
 ///
 /// - **X11**: `XGrabKey` via x11rb — full press-and-hold and double-tap support
 /// - **Wayland**: `evdev` raw keyboard input (requires `input` group), with socket-based fallback
+///
+/// Other platforms: **macOS** uses a CoreGraphics `CGEventTap` (see `macos.rs`,
+/// requires the Accessibility permission), **Windows** uses `RegisterHotKey` +
+/// raw input (see `windows.rs`).
 ///
 /// Default hotkey: **Super+Alt+Space** (avoids conflicts with most desktop environments
 /// which already bind Super+Space to the app launcher).
@@ -19,6 +23,8 @@
 ///     println!("Hotkey action: {:?}", action);
 /// }).unwrap();
 /// ```
+#[cfg(target_os = "macos")]
+mod macos;
 mod processor;
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
 mod wayland;
@@ -32,7 +38,7 @@ pub use processor::{HotkeyAction, ProcessorConfig};
 use anyhow::{bail, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use tracing::info;
 
 /// Callback type: fired when the processor emits an action.
@@ -50,6 +56,16 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// effect only after logging out and back in.
 pub const INPUT_GROUP_FIX_COMMAND: &str = "sudo usermod -aG input $USER";
 
+/// Shell command that opens System Settings at the Privacy & Security →
+/// Accessibility pane, where the macOS event-tap hotkey backend's
+/// permission is granted. Surfaced to frontends via
+/// [`HotkeyStatus::fix_command`] so users can copy-paste it. The command
+/// only navigates there — the toggle itself is manual, and the hotkey
+/// must be restarted (`restart_hotkey`) after granting.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const OPEN_ACCESSIBILITY_PANE_COMMAND: &str =
+    "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'";
+
 /// Live health of the global hotkey backend, surfaced to frontends so
 /// they can guide the user when the hotkey cannot work (instead of the
 /// failure living only in the logs).
@@ -62,11 +78,16 @@ pub const INPUT_GROUP_FIX_COMMAND: &str = "sudo usermod -aG input $USER";
 pub struct HotkeyStatus {
     /// Which backend is serving the hotkey: "evdev" (Wayland raw
     /// input), "x11" (XGrabKey), "socket-fallback" (external triggers
-    /// only — real key presses won't fire), or "not-started".
+    /// only — real key presses won't fire), "event-tap" (macOS
+    /// CGEventTap), "event-tap-denied" (macOS, missing Accessibility
+    /// permission), "register-hotkey" (Windows), or "not-started".
     pub backend: String,
     /// `/dev/input` exists but is unreadable — the user is not in the
-    /// `input` group. Real key presses will not trigger recording until
-    /// [`INPUT_GROUP_FIX_COMMAND`] is run and the session restarted.
+    /// `input` group (Linux), or the macOS event tap could not be
+    /// created because the process is not a trusted Accessibility
+    /// client. Real key presses will not trigger recording until the
+    /// corresponding fix (see [`HotkeyStatus::fix_command`]) and a
+    /// hotkey restart.
     pub permission_denied: bool,
     /// Copy-pasteable command that grants access (set exactly when
     /// `permission_denied` is true).
@@ -116,6 +137,38 @@ impl HotkeyStatus {
             permission_denied: false,
             fix_command: None,
             detail: None,
+        }
+    }
+
+    /// CGEventTap backend (macOS) is active.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn macos() -> Self {
+        Self {
+            backend: "event-tap".into(),
+            permission_denied: false,
+            fix_command: None,
+            detail: None,
+        }
+    }
+
+    /// macOS: the CGEventTap could not be created because this process
+    /// is not a trusted Accessibility client, so no keys can be
+    /// observed. Real key presses will not trigger recording until the
+    /// permission is granted in System Settings and the hotkey is
+    /// restarted.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn macos_access_denied() -> Self {
+        Self {
+            backend: "event-tap-denied".into(),
+            permission_denied: true,
+            fix_command: Some(OPEN_ACCESSIBILITY_PANE_COMMAND.to_string()),
+            detail: Some(
+                "Canario needs the macOS Accessibility permission to watch keys. \
+                 Grant it in System Settings \u{2192} Privacy & Security \u{2192} Accessibility, \
+                 then restart the hotkey (Electron frontends can raise the system \
+                 grant-access prompt via systemPreferences.isTrustedAccessibilityClient(true))"
+                    .into(),
+            ),
         }
     }
 
@@ -271,6 +324,8 @@ pub struct HotkeyListener {
     x11: x11::X11Hotkey,
     #[cfg(all(target_os = "linux", feature = "linux-input"))]
     wayland: wayland::WaylandHotkey,
+    #[cfg(target_os = "macos")]
+    macos: macos::MacosHotkey,
     #[cfg(target_os = "windows")]
     windows: windows::WindowsHotkey,
 }
@@ -290,6 +345,8 @@ impl HotkeyListener {
             x11: x11::X11Hotkey::new(),
             #[cfg(all(target_os = "linux", feature = "linux-input"))]
             wayland: wayland::WaylandHotkey::new(),
+            #[cfg(target_os = "macos")]
+            macos: macos::MacosHotkey::new(),
             #[cfg(target_os = "windows")]
             windows: windows::WindowsHotkey::new(),
         }
@@ -402,15 +459,51 @@ impl HotkeyListener {
             Ok(())
         };
 
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(target_os = "macos")]
+        let result = {
+            info!("Using CGEventTap hotkey backend (macOS)");
+            match self.macos.start(
+                &config.key,
+                &config.modifiers,
+                config.processor.clone(),
+                on_action,
+            ) {
+                Ok(macos::Start::Active) => {
+                    *lock(&self.status) = HotkeyStatus::macos();
+                    Ok(())
+                }
+                Ok(macos::Start::AccessDenied) => {
+                    // Expected first-run state: CGEventTapCreate refused
+                    // because Canario is not a trusted Accessibility
+                    // client, and nothing is listening. Failing start()
+                    // would drop the listener (and this guidance with
+                    // it) — degrade to a guided status instead, like the
+                    // evdev input-group failure. `restart_hotkey`
+                    // re-arms the tap once the user has granted the
+                    // permission.
+                    tracing::warn!(
+                        "Event tap creation failed: Canario is not a trusted \
+                         Accessibility client (see status for the fix)"
+                    );
+                    *lock(&self.status) = HotkeyStatus::macos_access_denied();
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::error!("macOS hotkey backend failed to start: {}", e);
+                    Err(e)
+                }
+            }
+        };
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            // TODO: macOS hotkey backend (canario-7x5.1)
+            // TODO: hotkey backend for this platform
             let _ = &on_action;
             let _ = &config;
             bail!("Global hotkey is not yet supported on this platform");
         }
 
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         result
     }
 
@@ -421,6 +514,8 @@ impl HotkeyListener {
         self.x11.stop();
         #[cfg(all(target_os = "linux", feature = "linux-input"))]
         self.wayland.stop();
+        #[cfg(target_os = "macos")]
+        self.macos.stop();
         #[cfg(target_os = "windows")]
         self.windows.stop();
     }
@@ -482,5 +577,28 @@ mod tests {
     #[test]
     fn fresh_listener_reports_not_started() {
         assert_eq!(HotkeyListener::new().status().backend, "not-started");
+    }
+
+    /// The macOS Accessibility guidance rides along exactly like the
+    /// evdev fix command: a copy-pasteable command plus a human
+    /// explanation, and only when the failure is a permission failure.
+    #[test]
+    fn macos_denied_status_carries_accessibility_guidance() {
+        let status = HotkeyStatus::macos_access_denied();
+        assert_eq!(status.backend, "event-tap-denied");
+        assert!(status.permission_denied);
+        assert_eq!(
+            status.fix_command.as_deref(),
+            Some(
+                "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'"
+            )
+        );
+        assert!(status.detail.is_some());
+
+        let active = HotkeyStatus::macos();
+        assert_eq!(active.backend, "event-tap");
+        assert!(!active.permission_denied);
+        assert_eq!(active.fix_command, None);
+        assert_eq!(active.detail, None);
     }
 }
