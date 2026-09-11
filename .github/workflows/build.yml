@@ -59,6 +59,7 @@ jobs:
         with:
           name: sidecar-${{ matrix.os }}
           path: canario-app/sidecar/
+          if-no-files-found: error
           retention-days: 1
 
   # ── Build & package Electron app for all platforms ───────────────────
@@ -113,7 +114,14 @@ jobs:
         with:
           name: canario-${{ matrix.os }}
           path: |
-            canario-app/dist/*/*
+            canario-app/dist/*.AppImage
+            canario-app/dist/*.deb
+            canario-app/dist/*.dmg
+            canario-app/dist/*.exe
+            canario-app/dist/*.zip
+            canario-app/dist/*.blockmap
+            canario-app/dist/latest*.yml
+          if-no-files-found: error
           retention-days: 30
 
   # ── Create GitHub Release ────────────────────────────────────────────
