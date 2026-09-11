@@ -20,9 +20,9 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use canario_core::resample::resample;
 use canario_core::TranscriptionEngine;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 /// Dictation lengths worth benching: a quick phrase, a typical utterance,
 /// a long ramble.
@@ -171,9 +171,7 @@ fn bench_paste(c: &mut Criterion) {
     }) {
         return;
     }
-    eprintln!(
-        "paste bench enabled by CANARIO_BENCH_PASTE: it WILL type into the focused window"
-    );
+    eprintln!("paste bench enabled by CANARIO_BENCH_PASTE: it WILL type into the focused window");
     c.bench_function("paste/native", |b| {
         b.iter(|| {
             let ok = canario_core::paste_text(black_box("benchmark paste sentence.")).unwrap();

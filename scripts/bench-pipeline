@@ -737,6 +737,9 @@ def run_electron_backend(args, marklog: MarkLog) -> dict:
             m_fa = wait_for_mark(marklog, lambda m: m["stage"] == "first_audio",
                                  timeout=30)
 
+            if args.speech:
+                speak_sentence(BENCH_SENTENCE)
+
             time.sleep(args.hold_secs)
 
             t_release = toggle()

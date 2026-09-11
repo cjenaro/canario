@@ -97,6 +97,7 @@ pub fn start_recording(
 }
 
 /// The main recording loop — runs in a background thread.
+#[allow(clippy::too_many_arguments)] // thread-spawn plumbing, not an API
 fn recording_loop(
     model_paths: ModelPaths,
     tx: std::sync::mpsc::Sender<Event>,
