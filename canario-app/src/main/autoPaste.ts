@@ -1,5 +1,5 @@
 // Cross-platform auto-paste
-// Linux:   type text directly (wtype/xdotool/ydotool), clipboard+Ctrl+V fallback
+// Linux:   clipboard + simulated Ctrl+V first (verified read-back), typing fallback
 //   macOS:   robotjs keyTap("v", "command") — requires Accessibility permissions
 //   Windows: robotjs keyTap("v", "control")
 
@@ -68,18 +68,97 @@ export async function autoPasteText(text: string): Promise<boolean> {
   }
 }
 
-// ── Linux paste: type the text directly, clipboard+Ctrl+V as fallback ──
+// ── Linux paste: clipboard + simulated Ctrl+V first, typing fallback ──
+
+/** Linux paste tools, with the args each step kind needs. */
+export type LinuxPasteTool = "wtype" | "xdotool" | "ydotool";
+export type LinuxPasteStep = { kind: "ctrl_v" | "type"; tool: LinuxPasteTool };
 
 /**
- * Deliver `text` to the focused window.
+ * Ordered Linux delivery plan (canario-cy0).
  *
- * Preferred: type the actual characters (wtype on Wayland, xdotool/ydotool
- * elsewhere) — direct typing reads nothing from the clipboard, so it is
- * immune to the clipboard-propagation race where a simulated Ctrl+V pastes
- * stale clipboard content (canario-fhm), and it doesn't depend on the
- * target app honoring a paste keystroke.
+ * Preferred: one synthesized Ctrl+V reading the clipboard that was just
+ * written and *verified* — a single round trip instead of one keystroke
+ * per character. Planned only when `clipboardVerified`: with an
+ * unverified clipboard the keystroke would paste stale content
+ * (canario-fhm), so typing becomes the only safe strategy.
  *
- * Fallback: clipboard + simulated Ctrl+V (the text was already copied).
+ * Fallback: char-by-char typing for apps that swallow synthetic pastes
+ * (and for the unverified-clipboard case).
+ *
+ * Tool scoping: xdotool is X11-only — under Wayland it can only reach
+ * XWayland and exits 0 while the keystroke goes nowhere. wtype is
+ * Wayland-only (native virtual-keyboard protocol; it has no key
+ * command, so it can never synthesize Ctrl+V). ydotool goes through
+ * uinput and works everywhere.
+ */
+export function linuxPastePlan(clipboardVerified: boolean, wayland: boolean): LinuxPasteStep[] {
+  const steps: LinuxPasteStep[] = [];
+  if (clipboardVerified) {
+    if (!wayland) steps.push({ kind: "ctrl_v", tool: "xdotool" });
+    steps.push({ kind: "ctrl_v", tool: "ydotool" });
+  }
+  if (wayland) steps.push({ kind: "type", tool: "wtype" });
+  if (!wayland) steps.push({ kind: "type", tool: "xdotool" });
+  steps.push({ kind: "type", tool: "ydotool" });
+  return steps;
+}
+
+/** Args for one plan step; `text` is only needed by typing steps. */
+export function linuxPasteStepArgs(step: LinuxPasteStep, text: string): string[] {
+  switch (step.tool) {
+    case "xdotool":
+      return step.kind === "ctrl_v"
+        ? ["key", "--clearmodifiers", "ctrl+v"]
+        : ["type", "--clearmodifiers", "--", text];
+    case "ydotool":
+      // --delay 0 skips ydotool's default 100ms pre-press sleep (the
+      // dominant cost of the whole paste at defaults); --key-delay 2 keeps
+      // a small gap between the four chord events.
+      return step.kind === "ctrl_v"
+        ? ["key", "--delay", "0", "--key-delay", "2", "29:1", "47:1", "47:0", "29:0"] // Ctrl down, V down, V up, Ctrl up
+        : ["type", "--delay", "0", "--", text];
+    case "wtype":
+      return ["--", text];
+  }
+}
+
+/** Waits (ms) between clipboard read-back attempts (canario-fhm guard). */
+const CLIPBOARD_READBACK_WAITS_MS = [0, 10, 25, 50];
+
+/**
+ * Verify the clipboard actually holds `text` before trusting it with a
+ * paste keystroke: `clipboard.writeText` resolving is not proof the
+ * compositor has published the new content, and an early Ctrl+V pastes
+ * whatever was there before (canario-fhm). Short bounded read-retry;
+ * false means "skip the keystroke, fall back to typing".
+ *
+ * `readText`/`sleep`/`waitsMs` are injected for testing.
+ */
+export async function clipboardHoldsText(
+  text: string,
+  readText: () => string | Promise<string> = () => clipboard.readText(),
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  waitsMs: readonly number[] = CLIPBOARD_READBACK_WAITS_MS,
+): Promise<boolean> {
+  for (const waitMs of waitsMs) {
+    if (waitMs > 0) await sleep(waitMs);
+    try {
+      if ((await readText()) === text) return true;
+    } catch {
+      // An unreadable clipboard is as unverified as a mismatched one.
+    }
+  }
+  return false;
+}
+
+/**
+ * Deliver `text` to the focused window (Linux).
+ *
+ * The clipboard already holds the text (`autoPasteText` wrote it before
+ * calling here). Verify that with a read-back, then run
+ * [linuxPastePlan]: synthesized Ctrl+V first when verified, typing as
+ * the fallback.
  */
 function linuxPaste(text: string): Promise<boolean> {
   // Run `tool` and resolve true when it exits successfully.
@@ -89,44 +168,14 @@ function linuxPaste(text: string): Promise<boolean> {
     });
 
   return (async () => {
-    // Direct typing, cheapest and race-free first.
-    if (process.env.WAYLAND_DISPLAY) {
-      if (await attempt("wtype", ["--", text])) return true;
+    const verified = await clipboardHoldsText(text);
+    const plan = linuxPastePlan(verified, !!process.env.WAYLAND_DISPLAY);
+    for (const step of plan) {
+      if (await attempt(step.tool, linuxPasteStepArgs(step, text))) return true;
     }
-    if (await attempt("xdotool", ["type", "--clearmodifiers", "--", text])) return true;
-    if (await attempt("ydotool", ["type", "--", text])) return true;
-
-    // Last resort: simulate Ctrl+V. Give the clipboard write a moment to
-    // propagate through the compositor before the keystroke lands.
-    await new Promise((r) => setTimeout(r, 50));
-    return simulatedCtrlV();
+    console.warn("[autoPaste] Linux paste failed: no wtype, xdotool or ydotool available");
+    return false;
   })();
-}
-
-/** Clipboard + Ctrl+V keystroke (xdotool, then ydotool). */
-function simulatedCtrlV(): Promise<boolean> {
-  return new Promise((resolve) => {
-    // xdotool key ctrl+v (X11)
-    execFile("xdotool", ["key", "--clearmodifiers", "ctrl+v"], (err) => {
-      if (!err) {
-        resolve(true);
-        return;
-      }
-
-      // wtype: doesn't have a "key" command for modifiers, skip to ydotool
-
-      // ydotool key 29:1 47:1 47:0 29:0 (Ctrl down, V down, V up, Ctrl up)
-      execFile("ydotool", ["key", "29:1", "47:1", "47:0", "29:0"], (err2) => {
-        if (!err2) {
-          resolve(true);
-          return;
-        }
-
-        console.warn("[autoPaste] Linux paste failed: no wtype, xdotool or ydotool available");
-        resolve(false);
-      });
-    });
-  });
 }
 
 // ── macOS Accessibility permission prompt ──────────────────────────────
