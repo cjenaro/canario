@@ -1,0 +1,13 @@
+{
+  "name": "record_live_captions",
+  "description": "Long recording crossing the live-captions threshold: partial previews stream during capture; the authoritative text still arrives via TranscriptionReady.",
+  "events": [
+    { "event": "RecordingStarted" },
+    { "event": "AudioLevel", "level": 0.2 },
+    { "event": "PartialTranscript", "text": "live preview of the first window" },
+    { "event": "AudioLevel", "level": 0.61 },
+    { "event": "TranscriptionStarted" },
+    { "event": "TranscriptionReady", "text": "The full authoritative transcript of a long recording.", "duration_secs": 11.2 },
+    { "event": "RecordingStopped" }
+  ]
+}

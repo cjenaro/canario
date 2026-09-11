@@ -10,8 +10,11 @@ export interface OverlayOffset {
 }
 
 /**
- * Per-monitor placements, keyed by Electron `Display.id` (as a string —
- * JSON object keys are strings). Mirrors core's
+ * Per-monitor placements, keyed by the frontend-agnostic monitor
+ * identity (string keys — the main process sends them with each
+ * overlay:display push: `Display.label`, e.g. the xrandr output name,
+ * or a `<width>x<height>@<x>,<y>` bounds composite when the label is
+ * empty — see main/monitorIdentity.ts, canario-dmp.21). Mirrors core's
  * `AppConfig.overlay_offsets: BTreeMap<String, OverlayOffset>`.
  */
 export type OverlayOffsets = Record<string, OverlayOffset>;
@@ -114,9 +117,9 @@ export function overlayOffsetsFromConfig(config: unknown): OverlayOffsets {
   const raw = cfg.overlay_offsets;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
   const offsets: OverlayOffsets = {};
-  for (const [displayId, value] of Object.entries(raw)) {
+  for (const [key, value] of Object.entries(raw)) {
     const offset = normalizeOverlayOffset(value);
-    if (offset) offsets[displayId] = offset;
+    if (offset) offsets[key] = offset;
   }
   return offsets;
 }
@@ -134,20 +137,20 @@ export function toStorableOffset(pos: OverlayOffset): OverlayOffset {
 /** Copy the map with one monitor's placement set (others untouched). */
 export function withOverlayOffset(
   offsets: OverlayOffsets,
-  displayId: string,
+  monitorKey: string,
   offset: OverlayOffset,
 ): OverlayOffsets {
-  return { ...offsets, [displayId]: offset };
+  return { ...offsets, [monitorKey]: offset };
 }
 
 /** Copy the map with one monitor's placement removed (reset). */
 export function withoutOverlayOffset(
   offsets: OverlayOffsets,
-  displayId: string,
+  monitorKey: string,
 ): OverlayOffsets {
   const next: OverlayOffsets = {};
-  for (const [id, offset] of Object.entries(offsets)) {
-    if (id !== displayId) next[id] = offset;
+  for (const [key, offset] of Object.entries(offsets)) {
+    if (key !== monitorKey) next[key] = offset;
   }
   return next;
 }

@@ -12,7 +12,8 @@ pub const CONFIG_VERSION: u32 = 1;
 
 /// Defaults for missing fields come from the `Default` impl, so old
 /// config files from earlier versions keep loading after upgrades.
-/// Unknown fields are ignored by serde_json.
+/// Unknown fields are captured into [`Self::extra`] and preserved on
+/// save, so a load→save round trip never destroys them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -126,6 +127,13 @@ pub struct AppConfig {
     /// disabled (the default) keeps dictation fully on-device —
     /// byte-identical to the pre-transform behavior.
     pub transform: TransformSettings,
+
+    /// Fields this build doesn't know about, preserved verbatim on save
+    /// so a downgrade never destroys newer config (canario-dmp.22).
+    /// Populated by serde via flatten; unknown keys in the FILE land here
+    /// and serialize back alongside the known fields.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -346,6 +354,7 @@ impl Default for AppConfig {
             animations: AnimationSettings::default(),
             onboarding_completed: false,
             transform: TransformSettings::default(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -612,7 +621,9 @@ mod tests {
     #[test]
     fn ignores_unknown_fields() {
         // Simulates a config written by a NEWER version with fields
-        // this build doesn't know about.
+        // this build doesn't know about. They don't break the load —
+        // and (canario-dmp.22) they land in `extra` instead of being
+        // dropped, so this build's saves can't destroy them.
         let json = r#"{
             "model": "ParakeetV3",
             "some_future_field": 42,
@@ -620,6 +631,58 @@ mod tests {
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.model, ModelVariant::ParakeetV3);
+        assert_eq!(
+            config.extra.get("some_future_field"),
+            Some(&serde_json::json!(42))
+        );
+        assert_eq!(
+            config.extra.get("another"),
+            Some(&serde_json::json!({ "nested": true }))
+        );
+        assert_eq!(config.extra.len(), 2);
+    }
+
+    #[test]
+    fn unknown_fields_survive_a_load_save_round_trip() {
+        // canario-dmp.22 downgrade safety: a config written by a NEWER
+        // version keeps its unknown keys (values byte-identical) after
+        // this build loads and re-saves it.
+        let json = r#"{
+            "model": "ParakeetV3",
+            "future_number": 42,
+            "future_bool": false,
+            "future_object": { "nested": { "deep": [1, 2, 3] } },
+            "future_string": "kept"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let saved = serde_json::to_value(&config).unwrap();
+        // Known field intact…
+        assert_eq!(saved["model"], serde_json::json!("ParakeetV3"));
+        // …and every unknown key survived with an identical value.
+        assert_eq!(saved["future_number"], serde_json::json!(42));
+        assert_eq!(saved["future_bool"], serde_json::json!(false));
+        assert_eq!(
+            saved["future_object"],
+            serde_json::json!({ "nested": { "deep": [1, 2, 3] } })
+        );
+        assert_eq!(saved["future_string"], serde_json::json!("kept"));
+        // A second round trip is stable (extras re-land in extra).
+        let reloaded: AppConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reloaded).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
+    }
+
+    #[test]
+    fn default_config_serializes_without_extra_keys() {
+        // An empty `extra` contributes nothing to the wire — the
+        // serialized default is unchanged by the flatten field.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(r#""config_version":1"#));
+        assert!(!json.contains("extra"));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(loaded.extra.is_empty());
     }
 
     #[test]

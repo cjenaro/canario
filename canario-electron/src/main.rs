@@ -647,8 +647,10 @@ fn looks_credential_bearing(line: &str) -> bool {
 /// is configurable without hand-maintaining a whitelist.
 ///
 /// Validation policy:
-/// - **Unknown keys are ignored** (logged), consistent with `AppConfig`'s
-///   serde behavior on disk ("Unknown fields are ignored by serde_json").
+/// - Unknown keys are preserved in `AppConfig::extra` (serde flatten),
+///   consistent with `AppConfig`'s on-disk behavior — a newer frontend's
+///   update must survive an older sidecar, exactly like a newer
+///   config.json must survive an older binary (canario-dmp.22).
 /// - A key whose value fails to deserialize (wrong type, bad enum
 ///   variant) is skipped; the field keeps its previous value. Other keys
 ///   in the same update still apply.
@@ -667,10 +669,6 @@ fn merge_config(current: &mut canario_core::AppConfig, partial: &serde_json::Val
     };
 
     for (key, val) in obj {
-        if merged.get(key).is_none() {
-            warn!("update_config: ignoring unknown key {:?}", key);
-            continue;
-        }
         merged[key] = val.clone();
         match serde_json::from_value::<canario_core::AppConfig>(merged.clone()) {
             Ok(new_config) => *current = new_config,
@@ -831,14 +829,37 @@ mod tests {
     }
 
     #[test]
-    fn merge_ignores_unknown_keys() {
+    fn merge_preserves_unknown_keys_in_extra() {
+        // canario-dmp.22: an update payload key this build doesn't know
+        // rides along in `extra` instead of being dropped — a newer
+        // frontend's update survives an older sidecar, and the value
+        // reaches config.json (and get_config) verbatim.
         let mut cfg = canario_core::AppConfig::default();
-        let before = cfg.clone();
-        merge_config(&mut cfg, &serde_json::json!({ "not_a_field": 42 }));
-        assert_eq!(
-            serde_json::to_value(&cfg).unwrap(),
-            serde_json::to_value(&before).unwrap()
+        merge_config(
+            &mut cfg,
+            &serde_json::json!({ "not_a_field": 42, "future_block": { "on": true } }),
         );
+        assert_eq!(cfg.extra.get("not_a_field"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            cfg.extra.get("future_block"),
+            Some(&serde_json::json!({ "on": true }))
+        );
+        // Flattened onto the wire like any other top-level key…
+        let wire = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(wire["not_a_field"], serde_json::json!(42));
+        assert_eq!(wire["future_block"], serde_json::json!({ "on": true }));
+        // …and known keys in the same payload still apply.
+        merge_config(
+            &mut cfg,
+            &serde_json::json!({ "auto_paste": false, "another_unknown": "x" }),
+        );
+        assert!(!cfg.auto_paste);
+        assert_eq!(
+            cfg.extra.get("another_unknown"),
+            Some(&serde_json::json!("x"))
+        );
+        // The earlier extras survived the second merge.
+        assert_eq!(cfg.extra.get("not_a_field"), Some(&serde_json::json!(42)));
     }
 
     #[test]

@@ -134,7 +134,7 @@ export function OverlayPage() {
     sendCommand: (cmd: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
     updateConfigCache: (config: Record<string, unknown>) => Promise<void>;
     setOverlayIslandRect: (rect: IslandRect | null) => void;
-    onOverlayDisplay: (cb: (info: { id: string }) => void) => () => void;
+    onOverlayDisplay: (cb: (info: { key: string }) => void) => () => void;
     onOverlayInteractive: (cb: (interactive: boolean) => void) => () => void;
   } | undefined;
 
@@ -146,7 +146,11 @@ export function OverlayPage() {
   // electron#16777 — so hover detection can't live here). While it deems
   // us interactive we get real pointer events and the island becomes a
   // drag handle; everything else keeps passing clicks through.
-  const [displayId, setDisplayId] = createSignal<string | null>(null);
+  // The identity of the monitor the overlay currently covers — pushed by
+  // the main process on every show (frontend-agnostic key from
+  // monitorIdentity.ts: xrandr-style label or bounds composite). Keys our
+  // slice of the persisted overlay_offsets map.
+  const [monitorKey, setMonitorKey] = createSignal<string | null>(null);
   const [interactive, setInteractive] = createSignal(false);
   const [storedOffsets, setStoredOffsets] = createSignal<OverlayOffsets>({});
   const [dragging, setDragging] = createSignal(false);
@@ -170,7 +174,7 @@ export function OverlayPage() {
   const pos = createMemo<OverlayOffset>(() => {
     const live = dragPos();
     if (dragging() && live) return live;
-    const stored = storedOffsets()[displayId() ?? ""];
+    const stored = storedOffsets()[monitorKey() ?? ""];
     const base = resolveOverlayPosition(stored, vw(), islandW());
     return clampOverlayPosition(base, { width: vw(), height: vh() }, { width: islandW(), height: islandH() });
   });
@@ -200,17 +204,17 @@ export function OverlayPage() {
   }
 
   function persistPlacement(finalPos: OverlayOffset) {
-    const id = displayId();
-    if (!id) return; // no display push yet — visual only, reverts next show
-    void sendPlacementUpdate(withOverlayOffset(storedOffsets(), id, toStorableOffset(finalPos)));
+    const key = monitorKey();
+    if (!key) return; // no display push yet — visual only, reverts next show
+    void sendPlacementUpdate(withOverlayOffset(storedOffsets(), key, toStorableOffset(finalPos)));
   }
 
   // Reset-to-default: drop THIS monitor's entry (others survive) and
   // snap back to the top-center default via the pos() memo.
   function resetPlacement() {
-    const id = displayId();
-    if (!id || !(id in storedOffsets())) return;
-    void sendPlacementUpdate(withoutOverlayOffset(storedOffsets(), id));
+    const key = monitorKey();
+    if (!key || !(key in storedOffsets())) return;
+    void sendPlacementUpdate(withoutOverlayOffset(storedOffsets(), key));
   }
 
   function endDrag(persist = true) {
@@ -237,8 +241,9 @@ export function OverlayPage() {
       })
       .catch(() => {});
 
-    // Which display the overlay landed on (pushed on every show)
-    const unsubDisplay = api?.onOverlayDisplay?.((info) => setDisplayId(info.id));
+    // Which display the overlay landed on (pushed on every show) — the
+    // monitor identity key for placement persistence
+    const unsubDisplay = api?.onOverlayDisplay?.((info) => setMonitorKey(info.key));
     // Interactive ↔ click-through flips from the main process
     const unsubInteractive = api?.onOverlayInteractive?.((i) => {
       setInteractive(i);

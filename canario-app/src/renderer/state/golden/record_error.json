@@ -1,0 +1,9 @@
+{
+  "name": "record_error",
+  "description": "Backend error mid-recording: terminal, no transcript, machine returns to idle.",
+  "events": [
+    { "event": "RecordingStarted" },
+    { "event": "AudioLevel", "level": 0.35 },
+    { "event": "Error", "message": "Audio device lost" }
+  ]
+}

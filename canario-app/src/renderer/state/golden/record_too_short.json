@@ -1,0 +1,8 @@
+{
+  "name": "record_too_short",
+  "description": "Capture under the minimum-key-time/too-short guard: discarded, never transcribes — no TranscriptionStarted, no TranscriptionReady, only the terminal RecordingStopped.",
+  "events": [
+    { "event": "RecordingStarted" },
+    { "event": "RecordingStopped" }
+  ]
+}

@@ -436,6 +436,47 @@ fn update_config_applies_known_keys_and_ignores_unknown() {
     assert_eq!(sidecar.wait_for("cfg-3")["data"]["num_threads"], json!(2));
 }
 
+/// canario-dmp.22 downgrade safety: an update_config payload key this
+/// sidecar build doesn't know must reach config.json (and get_config)
+/// instead of being dropped — a newer frontend's write survives an
+/// older sidecar, exactly like a newer config.json survives an older
+/// binary on load→save.
+#[test]
+fn update_config_preserves_unknown_keys_for_downgrade_safety() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config/canario/config.json");
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "upd-future",
+        "config": { "future_field": 42, "num_threads": 5 }
+    }));
+    assert_eq!(sidecar.wait_for("upd-future")["ok"], json!(true));
+
+    // get_config serves the unknown key at the top level (extra is
+    // flattened) with the value intact…
+    sidecar.send(json!({ "cmd": "get_config", "id": "cfg-future" }));
+    let resp = sidecar.wait_for("cfg-future");
+    assert_eq!(resp["data"]["future_field"], json!(42));
+    assert_eq!(resp["data"]["num_threads"], json!(5));
+
+    // …and it persisted to the temp config.json directly (what a
+    // newer binary would read back after the downgrade).
+    let raw: Value = serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(raw["future_field"], json!(42));
+    assert_eq!(raw["num_threads"], json!(5));
+
+    // A later update of a KNOWN key must not clobber the unknown one.
+    sidecar.send(
+        json!({ "cmd": "update_config", "id": "upd-known", "config": { "auto_paste": false } }),
+    );
+    assert_eq!(sidecar.wait_for("upd-known")["ok"], json!(true));
+    let raw: Value = serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(raw["future_field"], json!(42));
+    assert_eq!(raw["auto_paste"], json!(false));
+}
+
 // ── canario-dmp.20: ConfigChanged propagation ────────────────────────────────
 //
 // The event is payload-free by contract: consumers pull get_config.

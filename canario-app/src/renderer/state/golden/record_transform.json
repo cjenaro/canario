@@ -1,0 +1,11 @@
+{
+  "name": "record_transform",
+  "description": "Happy path with a transformation that changed the text: raw_text rides alongside the canonical text (fgm.3 D3).",
+  "events": [
+    { "event": "RecordingStarted" },
+    { "event": "AudioLevel", "level": 0.4 },
+    { "event": "TranscriptionStarted" },
+    { "event": "TranscriptionReady", "text": "Hello, world.", "duration_secs": 1.8, "raw_text": "hello wrld" },
+    { "event": "RecordingStopped" }
+  ]
+}

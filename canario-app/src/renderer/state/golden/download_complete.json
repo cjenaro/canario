@@ -1,0 +1,10 @@
+{
+  "name": "download_complete",
+  "description": "Model download happy path: monotonic progress, completion.",
+  "events": [
+    { "event": "ModelDownloadProgress", "progress": 0.1 },
+    { "event": "ModelDownloadProgress", "progress": 0.45 },
+    { "event": "ModelDownloadProgress", "progress": 0.8 },
+    { "event": "ModelDownloadComplete" }
+  ]
+}

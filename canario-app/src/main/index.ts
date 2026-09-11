@@ -10,9 +10,16 @@ import { initUpdater, cleanupUpdater, checkForUpdatesManual } from "./updater.js
 import { checkVersion, getVersionInfo } from "./version.js";
 import { acquireSingleInstanceLock } from "./singleInstance.js";
 import { parseLegacyOnboardingFile } from "./onboarding.js";
+import { parseLegacyThemeFile } from "./legacyTheme.js";
 import { decideHotkeyRouting } from "./hotkeyRouting.js";
 import { initTransformCredential, saveTransformCredential } from "./transformCredential.js";
 import { overlayStatusForStop } from "./overlayStatus.js";
+import {
+  legacyMonitorRefs,
+  migrateLegacyOverlayOffsetKeys,
+  monitorKey,
+  resolveMonitorKeys,
+} from "./monitorIdentity.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -93,8 +100,21 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     const { x, y, width, height } = display.bounds;
     overlayWindow.setBounds({ x, y, width, height });
     // Tell the overlay page which monitor it landed on — it keys the
-    // persisted overlay placement per display id (canario-aud.1).
-    overlayWindow.webContents.send("overlay:display", { id: display.id.toString() });
+    // persisted overlay placement by this frontend-agnostic identity
+    // (canario-aud.1, scheme: canario-dmp.21).
+    overlayWindow.webContents.send("overlay:display", { key: overlayMonitorKey(display) });
+  }
+
+  // ── Monitor identity (canario-dmp.21) ────────────────────────────────────
+  // Placement keys are `Display.label` (xrandr output name on Linux) or a
+  // `<width>x<height>@<x>,<y>` bounds composite when the label is empty —
+  // see monitorIdentity.ts. Always resolved against ALL connected displays
+  // so collision-suffixed keys stay consistent between the boot migration
+  // below and every overlay:show push.
+  function overlayMonitorKey(display: Electron.Display): string {
+    const displays = screen.getAllDisplays();
+    const idx = displays.findIndex((d) => d.id === display.id);
+    return idx >= 0 ? resolveMonitorKeys(displays)[idx] : monitorKey(display);
   }
 
   // ── Overlay drag affordance (canario-aud.1) ─────────────────────────────
@@ -263,24 +283,36 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     isLinux: process.platform === "linux",
   }));
 
-  // Theme preference persistence
-  ipcMain.handle("theme:get", () => {
+  // Theme preference (canario-dmp.19): AppConfig (the sidecar's
+  // config.json `theme`) is the single source of truth — the legacy
+  // userData/theme.json mirror is retired (migrateLegacyTheme below
+  // imports + deletes it once at boot). The ipc surface is unchanged so
+  // the renderer/preload need no breaking change: get serves
+  // config.theme (falling back to "dark" when the sidecar is
+  // unreachable — the pre-paint localStorage cache covers that boot);
+  // set forwards to update_config.
+  ipcMain.handle("theme:get", async () => {
     try {
-      const path = join(app.getPath("userData"), "theme.json");
-      const { readFileSync, existsSync } = require("fs");
-      if (existsSync(path)) {
-        return JSON.parse(readFileSync(path, "utf-8")).theme;
+      const res = await sendCommand({ cmd: "get_config" });
+      if (res?.ok && res.data) {
+        return (res.data as { theme?: string }).theme ?? "dark";
       }
     } catch { /* ignore */ }
     return "dark"; // default
   });
 
-  ipcMain.handle("theme:set", (_e, theme: string) => {
+  ipcMain.handle("theme:set", async (_e, theme: string) => {
     try {
-      const { writeFileSync } = require("fs");
-      const path = join(app.getPath("userData"), "theme.json");
-      writeFileSync(path, JSON.stringify({ theme }));
-    } catch { /* ignore */ }
+      const res = await sendCommand({ cmd: "update_config", config: { theme } });
+      if (res?.ok) {
+        // Keep the main-process cache in sync (same as the renderer's
+        // config:update-cache path).
+        cachedConfig = { ...(cachedConfig ?? {}), theme };
+      }
+      return res?.ok === true;
+    } catch {
+      return false;
+    }
   });
 
   // Onboarding completion persistence (canario-xv9): the flag lives in
@@ -512,6 +544,15 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     // renderer's first-launch routing reads it.
     await migrateLegacyOnboarding();
 
+    // One-time import of the legacy main-process theme.json mirror into
+    // AppConfig (canario-dmp.19) — before the renderer reads appearance.
+    await migrateLegacyTheme();
+
+    // One-time re-key of overlay placement keys from Electron display ids
+    // to the frontend-agnostic monitor identity (canario-dmp.21) — before
+    // any renderer reads overlay_offsets.
+    await migrateOverlayOffsetKeys();
+
     // Start the sidecar's hotkey listener on Linux BEFORE any renderer
     // window exists. The /dev/input permission probe settles
     // synchronously inside start_hotkey, so a renderer querying
@@ -609,7 +650,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
 
   // ── Onboarding flag migration (canario-xv9) ─────────────────────────────
   // The completion flag used to live in a main-process onboarding.json
-  // (mirroring theme.json — which stays put). It now lives in the
+  // (mirroring theme.json). It now lives in the
   // sidecar-owned AppConfig, so import the legacy value once and delete
   // the file. Only a "completed" flag is imported: the AppConfig default
   // is already false, so an unfinished wizard simply stays unfinished.
@@ -635,6 +676,75 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       rmSync(path, { force: true });
     } catch (err) {
       console.error("[main] Legacy onboarding.json migration failed:", err);
+    }
+  }
+
+  // ── Legacy theme.json migration (canario-dmp.19) ────────────────────────
+  // The theme mode used to be mirrored into this main-process file so
+  // boots where the sidecar was unavailable still found it. AppConfig
+  // is now the single truth, so import the mirror's value once and
+  // delete the file — the same semantics as the onboarding migration
+  // above: on sidecar failure the file survives and the migration
+  // retries on the next boot. The mirror is the user's latest intent
+  // (it was written even when the sidecar write failed), so it wins
+  // over whatever config.json already says.
+  async function migrateLegacyTheme() {
+    try {
+      const { existsSync, readFileSync, rmSync } = require("fs");
+      const path = join(app.getPath("userData"), "theme.json");
+      if (!existsSync(path)) return;
+      const theme = parseLegacyThemeFile(readFileSync(path, "utf-8"));
+      if (theme) {
+        const res = await sendCommand({
+          cmd: "update_config",
+          config: { theme },
+        });
+        if (!res?.ok) {
+          console.warn("[main] theme.json import deferred (update_config failed)");
+          return; // keep the file for the next launch
+        }
+        cachedConfig = { ...(cachedConfig ?? {}), theme };
+      }
+      rmSync(path, { force: true });
+    } catch (err) {
+      console.error("[main] Legacy theme.json migration failed:", err);
+    }
+  }
+
+  // ── Overlay placement key migration (canario-dmp.21) ────────────────────
+  // overlay_offsets used to be keyed by Electron Display.id.toString() —
+  // Chromium-internal integers that mean nothing to the GTK frontend and
+  // are not stable identifiers across sessions in principle. Re-key any
+  // legacy entry for a CURRENTLY connected display onto the
+  // frontend-agnostic monitor identity (see monitorIdentity.ts); the old
+  // key is dropped (the map is internal). Keys matching no connected
+  // display (an unplugged monitor) are left alone — they can never match
+  // again under the new scheme, so that monitor re-defaults to the
+  // top-center placement when replugged. Accepted: placement is a
+  // cosmetic preference. Best-effort — a failed update_config just
+  // retries on the next launch.
+  async function migrateOverlayOffsetKeys() {
+    try {
+      const migration = migrateLegacyOverlayOffsetKeys(
+        cachedConfig?.overlay_offsets,
+        legacyMonitorRefs(screen.getAllDisplays()),
+      );
+      if (!migration) return;
+      const res = await sendCommand({
+        cmd: "update_config",
+        config: { overlay_offsets: migration.next },
+      });
+      if (!res?.ok) {
+        console.warn("[main] overlay_offsets re-key deferred (update_config failed)");
+        return; // retry on the next launch
+      }
+      cachedConfig = { ...(cachedConfig ?? {}), overlay_offsets: migration.next };
+      console.log(
+        `[main] overlay_offsets migrated to monitor identities: ` +
+          migration.moved.map((m) => `${m.from} -> ${m.to}`).join(", "),
+      );
+    } catch (err) {
+      console.error("[main] overlay_offsets migration failed:", err);
     }
   }
 

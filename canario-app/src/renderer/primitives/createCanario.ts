@@ -46,6 +46,162 @@ declare global {
   }
 }
 
+// ── Sidecar wire-event translation (canario-dmp.13) ────────────────────
+// The renderer's entire wire-event surface, extracted from the onMount
+// subscription below so the golden-trace replay suite
+// (state/golden.test.ts) can drive a real machine through it without
+// Electron mocks. Maps one sidecar event to machine events + effects;
+// createCanario wires the live subscription to it.
+
+export interface SidecarEventDeps {
+  send: AppMachine["send"];
+  updateContext: AppMachine["updateContext"];
+  /** Overlay window effects (main-process IPC). */
+  api: Pick<CanarioAPI, "showOverlay" | "hideOverlay">;
+  /** ConfigChanged pulls fresh config into context (fire-and-forget). */
+  getConfig: () => Promise<unknown>;
+  /** Re-derives model readiness after download terminal events. */
+  checkModel: () => Promise<boolean>;
+  notifyDownloadComplete: () => void;
+  notifyTransformFallback: (event: Record<string, unknown>) => void;
+  /** HotkeyTriggered (sidecar hotkey path) toggles the pipeline. */
+  toggleRecording: () => unknown;
+}
+
+// Wire-event names that reached the switch's default arm — i.e. events
+// the renderer does NOT handle. Collected (instead of staying silent)
+// so state/golden.test.ts can pin coverage: a core event that lands in
+// this set without a documented-ignore entry there is a renderer
+// coverage gap. A Set of names, not a log — bounded by the event
+// vocabulary, so high-frequency no-op events can't grow it.
+const unhandledSidecarEventNames = new Set<string>();
+
+/** Test hook: clear the default-arm collection (see golden.test.ts). */
+export function resetUnhandledSidecarEventNames(): void {
+  unhandledSidecarEventNames.clear();
+}
+
+/** The wire-event names the switch's default arm has seen. */
+export function getUnhandledSidecarEventNames(): ReadonlySet<string> {
+  return unhandledSidecarEventNames;
+}
+
+export function translateSidecarEvent(event: Record<string, unknown>, deps: SidecarEventDeps): void {
+  const eventName = event.event as string;
+
+  switch (eventName) {
+    case "RecordingStarted":
+      deps.send({ type: "START_RECORDING" });
+      deps.api.showOverlay();
+      break;
+
+    case "RecordingStopped":
+      deps.send({ type: "RECORDING_STOPPED" });
+      // Final event of every record→transcribe pipeline (also the only
+      // event for too-short / no-speech recordings) — hide the overlay.
+      deps.api.hideOverlay();
+      break;
+
+    case "TranscriptionReady":
+      deps.updateContext({
+        lastTranscription: event.text as string,
+        lastDuration: event.duration_secs as number,
+      });
+      deps.send({ type: "TRANSCRIPTION_READY" });
+      deps.api.hideOverlay();
+      // fgm.4: a transform-failure flag on the event means the
+      // text above (and the main-process paste) is the RAW
+      // transcript — the D5d fallback. Notify subscribers for the
+      // settings toast; nothing about the machine/paste path
+      // changes. event.text is the canonical value either way
+      // (D3) — no code path reads a raw field for pasting.
+      if (transcriptionTransformFailed(event)) {
+        deps.notifyTransformFallback(event);
+      }
+      break;
+
+    case "RecordingCancelled":
+      // Escape-cancel: audio discarded, no TranscriptionReady follows —
+      // return straight to idle and hide the overlay.
+      deps.send({ type: "RECORDING_CANCELLED" });
+      deps.api.hideOverlay();
+      break;
+
+    case "TranscriptionStarted":
+      // Idempotent belt-and-braces (canario-dmp.9): the machine
+      // already enters `transcribing` via the stop-response path
+      // (stopRecording / toggleRecording on res.ok); from
+      // `transcribing` this event's STOP_RECORDING is ignored by
+      // the machine.
+      deps.send({ type: "STOP_RECORDING" });
+      break;
+
+    case "ConfigChanged":
+      // config.json was written by this instance or an external
+      // change was detected (canario-dmp.20) — pull the fresh
+      // config into context (getConfig updates it) without awaiting.
+      void deps.getConfig();
+      break;
+
+    case "SidecarCrashed":
+      // Backend process died mid-flight (canario-dmp.6): no terminal
+      // core event will ever arrive, so force the machine idle, hide
+      // the overlay, and surface the failure — lastError triggers the
+      // AppPage error toast automatically.
+      deps.updateContext({
+        lastError: `Speech backend exited unexpectedly (code ${event.code ?? "unknown"}) — please restart Canario`,
+      });
+      deps.send({ type: "SIDECAR_CRASHED" });
+      deps.api.hideOverlay();
+      break;
+
+    case "AudioLevel":
+      // No-op: nothing consumes per-frame audio levels yet.
+      break;
+
+    case "Error":
+      deps.updateContext({ lastError: event.message as string });
+      deps.send({ type: "ERROR" });
+      // Reset the overlay in case an error interrupted recording/transcribing
+      deps.api.hideOverlay();
+      break;
+
+    case "ModelDownloadProgress":
+      deps.send({ type: "DOWNLOAD_PROGRESS", progress: event.progress as number });
+      break;
+
+    case "ModelDownloadComplete":
+      deps.send({ type: "DOWNLOAD_COMPLETE" });
+      // The event carries no model identity and the user may have
+      // switched selection mid-download — re-derive readiness from
+      // the core for whatever is selected NOW (Custom included).
+      deps.checkModel();
+      deps.notifyDownloadComplete();
+      break;
+
+    case "ModelDownloadFailed":
+      deps.updateContext({ lastError: event.error as string });
+      deps.send({ type: "DOWNLOAD_FAILED" });
+      // Don't assume the selected model is unusable: the failure may
+      // belong to a different variant than the one now selected.
+      deps.checkModel();
+      break;
+
+    case "HotkeyTriggered":
+      deps.toggleRecording();
+      break;
+
+    default:
+      // Unknown/unhandled wire event (today: PartialTranscript —
+      // live-caption previews are deliberately not consumed by the
+      // machine; see the documented-ignore list in state/golden.test.ts).
+      // Recorded so the coverage test can tell a coverage gap from a
+      // documented no-op.
+      unhandledSidecarEventNames.add(eventName);
+      break;
+  }
+}
+
 export function createCanario(machine: AppMachine) {
   const { send, updateContext, state } = machine;
   const api = window.canario;
@@ -385,112 +541,20 @@ export function createCanario(machine: AppMachine) {
       }
     });
 
-    // Listen for sidecar events
+    // Listen for sidecar events — the wire-event translation lives in
+    // translateSidecarEvent (extracted so the golden-trace replay suite
+    // can drive it without Electron; canario-dmp.13).
     const unsub = api.onEvent((event) => {
-      const eventName = event.event as string;
-
-      switch (eventName) {
-        case "RecordingStarted":
-          send({ type: "START_RECORDING" });
-          api.showOverlay();
-          break;
-
-        case "RecordingStopped":
-          send({ type: "RECORDING_STOPPED" });
-          // Final event of every record→transcribe pipeline (also the only
-          // event for too-short / no-speech recordings) — hide the overlay.
-          api.hideOverlay();
-          break;
-
-        case "TranscriptionReady":
-          updateContext({
-            lastTranscription: event.text as string,
-            lastDuration: event.duration_secs as number,
-          });
-          send({ type: "TRANSCRIPTION_READY" });
-          api.hideOverlay();
-          // fgm.4: a transform-failure flag on the event means the
-          // text above (and the main-process paste) is the RAW
-          // transcript — the D5d fallback. Notify subscribers for the
-          // settings toast; nothing about the machine/paste path
-          // changes. event.text is the canonical value either way
-          // (D3) — no code path reads a raw field for pasting.
-          if (transcriptionTransformFailed(event)) {
-            notifyTransformFallback(event);
-          }
-          break;
-
-        case "RecordingCancelled":
-          // Escape-cancel: audio discarded, no TranscriptionReady follows —
-          // return straight to idle and hide the overlay.
-          send({ type: "RECORDING_CANCELLED" });
-          api.hideOverlay();
-          break;
-
-        case "TranscriptionStarted":
-          // Idempotent belt-and-braces (canario-dmp.9): the machine
-          // already enters `transcribing` via the stop-response path
-          // (stopRecording / toggleRecording on res.ok); from
-          // `transcribing` this event's STOP_RECORDING is ignored by
-          // the machine.
-          send({ type: "STOP_RECORDING" });
-          break;
-
-        case "ConfigChanged":
-          // config.json was written by this instance or an external
-          // change was detected (canario-dmp.20) — pull the fresh
-          // config into context (getConfig updates it) without awaiting.
-          void getConfig();
-          break;
-
-        case "SidecarCrashed":
-          // Backend process died mid-flight (canario-dmp.6): no terminal
-          // core event will ever arrive, so force the machine idle, hide
-          // the overlay, and surface the failure — lastError triggers the
-          // AppPage error toast automatically.
-          updateContext({
-            lastError: `Speech backend exited unexpectedly (code ${event.code ?? "unknown"}) — please restart Canario`,
-          });
-          send({ type: "SIDECAR_CRASHED" });
-          api.hideOverlay();
-          break;
-
-        case "AudioLevel":
-          // No-op: nothing consumes per-frame audio levels yet.
-          break;
-
-        case "Error":
-          updateContext({ lastError: event.message as string });
-          send({ type: "ERROR" });
-          // Reset the overlay in case an error interrupted recording/transcribing
-          api.hideOverlay();
-          break;
-
-        case "ModelDownloadProgress":
-          send({ type: "DOWNLOAD_PROGRESS", progress: event.progress as number });
-          break;
-
-        case "ModelDownloadComplete":
-          send({ type: "DOWNLOAD_COMPLETE" });
-          // The event carries no model identity and the user may have
-          // switched selection mid-download — re-derive readiness from
-          // the core for whatever is selected NOW (Custom included).
-          checkModel();
-          notifyDownloadComplete();
-          break;
-
-        case "ModelDownloadFailed":
-          updateContext({ lastError: event.error as string });
-          send({ type: "DOWNLOAD_FAILED" });
-          // Don't assume the selected model is unusable: the failure may
-          // belong to a different variant than the one now selected.
-          checkModel();
-          break;
-
-        case "HotkeyTriggered":
-          toggleRecording();
-          break;
-      }
+      translateSidecarEvent(event, {
+        send,
+        updateContext,
+        api,
+        getConfig,
+        checkModel,
+        notifyDownloadComplete,
+        notifyTransformFallback,
+        toggleRecording,
+      });
     });
 
     // Listen for hotkey from Electron main process (macOS/Windows)

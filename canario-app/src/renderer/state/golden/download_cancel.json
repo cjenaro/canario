@@ -1,0 +1,9 @@
+{
+  "name": "download_cancel",
+  "description": "User-cancelled download: ModelDownloadFailed is the terminal event; .part files are kept for resume.",
+  "events": [
+    { "event": "ModelDownloadProgress", "progress": 0.1 },
+    { "event": "ModelDownloadProgress", "progress": 0.3 },
+    { "event": "ModelDownloadFailed", "error": "Download cancelled" }
+  ]
+}

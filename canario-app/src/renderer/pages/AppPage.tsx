@@ -27,7 +27,6 @@ import {
 } from "../primitives/animations";
 import {
   appearanceFromConfig,
-  resolveThemeMode,
   type AccentColor,
   type ThemeMode,
 } from "../primitives/appearance";
@@ -296,21 +295,18 @@ export function AppPage() {
       // every key commit; safe to fire-and-forget at mount).
       void refreshTransformStatus();
 
-      // Appearance — AppConfig (`theme` + `accent_color`) is the source
-      // of truth. theme.json (main process) is mirrored on every change
-      // and doubles as the fallback/migration source for choices made
-      // before appearance lived in AppConfig: when the two disagree, the
-      // main-process copy is the user's latest intent, so persist it
-      // back into AppConfig.
-      const appearance = appearanceFromConfig(cfg);
-      const legacyMode = resolveThemeMode(await canario.getTheme());
-      if (legacyMode !== appearance.mode) {
-        await canario.updateConfig({ theme: legacyMode });
-        appearance.mode = legacyMode;
+      // Appearance — AppConfig (`theme` + `accent_color`) is the single
+      // source of truth (canario-dmp.19: the old main-process
+      // theme.json mirror is retired; main imports it once at boot).
+      // Only apply when AppConfig was readable — a sidecar-down boot
+      // keeps whatever the pre-paint cache applied rather than
+      // clobbering it (and the cache) with defaults.
+      if (cfg) {
+        const appearance = appearanceFromConfig(cfg);
+        setThemeMode(appearance.mode);
+        setAccent(appearance.accent);
+        cacheAppearanceForNextBoot(appearance);
       }
-      setThemeMode(appearance.mode);
-      setAccent(appearance.accent);
-      cacheAppearanceForNextBoot(appearance);
 
       // Animations — AppConfig (`animations`) is the source of truth;
       // the effect above applies it and the cache covers the next
@@ -620,10 +616,10 @@ export function AppPage() {
   async function handleModeChange(mode: ThemeMode) {
     setThemeMode(mode);
     cacheAppearanceForNextBoot({ mode, accent: accent() });
-    // AppConfig is the source of truth; theme.json stays mirrored so the
-    // main-process fallback keeps working when the sidecar is down.
+    // AppConfig is the single source of truth (canario-dmp.19 — no
+    // theme.json mirror anymore); the pre-paint cache covers the next
+    // boot.
     await canario.updateConfig({ theme: mode });
-    await canario.setTheme(mode);
   }
 
   async function handleAccentChange(next: AccentColor) {

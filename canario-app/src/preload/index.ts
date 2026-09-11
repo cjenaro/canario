@@ -47,10 +47,12 @@ const api = {
   setOverlayIslandRect: (rect: { x: number; y: number; width: number; height: number } | null) =>
     ipcRenderer.send("overlay:island-rect", rect),
 
-  // Pushed after each overlay:show — which display the window landed on
-  // (id keys the per-monitor placement in AppConfig.overlay_offsets)
-  onOverlayDisplay: (callback: (info: { id: string }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, info: { id: string }) => callback(info);
+  // Pushed after each overlay:show — the identity of the display the
+  // window landed on (the frontend-agnostic monitor key that indexes
+  // the per-monitor placement map in AppConfig.overlay_offsets —
+  // canario-dmp.21)
+  onOverlayDisplay: (callback: (info: { key: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, info: { key: string }) => callback(info);
     ipcRenderer.on("overlay:display", handler);
     return () => ipcRenderer.removeListener("overlay:display", handler);
   },

@@ -3,7 +3,7 @@
 /// Frontends receive these via the `Receiver<Event>` returned by `Canario::new()`.
 /// All events are `Clone + Send` so they can be safely passed across threads.
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
     // ── Recording lifecycle ─────────────────────────────────────────
@@ -47,9 +47,13 @@ pub enum Event {
     TranscriptionReady {
         text: String,
         duration_secs: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Default-tolerant on deserialize so BOTH wire shapes parse:
+        /// the old one (keys absent) and the fgm.3 one below — the
+        /// golden-trace fixtures (canario-dmp.13) replay both through
+        /// this enum.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         raw_text: Option<String>,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        #[serde(skip_serializing_if = "std::ops::Not::not", default)]
         transform_failed: bool,
     },
 
@@ -163,5 +167,117 @@ mod tests {
             json,
             r#"{"event":"TranscriptionReady","text":"Hello, world.","duration_secs":2.0,"raw_text":"hello wrld","transform_failed":true}"#
         );
+    }
+
+    // ── Exhaustive wire-shape pins (canario-dmp.13) ───────────────────
+    //
+    // Every variant of the enum has its exact serialized form asserted:
+    // the sidecar forwards these lines to the Electron main process,
+    // and the renderer's golden traces (canario-app
+    // src/renderer/state/golden/*.json) replay the same shapes — a
+    // stray field or renamed tag must fail here, not downstream.
+
+    /// Recording lifecycle: the three payload-free states.
+    #[test]
+    fn recording_lifecycle_events_serialize_payload_free() {
+        assert_eq!(
+            serde_json::to_string(&Event::RecordingStarted).unwrap(),
+            r#"{"event":"RecordingStarted"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::RecordingStopped).unwrap(),
+            r#"{"event":"RecordingStopped"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::RecordingCancelled).unwrap(),
+            r#"{"event":"RecordingCancelled"}"#
+        );
+    }
+
+    /// Errors carry exactly one string field.
+    #[test]
+    fn error_serializes_with_message() {
+        let json = serde_json::to_string(&Event::Error {
+            message: "Audio device lost".into(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"event":"Error","message":"Audio device lost"}"#);
+    }
+
+    /// Real-time feedback: level is a bare float, partial transcript a
+    /// bare string (PartialTranscript pinned above).
+    #[test]
+    fn audio_level_serializes_with_bare_float() {
+        let json = serde_json::to_string(&Event::AudioLevel { level: 0.42 }).unwrap();
+        assert_eq!(json, r#"{"event":"AudioLevel","level":0.42}"#);
+    }
+
+    /// Model management: progress is a bare float; completion is
+    /// payload-free; failure carries exactly one string field.
+    #[test]
+    fn model_download_events_serialize_their_payloads() {
+        assert_eq!(
+            serde_json::to_string(&Event::ModelDownloadProgress { progress: 0.75 }).unwrap(),
+            r#"{"event":"ModelDownloadProgress","progress":0.75}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::ModelDownloadComplete).unwrap(),
+            r#"{"event":"ModelDownloadComplete"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::ModelDownloadFailed {
+                error: "Download cancelled".into()
+            })
+            .unwrap(),
+            r#"{"event":"ModelDownloadFailed","error":"Download cancelled"}"#
+        );
+    }
+
+    /// Hotkey notifications are payload-free — the frontend toggles
+    /// recording off the tag alone.
+    #[test]
+    fn hotkey_triggered_serializes_payload_free() {
+        let json = serde_json::to_string(&Event::HotkeyTriggered).unwrap();
+        assert_eq!(json, r#"{"event":"HotkeyTriggered"}"#);
+    }
+
+    /// canario-dmp.13: the golden-trace replay deserializes every
+    /// fixture element through this enum — pin that BOTH
+    /// TranscriptionReady wire shapes (old keys-absent and fgm.3
+    /// raw_text) parse back, plus one payload-free variant.
+    #[test]
+    fn events_deserialize_from_their_wire_shapes() {
+        let old: Event = serde_json::from_str(
+            r#"{"event":"TranscriptionReady","text":"hello","duration_secs":1.5}"#,
+        )
+        .unwrap();
+        match old {
+            Event::TranscriptionReady {
+                text,
+                duration_secs,
+                raw_text,
+                transform_failed,
+            } => {
+                assert_eq!(text, "hello");
+                assert_eq!(duration_secs, 1.5);
+                assert_eq!(raw_text, None);
+                assert!(!transform_failed);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let new: Event = serde_json::from_str(
+            r#"{"event":"TranscriptionReady","text":"Hello.","duration_secs":1.8,"raw_text":"hello"}"#,
+        )
+        .unwrap();
+        match new {
+            Event::TranscriptionReady { raw_text, .. } => {
+                assert_eq!(raw_text.as_deref(), Some("hello"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let hotkey: Event = serde_json::from_str(r#"{"event":"HotkeyTriggered"}"#).unwrap();
+        assert!(matches!(hotkey, Event::HotkeyTriggered));
     }
 }

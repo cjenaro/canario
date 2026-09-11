@@ -1,0 +1,12 @@
+{
+  "name": "record_transcribe",
+  "description": "Press-and-hold happy path: capture, transcribe, transcript ready, pipeline closed. No transformation configured.",
+  "events": [
+    { "event": "RecordingStarted" },
+    { "event": "AudioLevel", "level": 0.12 },
+    { "event": "AudioLevel", "level": 0.55 },
+    { "event": "TranscriptionStarted" },
+    { "event": "TranscriptionReady", "text": "Hello, world.", "duration_secs": 2.5 },
+    { "event": "RecordingStopped" }
+  ]
+}

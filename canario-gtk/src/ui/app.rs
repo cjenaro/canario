@@ -282,6 +282,24 @@ fn handle_event(
             crate::ui::model_manager::download_failed(&err);
         }
 
+        // The finished capture began transcribing (canario-dmp.9). No
+        // indicator change: the terminal RecordingStopped (after
+        // TranscriptionReady) clears and hides it, and this frontend
+        // has no distinct "transcribing" visual.
+        Event::TranscriptionStarted => {
+            tracing::debug!("Transcription started");
+        }
+
+        // config.json changed — possibly written by the other frontend
+        // running concurrently. Pull the on-disk truth into this
+        // instance's snapshot so later config() reads (auto_paste,
+        // theme, …) reflect it (canario-dmp.20).
+        Event::ConfigChanged => {
+            if let Err(err) = canario.refresh_config() {
+                tracing::warn!("Config changed but reload failed: {}", err);
+            }
+        }
+
         Event::HotkeyTriggered => {
             canario.toggle_recording();
         }

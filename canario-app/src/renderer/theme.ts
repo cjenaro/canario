@@ -2,13 +2,15 @@
 // document root.
 //
 // Persistence layout (see AppPage):
-//   • AppConfig (sidecar) is the source of truth: `theme` + `accent_color`.
+//   • AppConfig (sidecar config.json) is the single source of truth:
+//     `theme` + `accent_color` (canario-dmp.19 retired the old
+//     main-process userData/theme.json mirror — main imports + deletes
+//     it once at boot; theme:get/theme:set ipc channels remain as thin
+//     sidecar forwarders).
 //   • localStorage caches the last applied appearance so index.html's
 //     inline boot script can paint it before the app bundle runs (no
-//     first-paint flash).
-//   • theme.json (main process, unchanged ipc handlers) is mirrored on
-//     every change so boots where the sidecar is unavailable still get
-//     the user's theme mode.
+//     first-paint flash). Never authoritative — AppConfig re-applies
+//     the real values right after boot.
 //
 // Pure validation/mapping lives in primitives/appearance.ts.
 

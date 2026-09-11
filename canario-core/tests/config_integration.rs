@@ -143,6 +143,51 @@ fn load_tolerates_unknown_fields_in_config_file() {
 }
 
 #[test]
+fn load_save_round_trip_preserves_unknown_fields_on_disk() {
+    // canario-dmp.22 downgrade safety: a user upgrades (the new binary
+    // writes new fields), then downgrades — the moment this (older)
+    // build saves, the newer fields must survive. Load captures them
+    // into `extra`; save writes them back alongside the known fields.
+    let (_guard, config_file) = isolated_config_dir();
+    std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_file,
+        r#"{
+            "model": "ParakeetV2",
+            "auto_paste": false,
+            "future_number": 42,
+            "future_bool": true,
+            "future_object": {"nested": {"deep": [1, 2, 3]}}
+        }"#,
+    )
+    .unwrap();
+
+    let config = AppConfig::load().unwrap();
+    assert_eq!(config.model, ModelVariant::ParakeetV2);
+    assert!(!config.auto_paste);
+    config.save().unwrap();
+
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
+    // Known fields keep their loaded values…
+    assert_eq!(raw["model"], serde_json::json!("ParakeetV2"));
+    assert_eq!(raw["auto_paste"], serde_json::json!(false));
+    // …and the unknown keys survived the save with identical values.
+    assert_eq!(raw["future_number"], serde_json::json!(42));
+    assert_eq!(raw["future_bool"], serde_json::json!(true));
+    assert_eq!(
+        raw["future_object"],
+        serde_json::json!({ "nested": { "deep": [1, 2, 3] } })
+    );
+    // A reload still sees them (stable across repeated round trips).
+    let reloaded = AppConfig::load().unwrap();
+    assert_eq!(
+        reloaded.extra.get("future_number"),
+        Some(&serde_json::json!(42))
+    );
+}
+
+#[test]
 fn corrupt_json_file_is_quarantined_and_defaults_load() {
     // canario-dmp.16: a corrupt config no longer hard-errors from
     // `load` (which aborted the sidecar and the GTK app at boot,

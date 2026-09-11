@@ -1,0 +1,9 @@
+{
+  "name": "record_cancel",
+  "description": "Escape-cancel mid-capture: audio discarded, no transcription follows, nothing pasted or stored.",
+  "events": [
+    { "event": "RecordingStarted" },
+    { "event": "AudioLevel", "level": 0.3 },
+    { "event": "RecordingCancelled" }
+  ]
+}
