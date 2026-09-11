@@ -333,6 +333,62 @@ fn model_inventory_query_preserves_selected_model_and_saved_config() {
 }
 
 #[test]
+fn corrupted_config_is_quarantined_and_sidecar_boots_with_defaults() {
+    // canario-dmp.16: a corrupt config used to abort Canario::new(),
+    // exit the sidecar, and surface as a generic "sidecar not running"
+    // toast after the 5s ping timeout. Now the file is quarantined and
+    // the app boots from defaults.
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config/canario/config.json");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let corrupt = r#"{"model": "ParakeetV2", "auto_pas"#;
+    std::fs::write(&config_path, corrupt).unwrap();
+
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    // The sidecar boots despite the corrupt config and serves defaults.
+    sidecar.send(json!({ "cmd": "get_config", "id": "boot" }));
+    let resp = sidecar.wait_for("boot");
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(resp["data"]["model"], json!("ParakeetV3"));
+
+    // The corrupt bytes are preserved in exactly one .corrupt-* sibling...
+    let config_dir = config_path.parent().unwrap();
+    let mut quarantined: Vec<std::path::PathBuf> = std::fs::read_dir(config_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("config.json.corrupt-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    quarantined.sort();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(std::fs::read_to_string(&quarantined[0]).unwrap(), corrupt);
+
+    // ...and the live config.json is valid defaults.
+    let fresh: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(fresh["model"], json!("ParakeetV3"));
+
+    // Diagnostics reports the quarantine path.
+    sidecar.send(json!({ "cmd": "diagnostics", "id": "diag" }));
+    let diag = sidecar.wait_for("diag")["data"].clone();
+    let reported: Vec<String> = diag["quarantined_configs"]
+        .as_array()
+        .expect("quarantined_configs missing from diagnostics")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        reported,
+        vec![quarantined[0].to_string_lossy().into_owned()]
+    );
+}
+
+#[test]
 fn diagnostics_returns_versions_system_config_tools_and_logs() {
     let mut sidecar = Sidecar::spawn();
 

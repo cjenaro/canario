@@ -143,15 +143,41 @@ fn load_tolerates_unknown_fields_in_config_file() {
 }
 
 #[test]
-fn corrupt_json_file_does_not_parse() {
-    // Documents current behavior: a corrupt config file is a hard error
-    // from `load` (unlike history, which falls back to empty). If the
-    // policy changes to "fall back to defaults", update this test.
+fn corrupt_json_file_is_quarantined_and_defaults_load() {
+    // canario-dmp.16: a corrupt config no longer hard-errors from
+    // `load` (which aborted the sidecar and the GTK app at boot,
+    // surfacing as "sidecar not running"). It is quarantined next to
+    // the live file and defaults are served instead.
     let (_guard, config_file) = isolated_config_dir();
     std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
-    std::fs::write(&config_file, "{ this is not json").unwrap();
+    let corrupt = "{ this is not json";
+    std::fs::write(&config_file, corrupt).unwrap();
 
-    assert!(AppConfig::load().is_err());
+    let config = AppConfig::load().unwrap();
+    assert_eq!(config.model, ModelVariant::ParakeetV3);
+
+    // Original bytes preserved in a .corrupt-* sibling...
+    let dir = config_file.parent().unwrap();
+    let mut quarantined: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("config.json.corrupt-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    quarantined.sort();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(std::fs::read_to_string(&quarantined[0]).unwrap(), corrupt);
+
+    // ...and the live file is now valid defaults that reload cleanly.
+    let reloaded = AppConfig::load().unwrap();
+    assert_eq!(
+        serde_json::to_value(&reloaded).unwrap(),
+        serde_json::to_value(AppConfig::default()).unwrap()
+    );
 }
 
 // ── Pure serde layer (no env isolation needed) ───────────────────────────

@@ -2,7 +2,7 @@ pub mod autostart;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::inference::postprocess::PostProcessor;
 
@@ -273,24 +273,100 @@ impl AppConfig {
             .join("models")
     }
 
+    /// Load the config from the default location. Never fails on a
+    /// corrupt file: see [`Self::load_from`].
     pub fn load() -> anyhow::Result<Self> {
-        let path = Self::config_file();
+        Self::load_from(&Self::config_file())
+    }
+
+    /// Load the config stored at `path`.
+    ///
+    /// A file that cannot be read or parsed is quarantined (renamed to
+    /// `config.json.corrupt-<timestamp>` next to it, original bytes
+    /// preserved) and replaced with defaults, so a corrupted config
+    /// never aborts startup — every other store degrades gracefully
+    /// and the config must too.
+    fn load_from(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
             let config = Self::default();
-            config.save()?;
+            config.save_to(path)?;
             return Ok(config);
         }
-        let data = std::fs::read_to_string(&path)?;
-        let config: AppConfig = serde_json::from_str(&data)?;
+        match std::fs::read_to_string(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|data| serde_json::from_str(&data).map_err(anyhow::Error::from))
+        {
+            Ok(config) => Ok(config),
+            Err(err) => Self::quarantine_and_reset(path, err),
+        }
+    }
+
+    /// Quarantine the unusable config at `path` and continue from
+    /// freshly saved defaults.
+    ///
+    /// Quarantining and writing the replacement are best-effort: even
+    /// when both fail the app still boots with in-memory defaults
+    /// rather than exiting with a cryptic "sidecar not running".
+    fn quarantine_and_reset(path: &Path, err: anyhow::Error) -> anyhow::Result<Self> {
+        let quarantine = corrupt_sibling_path(path);
+        match std::fs::rename(path, &quarantine) {
+            Ok(()) => tracing::warn!(
+                "config file {} is unusable ({}); quarantined to {} and reset to defaults",
+                path.display(),
+                err,
+                quarantine.display()
+            ),
+            Err(rename_err) => tracing::error!(
+                "config file {} is unusable ({}); quarantining to {} failed ({}); resetting to defaults",
+                path.display(),
+                err,
+                quarantine.display(),
+                rename_err
+            ),
+        }
+        let config = Self::default();
+        if let Err(save_err) = config.save_to(path) {
+            tracing::error!(
+                "could not write default config to {} after quarantine ({}); continuing with in-memory defaults",
+                path.display(),
+                save_err
+            );
+        }
         Ok(config)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        let dir = Self::config_dir();
-        std::fs::create_dir_all(&dir)?;
+        self.save_to(&Self::config_file())
+    }
+
+    fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let data = serde_json::to_string_pretty(self)?;
-        std::fs::write(Self::config_file(), data)?;
+        std::fs::write(path, data)?;
         Ok(())
+    }
+
+    /// Quarantined config files in `dir`, oldest first.
+    ///
+    /// Consumed by the diagnostics blob so support can see that a
+    /// config was reset and recover the user's settings from the
+    /// preserved bytes.
+    pub fn quarantined_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("config.json.corrupt-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        files.sort();
+        files
     }
 
     /// Get the model download URLs based on selected variant
@@ -368,6 +444,21 @@ impl AppConfig {
             Err(_) => false,
         }
     }
+}
+
+/// Quarantine target for a corrupt config: `config.json` becomes
+/// `config.json.corrupt-<unix-nanos>` next to it. The nanosecond
+/// timestamp makes repeat quarantines collision-free.
+fn corrupt_sibling_path(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}.corrupt-{nanos}"))
 }
 
 #[cfg(test)]
@@ -846,5 +937,115 @@ mod tests {
         assert!(config.is_model_downloaded());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Corrupt-config quarantine (canario-dmp.16) ---
+
+    fn temp_config_file(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    /// Assert that a quarantining load happened: exactly one
+    /// `.corrupt-*` sibling preserving the original bytes, and a fresh
+    /// `config.json` equal to the defaults.
+    fn assert_quarantined_and_reset(dir: &Path, corrupt_contents: &str) {
+        let mut quarantined: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("config.json.corrupt-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        quarantined.sort();
+        assert_eq!(
+            quarantined.len(),
+            1,
+            "expected exactly one quarantined config, found {quarantined:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&quarantined[0]).unwrap(),
+            corrupt_contents,
+            "quarantine must preserve the original bytes"
+        );
+
+        let fresh: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_string(&fresh).unwrap(),
+            serde_json::to_string(&AppConfig::default()).unwrap(),
+            "fresh config must equal the defaults"
+        );
+    }
+
+    #[test]
+    fn truncated_json_is_quarantined_and_reset_to_defaults() {
+        let corrupt = r#"{"model": "ParakeetV2", "auto_pas"#;
+        let (dir, path) = temp_config_file(corrupt);
+
+        let config = AppConfig::load_from(&path).unwrap();
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+        assert_quarantined_and_reset(dir.path(), corrupt);
+    }
+
+    #[test]
+    fn wrong_typed_field_is_quarantined_and_reset_to_defaults() {
+        let corrupt = r#"{"minimum_key_time": "fast"}"#;
+        let (dir, path) = temp_config_file(corrupt);
+
+        let config = AppConfig::load_from(&path).unwrap();
+        assert_eq!(config.minimum_key_time, 0.2);
+        assert_quarantined_and_reset(dir.path(), corrupt);
+    }
+
+    #[test]
+    fn empty_config_file_is_quarantined_and_reset_to_defaults() {
+        let (dir, path) = temp_config_file("");
+
+        let config = AppConfig::load_from(&path).unwrap();
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        assert_quarantined_and_reset(dir.path(), "");
+    }
+
+    #[test]
+    fn valid_config_loads_without_quarantine() {
+        let json = serde_json::to_string_pretty(&AppConfig::default()).unwrap();
+        let (dir, path) = temp_config_file(&json);
+
+        let config = AppConfig::load_from(&path).unwrap();
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        assert!(AppConfig::quarantined_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn missing_file_saves_defaults_without_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        // Also exercises save_to creating parent directories.
+        let path = dir.path().join("nested/config.json");
+
+        let config = AppConfig::load_from(&path).unwrap();
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+        assert!(path.exists());
+        assert!(AppConfig::quarantined_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn quarantined_files_lists_only_corrupt_siblings_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("config.json.corrupt-100"), b"a").unwrap();
+        std::fs::write(dir.path().join("config.json.corrupt-200"), b"b").unwrap();
+        std::fs::write(dir.path().join("unrelated.txt"), b"x").unwrap();
+
+        let files = AppConfig::quarantined_files(dir.path());
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("config.json.corrupt-100"));
+        assert!(files[1].ends_with("config.json.corrupt-200"));
     }
 }

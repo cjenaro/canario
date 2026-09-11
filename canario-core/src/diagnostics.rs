@@ -103,6 +103,11 @@ pub struct Diagnostics {
     pub frontend: FrontendInfo,
     pub system: SystemInfo,
     pub config_path: PathBuf,
+    /// Config files quarantined because they could not be read or
+    /// parsed (renamed to `config.json.corrupt-<timestamp>` next to the
+    /// live config, which was reset to defaults). The preserved bytes
+    /// allow support to recover the user's settings.
+    pub quarantined_configs: Vec<PathBuf>,
     pub config: serde_json::Value,
     pub model: ModelInfo,
     pub tools: ToolAvailability,
@@ -125,6 +130,9 @@ pub fn collect(frontend_name: &str, frontend_version: &str) -> Diagnostics {
         },
         system: collect_system(),
         config_path: crate::config::AppConfig::config_file(),
+        quarantined_configs: crate::config::AppConfig::quarantined_files(
+            &crate::config::AppConfig::config_dir(),
+        ),
         config: serde_json::to_value(&config).unwrap_or(serde_json::Value::Null),
         model: collect_model(&config),
         tools: collect_tools(),
