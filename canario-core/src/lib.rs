@@ -37,6 +37,12 @@ mod mic_warm;
 mod paste;
 mod recording;
 pub mod timing;
+/// LLM transformation provider client (canario-fgm.1 D1/D2/D5): OpenAI
+/// chat-completions against any compatible base_url, API key passed in
+/// memory-only as a function argument, payload limited to
+/// transcript + instruction. Wired into the sidecar's transform
+/// commands; the pipeline itself lands in canario-fgm.3/4.
+pub mod transform;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 

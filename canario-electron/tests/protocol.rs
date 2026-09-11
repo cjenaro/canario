@@ -790,6 +790,279 @@ fn legacy_autostart_entry_is_removed_when_new_identity_already_exists() {
     assert_eq!(std::fs::read_dir(&autostart_dir).unwrap().count(), 1);
 }
 
+/// Recursively collect every file under `dir` (best-effort, symlinks
+/// not followed) — used by the credential-leak test to grep everything
+/// the sidecar wrote under its temp HOME.
+fn all_files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Serve exactly one HTTP request (headers + body captured over a
+/// channel), replying with a canned OpenAI-style chat-completions
+/// response. Returns the base URL (without version path) to configure.
+fn spawn_one_shot_openai_server(
+    response_body: &'static str,
+) -> (String, std::sync::mpsc::Receiver<(String, String)>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0, "sidecar closed before sending headers");
+            raw.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+        };
+        let headers = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+        let content_length: usize = headers
+            .to_ascii_lowercase()
+            .lines()
+            .find(|l| l.starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        while raw.len() < header_end + 4 + content_length {
+            let n = stream.read(&mut chunk).unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        }
+        let body = String::from_utf8_lossy(&raw[header_end + 4..]).into_owned();
+        let _ = tx.send((headers, body));
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    (format!("http://{addr}"), rx)
+}
+
+/// canario-fgm.2 / fgm.1 D2: the transform credential is memory-only.
+/// It arrives via `set_transform_credential`, is observable only as a
+/// boolean, and must never reach config.json, the wire, or any file
+/// the sidecar writes (logs included).
+#[test]
+fn set_transform_credential_is_memory_only_never_on_disk_or_logs() {
+    const SECRET: &str = "sk-fgm2-leak-canary";
+    let tmp = tempfile::tempdir().unwrap();
+    // The Sidecar takes ownership of the TempDir (keeping it alive for
+    // the child); capture the HOME path for the final on-disk sweep.
+    let home = tmp.path().to_path_buf();
+    let config_path = home.join("config/canario/config.json");
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    // Default posture: disabled transform, no credential (D5a).
+    sidecar.send(json!({ "cmd": "transform_status", "id": "t0" }));
+    let status = sidecar.wait_for("t0");
+    assert_eq!(status["ok"], json!(true));
+    assert_eq!(status["data"]["enabled"], json!(false));
+    assert_eq!(status["data"]["credential_present"], json!(false));
+    assert_eq!(status["data"]["provider"]["base_url"], json!(""));
+    assert_eq!(status["data"]["timeout_ms"], json!(4000));
+
+    // A malformed credential-bearing line must not leak the key into
+    // the log file either: the parse-failure path logs the raw input.
+    sidecar.send_raw(&format!(
+        "{{\"id\":\"bad-cred\",\"cmd\":\"set_transform_credential\",\"key\":\"{SECRET}\",\"oops\":"
+    ));
+    let resp = sidecar.wait_for("unknown"); // invalid JSON → id not recoverable
+    assert_eq!(resp["ok"], json!(false));
+
+    // An unknown command carrying a key field hits the same raw-line
+    // log path with parseable JSON — also redacted.
+    sidecar.send(json!({ "cmd": "explode", "id": "bad-cred-2", "key": SECRET }));
+    assert_eq!(sidecar.wait_for("bad-cred-2")["ok"], json!(false));
+
+    // Store the credential: the response reports presence, not value.
+    sidecar.send(json!({ "cmd": "set_transform_credential", "id": "t1", "key": SECRET }));
+    let resp = sidecar.wait_for("t1");
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(resp["data"]["stored"], json!(true));
+    assert!(!resp.to_string().contains(SECRET));
+
+    // Persisted config carries provider metadata only — never the key.
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "t2",
+        "config": {
+            "transform": {
+                "enabled": true,
+                "provider": { "base_url": "http://localhost:11434/v1", "model": "llama3" },
+                "timeout_ms": 1500,
+                "rules": []
+            }
+        }
+    }));
+    assert_eq!(sidecar.wait_for("t2")["ok"], json!(true));
+    let on_disk = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        on_disk.contains("localhost:11434"),
+        "provider metadata should persist: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains(SECRET),
+        "config.json must never contain the key"
+    );
+
+    // get_config and transform_status echo the block minus any key.
+    sidecar.send(json!({ "cmd": "get_config", "id": "t3" }));
+    let config = sidecar.wait_for("t3");
+    assert!(!config.to_string().contains(SECRET));
+    assert_eq!(config["data"]["transform"]["enabled"], json!(true));
+
+    sidecar.send(json!({ "cmd": "transform_status", "id": "t4" }));
+    let status = sidecar.wait_for("t4");
+    assert_eq!(status["data"]["enabled"], json!(true));
+    assert_eq!(
+        status["data"]["provider"]["base_url"],
+        json!("http://localhost:11434/v1")
+    );
+    assert_eq!(status["data"]["provider"]["model"], json!("llama3"));
+    assert_eq!(status["data"]["timeout_ms"], json!(1500));
+    assert_eq!(status["data"]["credential_present"], json!(true));
+    assert!(!status.to_string().contains(SECRET));
+
+    // Clearing with key: null drops the memory-only copy.
+    sidecar.send(json!({ "cmd": "set_transform_credential", "id": "t5", "key": null }));
+    assert_eq!(sidecar.wait_for("t5")["data"]["stored"], json!(false));
+    sidecar.send(json!({ "cmd": "transform_status", "id": "t6" }));
+    assert_eq!(
+        sidecar.wait_for("t6")["data"]["credential_present"],
+        json!(false)
+    );
+
+    // D2 sweep: no file under the temp HOME (config, history, daily
+    // logs, …) contains the key.
+    for file in all_files_under(&home) {
+        if let Ok(contents) = std::fs::read_to_string(&file) {
+            assert!(
+                !contents.contains(SECRET),
+                "credential leaked into {}",
+                file.display()
+            );
+        }
+    }
+}
+
+/// canario-fgm.2: the settings "Test connection" button's backend —
+/// one minimal chat-completions round trip through the configured
+/// provider with the in-memory credential.
+#[test]
+fn transform_test_round_trips_against_a_local_openai_compatible_server() {
+    const SECRET: &str = "sk-fgm2-test-key";
+    let (base, captured) =
+        spawn_one_shot_openai_server(r#"{"choices":[{"message":{"content":"pong"}}]}"#);
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "cfg",
+        "config": {
+            "transform": {
+                "enabled": true,
+                "provider": { "base_url": format!("{base}/v1"), "model": "llama3" },
+                "timeout_ms": 2000,
+                "rules": []
+            }
+        }
+    }));
+    assert_eq!(sidecar.wait_for("cfg")["ok"], json!(true));
+    sidecar.send(json!({ "cmd": "set_transform_credential", "id": "key", "key": SECRET }));
+    assert_eq!(sidecar.wait_for("key")["data"]["stored"], json!(true));
+
+    sidecar.send(json!({ "cmd": "transform_test", "id": "test" }));
+    let resp = sidecar.wait_for("test");
+    assert_eq!(resp["ok"], json!(true), "transform_test failed: {resp}");
+    let latency = resp["data"]["latency_ms"].as_u64().unwrap();
+    assert!(
+        latency < 2000,
+        "latency should be under the timeout: {latency}ms"
+    );
+
+    // The key travelled in the Authorization header only (D2)…
+    let (headers, body) = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {SECRET}")),
+        "missing bearer header: {headers}"
+    );
+    // …and the request body is the D5b minimal payload.
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["model"], json!("llama3"));
+    assert_eq!(body["messages"][0]["role"], json!("system"));
+    assert_eq!(body["messages"][1]["role"], json!("user"));
+    assert_eq!(body["stream"], json!(false));
+    assert!(body.to_string().contains("pong")); // the probe instruction/transcript
+    assert!(!body.to_string().contains(SECRET));
+}
+
+#[test]
+fn transform_test_fails_gracefully_without_a_server() {
+    let mut sidecar = Sidecar::spawn();
+
+    // No provider configured: fails before touching the network.
+    sidecar.send(json!({ "cmd": "transform_test", "id": "t-none" }));
+    let resp = sidecar.wait_for("t-none");
+    assert_eq!(resp["ok"], json!(false));
+    let err = resp["error"].as_str().unwrap();
+    assert!(err.contains("base_url"), "unexpected error: {err}");
+
+    // Nothing listening on the loopback endpoint + short timeout: a
+    // fast, descriptive error (the D5d fallback contract).
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "cfg",
+        "config": {
+            "transform": {
+                "enabled": true,
+                "provider": { "base_url": "http://127.0.0.1:9/v1", "model": "llama3" },
+                "timeout_ms": 300,
+                "rules": []
+            }
+        }
+    }));
+    assert_eq!(sidecar.wait_for("cfg")["ok"], json!(true));
+
+    let started = Instant::now();
+    sidecar.send(json!({ "cmd": "transform_test", "id": "t-refused" }));
+    let resp = sidecar.wait_for("t-refused");
+    assert_eq!(resp["ok"], json!(false));
+    assert!(!resp["error"].as_str().unwrap().is_empty());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "transform_test should fail fast, not hang"
+    );
+}
+
 #[test]
 fn shutdown_responds_ok_and_exits() {
     let mut sidecar = Sidecar::spawn();

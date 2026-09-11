@@ -114,6 +114,18 @@ enum Command {
     RestartHotkey { id: String },
     #[serde(rename = "hotkey_status")]
     HotkeyStatus { id: String },
+    #[serde(rename = "set_transform_credential")]
+    SetTransformCredential {
+        id: String,
+        /// The provider API key (D2): held in memory only — never
+        /// written to config.json or logs. `None`/empty drops the
+        /// stored credential.
+        key: Option<String>,
+    },
+    #[serde(rename = "transform_status")]
+    TransformStatus { id: String },
+    #[serde(rename = "transform_test")]
+    TransformTest { id: String },
     #[serde(rename = "set_autostart")]
     SetAutostart {
         id: String,
@@ -258,7 +270,14 @@ fn main() -> anyhow::Result<()> {
         let cmd: Command = match serde_json::from_str(line) {
             Ok(c) => c,
             Err(e) => {
-                error!("Failed to parse command: {} — input: {}", e, line);
+                // The raw line may carry a credential (e.g. a malformed
+                // set_transform_credential) — redact before logging so
+                // the key never reaches the log file (D2).
+                error!(
+                    "Failed to parse command: {} — input: {}",
+                    e,
+                    redact_for_log(line)
+                );
                 // Best-effort: recover the `id` from the raw JSON so the
                 // frontend's id-matched promise resolves instead of
                 // hitting its 10s timeout.
@@ -435,6 +454,62 @@ fn handle_command(
             let status = canario.hotkey_status();
             write_json(&ok_data(&id, serde_json::to_value(&status).unwrap()));
         }
+        // Memory-only credential handoff (fgm.1 D2): the Electron main
+        // process persists the key via safeStorage and pushes it here.
+        // The response reports whether a key is now held — never the
+        // key itself — and nothing is written to config.json or logs.
+        Command::SetTransformCredential { id, key } => {
+            let stored = set_transform_credential(key.as_deref());
+            write_json(&ok_data(&id, serde_json::json!({ "stored": stored })));
+        }
+        // Sidecar truth about the transform feature: the provider
+        // block from config (minus any key material — it never lives
+        // there) plus whether the in-memory credential is present.
+        // Reads the on-disk config like get_config so external edits
+        // are visible without a restart.
+        Command::TransformStatus { id } => {
+            let config = canario.refresh_config().unwrap_or_else(|e| {
+                warn!(
+                    "transform_status: reloading config.json failed ({}), serving snapshot",
+                    e
+                );
+                canario.config()
+            });
+            let transform = &config.transform;
+            write_json(&ok_data(
+                &id,
+                serde_json::json!({
+                    "enabled": transform.enabled,
+                    "provider": {
+                        "base_url": transform.provider.base_url,
+                        "model": transform.provider.model,
+                    },
+                    "timeout_ms": transform.timeout_ms,
+                    "credential_present": transform_credential().is_some(),
+                }),
+            ));
+        }
+        // Connection probe for the settings UI ("Test connection"):
+        // one minimal chat-completions round trip through the
+        // configured provider with the in-memory credential. Blocks
+        // the command loop for at most the configured timeout (same
+        // posture as start_hotkey's synchronous probe).
+        Command::TransformTest { id } => {
+            let config = canario.config();
+            let key = transform_credential();
+            match canario_core::transform::test_connection_blocking(
+                &config.transform,
+                key.as_deref(),
+            ) {
+                Ok(latency_ms) => write_json(&ok_data(
+                    &id,
+                    serde_json::json!({ "latency_ms": latency_ms }),
+                )),
+                // Error strings carry no key material: the credential
+                // only ever travels inside the Authorization header.
+                Err(e) => write_json(&err(&id, e.to_string())),
+            }
+        }
         // One shared login-entry implementation for every frontend
         // (canario-dmp.17): the entry and config.autostart move
         // together, so the frontends can never double-launch at login.
@@ -475,6 +550,98 @@ fn handle_command(
     }
 }
 
+// ── Transform provider plumbing (canario-fgm.1 D1/D2, canario-fgm.2) ─────────
+//
+// Hook points for the LLM transform feature. The dictation pipeline
+// itself is canario-fgm.3/4 — nothing here touches recording.
+
+/// In-memory copy of the transform provider API key (D2). Arrives via
+/// `set_transform_credential` (pushed by the Electron main process,
+/// which persists it via safeStorage), is read by `transform_test` and
+/// (from fgm.3) the transform pipeline. NEVER persisted: not to
+/// config.json, not to logs (every payload-derived log line runs
+/// through `redact_for_log`), not to diagnostics.
+static TRANSFORM_CREDENTIAL: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+fn transform_credential_lock() -> &'static std::sync::Mutex<Option<String>> {
+    TRANSFORM_CREDENTIAL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Clone of the currently held key, if any. Callers must treat the
+/// value as a secret: use it in request headers, never in logs or
+/// serialized output.
+fn transform_credential() -> Option<String> {
+    transform_credential_lock()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// Store (`Some` non-empty) or drop (`None`/blank) the credential.
+/// Returns whether a key is held afterwards.
+fn set_transform_credential(key: Option<&str>) -> bool {
+    let stored = key
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_owned);
+    let mut guard = transform_credential_lock().lock().unwrap();
+    *guard = stored;
+    guard.is_some()
+}
+
+/// Redact credential-bearing fields from a raw command line before it
+/// is logged (D2: the key must never reach the log file). Structurally
+/// blanks `key`/`api_key`/`credential` values, then scrubs any
+/// occurrence of the currently held key as defense in depth. Non-JSON
+/// or credential-free lines pass through unchanged.
+fn redact_for_log(line: &str) -> String {
+    let redacted = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(mut v) if v.is_object() => {
+            let mut changed = false;
+            for field in ["key", "api_key", "credential"] {
+                if let Some(val) = v.get(field) {
+                    if !val.is_null() {
+                        v[field] = serde_json::json!("[redacted]");
+                        changed = true;
+                    }
+                }
+            }
+            // Parsed: return the (possibly redacted) serialization —
+            // `changed == false` still means "safe, log as-is".
+            Some(if changed {
+                v.to_string()
+            } else {
+                line.to_string()
+            })
+        }
+        _ => None,
+    };
+    match redacted {
+        Some(line) => canario_core::transform::redact(&line, transform_credential().as_deref()),
+        // An UNPARSEABLE line can't be structurally redacted, and no
+        // credential may be held yet to scrub with (the malformed
+        // set_transform_credential may be the FIRST time we ever see
+        // the key) — so a raw line that merely looks credential-bearing
+        // must not be logged at all. Marker, not value.
+        None if looks_credential_bearing(line) => {
+            "[input withheld: unparseable line carries a credential field]".to_string()
+        }
+        None => canario_core::transform::redact(line, transform_credential().as_deref()),
+    }
+}
+
+/// Cheap scan for credential-bearing content in a line we could not
+/// parse as JSON: any of the known field names followed by a quote or
+/// digit (i.e. a non-null value) anywhere in the text.
+fn looks_credential_bearing(line: &str) -> bool {
+    ["key", "api_key", "credential"].iter().any(|field| {
+        ["\"", "'", ":"].iter().any(|sep| {
+            line.contains(&format!("{field}{sep}")) || line.contains(&format!("{field} {sep}"))
+        })
+    })
+}
+
 // ── Config merge ─────────────────────────────────────────────────────────────
 
 /// Merge a partial config JSON object onto `current`.
@@ -513,7 +680,16 @@ fn merge_config(current: &mut canario_core::AppConfig, partial: &serde_json::Val
         match serde_json::from_value::<canario_core::AppConfig>(merged.clone()) {
             Ok(new_config) => *current = new_config,
             Err(e) => {
-                warn!("update_config: ignoring invalid value for {:?}: {}", key, e);
+                // A serde error can quote the offending value — scrub
+                // the in-memory credential out of it (D2).
+                warn!(
+                    "update_config: ignoring invalid value for {:?}: {}",
+                    key,
+                    canario_core::transform::redact(
+                        &e.to_string(),
+                        transform_credential().as_deref()
+                    )
+                );
                 // Roll back this key only; keep any earlier applied keys.
                 if let Ok(v) = serde_json::to_value(&*current) {
                     merged = v;
@@ -526,6 +702,79 @@ fn merge_config(current: &mut canario_core::AppConfig, partial: &serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The credential static is process-global and Rust runs unit
+    /// tests on parallel threads — serialize every test that touches it.
+    static CREDENTIAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn transform_credential_store_round_trip_and_clearing() {
+        let _guard = CREDENTIAL_TEST_LOCK.lock().unwrap();
+        // D2 semantics: Some(non-empty) stores, None/blank drops.
+        assert!(!set_transform_credential(None));
+        assert!(transform_credential().is_none());
+
+        assert!(set_transform_credential(Some("sk-test-key")));
+        assert_eq!(transform_credential().as_deref(), Some("sk-test-key"));
+
+        // Blank counts as absent, not as a stored empty string.
+        assert!(!set_transform_credential(Some("   ")));
+        assert!(transform_credential().is_none());
+
+        assert!(set_transform_credential(Some("sk-test-key")));
+        assert!(!set_transform_credential(None));
+        assert!(transform_credential().is_none());
+    }
+
+    #[test]
+    fn redact_for_log_blanks_credential_fields() {
+        let _guard = CREDENTIAL_TEST_LOCK.lock().unwrap();
+        // Credential-bearing command line: the key field is blanked…
+        let line = r#"{"id":"x","cmd":"set_transform_credential","key":"sk-super-secret"}"#;
+        let redacted = redact_for_log(line);
+        assert!(!redacted.contains("sk-super-secret"), "{redacted}");
+        assert!(redacted.contains("\"key\":\"[redacted]\""), "{redacted}");
+        // …while the rest of the line stays useful for debugging.
+        assert!(redacted.contains("set_transform_credential"), "{redacted}");
+    }
+
+    #[test]
+    fn redact_for_log_passes_credential_free_lines_through() {
+        for line in [
+            r#"{"id":"1","cmd":"get_config"}"#,
+            r#"{"id":"2","cmd":"update_config","config":{"auto_paste":false}}"#,
+            // key: null carries no secret — left untouched.
+            r#"{"id":"3","cmd":"set_transform_credential","key":null}"#,
+            "not json at all",
+        ] {
+            assert_eq!(redact_for_log(line), line.to_string());
+        }
+    }
+
+    #[test]
+    fn redact_for_log_withholds_unparseable_credential_bearing_lines() {
+        // A malformed credential line (the raw input IS logged on the
+        // parse-failure path, and no key may be held yet to scrub
+        // with) must be withheld entirely — marker, not value.
+        let malformed = r#"{"id":"bad","cmd":"set_transform_credential","key":"sk-leaky","oops":"#;
+        assert!(!redact_for_log(malformed).contains("sk-leaky"));
+        assert!(redact_for_log(malformed).contains("withheld"));
+
+        // Credential-free garbage still logs verbatim.
+        let benign = r#"{"id":"bad","cmd":"get_config","oops":"#;
+        assert_eq!(redact_for_log(benign), benign.to_string());
+    }
+
+    #[test]
+    fn redact_for_log_scrubs_held_secret_from_arbitrary_text() {
+        let _guard = CREDENTIAL_TEST_LOCK.lock().unwrap();
+        // Defense in depth: a non-JSON line (or any field) that happens
+        // to contain the currently held key is scrubbed too.
+        set_transform_credential(Some("sk-live-secret"));
+        let scrubbed = redact_for_log("garbage line mentioning sk-live-secret");
+        assert_eq!(scrubbed, "garbage line mentioning [redacted]");
+        set_transform_credential(None);
+    }
 
     #[test]
     fn merge_applies_known_fields() {
@@ -642,5 +891,37 @@ mod tests {
             canario_core::AudioBehavior::Mute
         );
         assert_eq!(cfg.hotkey, vec!["Ctrl".to_string(), "Space".to_string()]);
+    }
+
+    #[test]
+    fn merge_applies_transform_block_and_skips_invalid_values() {
+        // canario-fgm.2: the renderer writes the provider block through
+        // the same generic merge path as every other AppConfig key.
+        let mut cfg = canario_core::AppConfig::default();
+        assert!(!cfg.transform.enabled); // default OFF (D5a)
+        merge_config(
+            &mut cfg,
+            &serde_json::json!({
+                "transform": {
+                    "enabled": true,
+                    "provider": { "base_url": "http://localhost:11434/v1", "model": "llama3" },
+                    "timeout_ms": 1500,
+                    "rules": []
+                }
+            }),
+        );
+        assert!(cfg.transform.enabled);
+        assert_eq!(cfg.transform.provider.base_url, "http://localhost:11434/v1");
+        assert_eq!(cfg.transform.provider.model, "llama3");
+        assert_eq!(cfg.transform.timeout_ms, 1500);
+
+        // A wrong-typed subfield skips the whole key, keeping the
+        // previous block (same policy as every other key).
+        merge_config(
+            &mut cfg,
+            &serde_json::json!({ "transform": { "timeout_ms": "forever" } }),
+        );
+        assert_eq!(cfg.transform.timeout_ms, 1500);
+        assert!(cfg.transform.enabled);
     }
 }

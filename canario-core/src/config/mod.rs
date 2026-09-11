@@ -119,6 +119,12 @@ pub struct AppConfig {
     /// in this one config. Defaults to false — fresh installs (and old
     /// config files written before the field existed) run the wizard.
     pub onboarding_completed: bool,
+
+    /// LLM transformation provider settings (canario-fgm epic; wire
+    /// shape and privacy contract from canario-fgm.1 D1/D5). Absent or
+    /// disabled (the default) keeps dictation fully on-device —
+    /// byte-identical to the pre-transform behavior.
+    pub transform: TransformSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -200,6 +206,93 @@ impl Default for AnimationSettings {
     }
 }
 
+/// Default per-request timeout for LLM transform calls (fgm.1 D5d:
+/// 4000 ms — dictation must never wait long before falling back to the
+/// raw transcript).
+pub const DEFAULT_TRANSFORM_TIMEOUT_MS: u64 = 4000;
+
+/// Clamp window for a hand-edited `transform.timeout_ms`: absurdly
+/// small values can't be distinguished from an instant failure, and a
+/// huge value would delay the (fgm.3/4) fallback to raw text for the
+/// full duration.
+const MIN_TRANSFORM_TIMEOUT_MS: u64 = 250;
+const MAX_TRANSFORM_TIMEOUT_MS: u64 = 60_000;
+
+/// LLM transformation settings (canario-fgm.2; decisions from
+/// canario-fgm.1 are binding).
+///
+/// Default OFF (D5a): an absent or disabled block means the pipeline
+/// is fully on-device and behaves byte-identically to today. The API
+/// key is deliberately NOT part of this block — it is persisted by the
+/// Electron main process via safeStorage and reaches the sidecar
+/// memory-only through `set_transform_credential` (D2), so
+/// config.json can never contain it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TransformSettings {
+    /// Master switch. Default false — nothing is sent anywhere until
+    /// the user configures a provider.
+    pub enabled: bool,
+
+    /// OpenAI-compatible endpoint metadata.
+    pub provider: TransformProvider,
+
+    /// Per-request timeout in milliseconds. On timeout (or any
+    /// transform error) the pipeline falls back to the raw transcript
+    /// (D5d — enforced where the pipeline lands, canario-fgm.3/4).
+    pub timeout_ms: u64,
+
+    /// Placeholder array for per-app transformation rules. The
+    /// semantics are owned by canario-fgm.3, so entries are kept as
+    /// raw JSON that round-trips untouched instead of guessing the
+    /// rule shape here.
+    pub rules: Vec<serde_json::Value>,
+}
+
+impl Default for TransformSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: TransformProvider::default(),
+            timeout_ms: DEFAULT_TRANSFORM_TIMEOUT_MS,
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl TransformSettings {
+    /// Request timeout with hand-edited configs clamped into a sane
+    /// window: `0` falls back to the default (an "instant" timeout
+    /// would fail every request before falling back), small values
+    /// clamp up to 250 ms and large values down to 60 s so dictation
+    /// is never wedged waiting on a provider (D5d).
+    pub fn effective_timeout(&self) -> std::time::Duration {
+        let ms = if self.timeout_ms == 0 {
+            DEFAULT_TRANSFORM_TIMEOUT_MS
+        } else {
+            self.timeout_ms
+                .clamp(MIN_TRANSFORM_TIMEOUT_MS, MAX_TRANSFORM_TIMEOUT_MS)
+        };
+        std::time::Duration::from_millis(ms)
+    }
+}
+
+/// Provider endpoint metadata for LLM transformations. OpenAI
+/// chat-completions wire against any compatible `base_url` — cloud
+/// (e.g. `https://api.openai.com/v1`) or local loopback servers
+/// (Ollama `http://localhost:11434/v1`, llama.cpp server
+/// `http://localhost:8080/v1`), which are first-class (D5c).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct TransformProvider {
+    /// Base URL including any version path. `Authorization` is only
+    /// sent when the sidecar holds an in-memory credential (D2).
+    pub base_url: String,
+
+    /// Model name sent in the chat-completions payload.
+    pub model: String,
+}
+
 /// Resolved filesystem paths to the four sherpa-onnx model files.
 ///
 /// Used as the recognizer cache key: a config change that resolves to
@@ -251,6 +344,7 @@ impl Default for AppConfig {
             overlay_offsets: BTreeMap::new(),
             animations: AnimationSettings::default(),
             onboarding_completed: false,
+            transform: TransformSettings::default(),
         }
     }
 }
@@ -506,6 +600,12 @@ mod tests {
         assert_eq!(config.animations, AnimationSettings::default());
         // Onboarding defaults to not completed → old configs re-run the wizard
         assert!(!config.onboarding_completed);
+        // Transform defaults to OFF with the D5 timeout → old configs
+        // stay fully on-device (D5a).
+        assert_eq!(config.transform, TransformSettings::default());
+        assert!(!config.transform.enabled);
+        assert_eq!(config.transform.timeout_ms, DEFAULT_TRANSFORM_TIMEOUT_MS);
+        assert!(config.transform.rules.is_empty());
     }
 
     #[test]
@@ -545,6 +645,7 @@ mod tests {
         assert_eq!(loaded.overlay_offsets, config.overlay_offsets);
         assert_eq!(loaded.animations, config.animations);
         assert_eq!(loaded.onboarding_completed, config.onboarding_completed);
+        assert_eq!(loaded.transform, config.transform);
     }
 
     #[test]
@@ -863,11 +964,168 @@ mod tests {
     }
 
     #[test]
+    fn parses_transform_block() {
+        // Explicit block parses with the D1 wire shape (enabled,
+        // provider{base_url,model}, timeout_ms, rules).
+        let json = r#"{
+            "transform": {
+                "enabled": true,
+                "provider": {
+                    "base_url": "http://localhost:11434/v1",
+                    "model": "llama3"
+                },
+                "timeout_ms": 1500,
+                "rules": [ { "app": "firefox", "instruction": "be terse" } ]
+            }
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.transform.enabled);
+        assert_eq!(
+            config.transform.provider.base_url,
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(config.transform.provider.model, "llama3");
+        assert_eq!(config.transform.timeout_ms, 1500);
+        // Placeholder rules round-trip untouched (fgm.3 owns semantics).
+        assert_eq!(
+            config.transform.rules,
+            vec![serde_json::json!({ "app": "firefox", "instruction": "be terse" })]
+        );
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+    }
+
+    #[test]
+    fn transform_partial_block_uses_defaults() {
+        // serde(default) on the block: subfields missing from the wire
+        // (e.g. written by a NEWER version) keep their defaults.
+        let config: AppConfig = serde_json::from_str(r#"{"transform":{"enabled":true}}"#).unwrap();
+        assert!(config.transform.enabled);
+        assert_eq!(config.transform.provider.base_url, "");
+        assert_eq!(config.transform.provider.model, "");
+        assert_eq!(config.transform.timeout_ms, DEFAULT_TRANSFORM_TIMEOUT_MS);
+        assert!(config.transform.rules.is_empty());
+    }
+
+    #[test]
+    fn transform_round_trip() {
+        let config = AppConfig {
+            transform: TransformSettings {
+                enabled: true,
+                provider: TransformProvider {
+                    base_url: "https://api.openai.com/v1".into(),
+                    model: "gpt-4o-mini".into(),
+                },
+                timeout_ms: 2500,
+                rules: vec![serde_json::json!({ "placeholder": true })],
+            },
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""transform":{"enabled":true,"provider":{"base_url":"https://api.openai.com/v1","model":"gpt-4o-mini"},"timeout_ms":2500,"rules":[{"placeholder":true}]}"#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.transform, config.transform);
+    }
+
+    #[test]
+    fn transform_default_serializes_disabled_block() {
+        // The default config serializes the block explicitly (pattern
+        // of animations/overlay_offsets) — enabled=false is the wire
+        // proof of the D5a default-off posture.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(r#""transform":{"enabled":false,"provider":{"base_url":"","model":""},"timeout_ms":4000,"rules":[]}"#));
+    }
+
+    #[test]
+    fn transform_apply_as_a_whole_key() {
+        // update_config merges top-level keys wholesale: the renderer
+        // must always send the FULL block (see the renderer's
+        // transformConfigPayload) — a partial replacement resets
+        // unmentioned subfields to defaults, exactly like animations.
+        let current_json = serde_json::to_value(AppConfig {
+            transform: TransformSettings {
+                enabled: true,
+                provider: TransformProvider {
+                    base_url: "http://localhost:8080/v1".into(),
+                    model: "qwen".into(),
+                },
+                timeout_ms: 4000,
+                rules: vec![serde_json::json!({ "app": "vim" })],
+            },
+            ..AppConfig::default()
+        })
+        .unwrap();
+        let mut merged = current_json.clone();
+        merged["transform"] = serde_json::json!({
+            "enabled": false,
+            "provider": { "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini" },
+            "timeout_ms": 4000,
+            "rules": [{ "app": "vim" }]
+        });
+        let merged: AppConfig = serde_json::from_value(merged).unwrap();
+        assert!(!merged.transform.enabled);
+        assert_eq!(merged.transform.provider.model, "gpt-4o-mini");
+        // The rules entry survived because the FULL block travelled.
+        assert_eq!(merged.transform.rules.len(), 1);
+
+        // A PARTIAL block resets unmentioned subfields — which is why
+        // the renderer always sends every key.
+        let mut partial = current_json;
+        partial["transform"] = serde_json::json!({ "enabled": false });
+        let partial: AppConfig = serde_json::from_value(partial).unwrap();
+        assert_eq!(partial.transform.provider.model, "");
+        assert!(partial.transform.rules.is_empty());
+    }
+
+    #[test]
+    fn transform_timeout_clamped_into_sane_window() {
+        // 0 → the 4 s default (an instant timeout would fail every
+        // request before the D5d fallback could matter).
+        assert_eq!(
+            TransformSettings {
+                timeout_ms: 0,
+                ..TransformSettings::default()
+            }
+            .effective_timeout(),
+            std::time::Duration::from_millis(DEFAULT_TRANSFORM_TIMEOUT_MS)
+        );
+        // Explicit in-window values pass through unchanged.
+        for ms in [250u64, 1500, 4000, 60_000] {
+            assert_eq!(
+                TransformSettings {
+                    timeout_ms: ms,
+                    ..TransformSettings::default()
+                }
+                .effective_timeout(),
+                std::time::Duration::from_millis(ms)
+            );
+        }
+        // Out-of-window hand edits clamp to [250 ms, 60 s].
+        assert_eq!(
+            TransformSettings {
+                timeout_ms: 1,
+                ..TransformSettings::default()
+            }
+            .effective_timeout(),
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            TransformSettings {
+                timeout_ms: u64::MAX,
+                ..TransformSettings::default()
+            }
+            .effective_timeout(),
+            std::time::Duration::from_millis(60_000)
+        );
+    }
+
+    #[test]
     fn empty_json_uses_all_defaults() {
         let config: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.config_version, CONFIG_VERSION);
         assert_eq!(config.model, ModelVariant::ParakeetV3);
         assert_eq!(config.hotkey, vec!["Super", "Alt", "Space"]);
+        assert_eq!(config.transform, TransformSettings::default());
     }
 
     #[test]
