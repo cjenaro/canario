@@ -45,6 +45,9 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       resizable: true,
       show: true,
       titleBarStyle: "hidden",
+      // Electron 43 defaults frameless windows to rounded corners on Linux;
+      // keep the pre-43 square rendering of our custom title bar/UI.
+      roundedCorners: false,
       title: "Canario",
       backgroundColor: "#1a1a2e",
       webPreferences: {
@@ -96,6 +99,9 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       height: height,
       frame: false,
       transparent: true,
+      // Electron 43 defaults frameless windows to rounded corners on Linux —
+      // the overlay must stay an exact full-screen rectangle.
+      roundedCorners: false,
       alwaysOnTop: true,
       focusable: false,
       skipTaskbar: true,

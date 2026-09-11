@@ -54,7 +54,9 @@ function setMacWindowsAutostart(enabled: boolean): boolean {
   try {
     app.setLoginItemSettings({
       openAtLogin: enabled,
-      openAsHidden: true, // start in tray
+      // Electron 44 removed `openAsHidden` (only worked on macOS 12+, which
+      // is no longer supported). Canario hides from the Dock once ready, so
+      // the login-item launch still lands in the tray.
     });
     return true;
   } catch (err) {

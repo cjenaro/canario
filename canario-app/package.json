@@ -27,7 +27,7 @@
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^25.6.0",
     "concurrently": "^9.2.1",
-    "electron": "^41.2.1",
+    "electron": "^44.3.0",
     "electron-builder": "^26.0.12",
     "electron-vite": "6.0.0-beta.1",
     "solid-js": "^1.9.12",

@@ -98,8 +98,8 @@ mac:
   identity: null
   # Hardened runtime is needed even without signing for some permissions
   hardenedRuntime: false
-  # Minimum macOS version
-  minimumSystemVersion: "10.15.0"
+  # Minimum macOS version — Electron 44 requires macOS 13+
+  minimumSystemVersion: "13.0.0"
 
 dmg:
   title: "${productName} ${version}"

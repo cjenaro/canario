@@ -34,7 +34,9 @@ export async function autoPasteText(text: string): Promise<boolean> {
 
   // Always copy to clipboard first: a manual Ctrl+V fallback if typing
   // fails, and users generally expect the last dictation on the clipboard.
-  clipboard.writeText(text);
+  // Electron 44 (RFC 0019) made clipboard.writeText asynchronous — await it
+  // so the later keystroke/fallback can never race the clipboard write.
+  await clipboard.writeText(text);
 
   if (process.platform === "linux") {
     return linuxPaste(text);
