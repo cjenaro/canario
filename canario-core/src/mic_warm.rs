@@ -51,9 +51,22 @@
 //! A permanently-open stream would keep the desktop's mic-indicator
 //! lit whenever the app idles. Instead the stream is *parked* for
 //! [`PARK_WINDOW`] (60 s) after the last recording and then fully
-//! released by a reaper thread (`mic_idle_released` mark). Rapid
-//! dictations stay warm; the indicator is dark at startup and at most
-//! 60 s after the last dictation.
+//! released by the mic-owner thread's idle watch (`mic_idle_released`
+//! mark). Rapid dictations stay warm; the indicator is dark at
+//! startup and at most 60 s after the last dictation.
+//!
+//! # The mic-owner thread (canario-2z0)
+//!
+//! Exactly one thread — the owner, spawned lazily on first use —
+//! creates, parks, reopens, and drops the [`cpal::Stream`]. Everyone
+//! else talks to it over a command channel. This is a portability
+//! requirement, not a style choice: on macOS cpal's coreaudio
+//! `Stream` is `!Send` (it embeds a `Box<dyn FnMut()>`
+//! property-listener wrapper), so the Stream cannot live in shared
+//! state, a `static`, or cross a `thread::spawn`. Keeping it as the
+//! owner's plain local makes the module compile on every platform
+//! and structurally guarantees streams are never dropped under the
+//! state lock (cpal joins its audio thread on drop).
 //!
 //! # Failure handling (correctness over warmth)
 //!
@@ -76,8 +89,8 @@
 //! # Timing marks
 //!
 //! `mic_warm_reused` (press reused the parked stream),
-//! `mic_idle_released` (reaper released the mic after the idle
-//! window); the cold path keeps `mic_device_opened`,
+//! `mic_idle_released` (the owner's idle watch released the mic after
+//! the window); the cold path keeps `mic_device_opened`,
 //! `mic_stream_started` and `first_audio` with their original
 //! meanings.
 
@@ -87,12 +100,13 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 
 use crate::timing;
 
 /// How long the stream stays parked after the last recording before
-/// the reaper releases it (mic indicator off, device closed).
+/// the owner thread's idle watch releases it (mic indicator off,
+/// device closed).
 ///
 /// 60 s comfortably covers rapid back-to-back dictations while
 /// bounding idle indicator exposure. Tradeoff is documented in the
@@ -236,7 +250,8 @@ enum Phase {
     Released,
     /// A recording owns the stream right now.
     Recording,
-    /// Stream alive but idle; the reaper releases it at `deadline`.
+    /// Stream alive but idle; the owner thread's idle watch releases
+    /// it at `deadline`.
     Parked { deadline: Instant },
 }
 
@@ -358,14 +373,20 @@ fn default_input_identity() -> Option<DeviceIdentity> {
     Some(DeviceIdentity::of(&device, &supported))
 }
 
-/// Everything guarded by the state mutex. The data/error callbacks,
-/// the recording thread and the reaper all take this lock briefly —
-/// but a [`cpal::Stream`] is never *dropped* while it is held, because
-/// dropping joins the audio thread, which may itself be waiting on
-/// this lock inside its callback.
+/// Everything guarded by the state mutex. The data/error callbacks
+/// and the recording thread take this lock briefly.
+///
+/// Deliberately Stream-free (canario-2z0): cpal's coreaudio `Stream`
+/// is `!Send` (it embeds a `Box<dyn FnMut()>` property-listener
+/// wrapper), so a `Stream` cannot live in this shared state — it is
+/// held only as a local by the dedicated mic-owner thread
+/// ([`owner_loop`]), which is also the only code that drops it. On
+/// Linux/Windows the `Stream` is `Send`, but the owner keeps one code
+/// shape across platforms. A pleasant side effect: streams are never
+/// dropped while this lock is held, because no lock is held on the
+/// owner thread across a drop at all.
 struct WarmState {
     ring: RingBuffer,
-    stream: Option<cpal::Stream>,
     stream_identity: Option<DeviceIdentity>,
     /// Which device selection the live stream was opened for — the
     /// press-time reuse check (a stream parked for another selection
@@ -380,7 +401,6 @@ struct WarmState {
     /// `first_audio`; `DISARMED` while parked/stopped.
     first_audio_at: u64,
     first_audio_marked: bool,
-    reaper_alive: bool,
 }
 
 impl WarmState {
@@ -390,23 +410,22 @@ impl WarmState {
                 data: Vec::new(),
                 written: 0,
             },
-            stream: None,
             stream_identity: None,
             stream_selection: None,
             phase: Phase::Released,
             error_count: 0,
             first_audio_at: DISARMED,
             first_audio_marked: false,
-            reaper_alive: false,
         }
     }
 }
 
-/// State plus the condvar the reaper waits on, shared with the
-/// recording session.
+/// State plus config, shared with the recording session and the
+/// mic-owner thread. The park deadline lives in
+/// [`Phase::Parked`] inside the state, so the owner's idle wait and
+/// every observer read one source of truth.
 struct SharedMic {
     state: Arc<Mutex<WarmState>>,
-    cond: Condvar,
     window: Duration,
     ring_secs: f64,
 }
@@ -418,8 +437,8 @@ impl SharedMic {
     }
 }
 
-/// The warm-mic machinery. One instance lives in the process global
-/// ([`global`]); tests construct their own.
+/// The warm-mic machinery. One instance lives on the mic-owner thread
+/// ([`owner_loop`]); tests drive its owner-side methods directly.
 struct WarmMic {
     shared: Arc<SharedMic>,
 }
@@ -429,7 +448,6 @@ impl WarmMic {
         Self {
             shared: Arc::new(SharedMic {
                 state: Arc::new(Mutex::new(WarmState::new())),
-                cond: Condvar::new(),
                 window,
                 ring_secs,
             }),
@@ -437,23 +455,156 @@ impl WarmMic {
     }
 }
 
-/// Process-global warm mic.
-fn global() -> &'static WarmMic {
-    static MIC: LazyLock<WarmMic> = LazyLock::new(|| WarmMic::new(PARK_WINDOW, RING_SECS));
-    &MIC
+// ── Mic-owner thread (canario-2z0) ─────────────────────────────────────
+//
+// The `cpal::Stream` lives on exactly one thread for the whole
+// process: a dedicated owner, created lazily on first use. Callers
+// (the recording thread) talk to it over a command channel and get a
+// reply channel back per call — the only cross-thread value is the
+// `Sender`, which is `Send` on every platform. This is what makes the
+// module compile on macOS, where cpal's coreaudio `Stream` is `!Send`
+// (it embeds a `Box<dyn FnMut()>` property-listener wrapper): the
+// Stream never crosses a thread boundary, never enters shared state,
+// and never meets a `static`'s `Sync` bound. The owner's
+// `recv_timeout` doubles as the park reaper — the idle wait IS the
+// watch — which also retires the old condvar/reaper pair.
+
+/// A reply channel for a blocking owner round-trip. `sync_channel(1)`
+/// so a dropped caller never blocks the owner.
+type Reply<T> = std::sync::mpsc::SyncSender<anyhow::Result<T>>;
+
+enum OwnerCmd {
+    /// Acquire the mic for a recording (reuse the parked stream when
+    /// healthy and wanted, else open fresh). Replies the press offset
+    /// and sample rate.
+    Begin { reply: Reply<BeginInfo> },
+    /// Mid-recording recovery: drop the failed stream and open a fresh
+    /// one continuing into the same ring.
+    Reopen { reply: Reply<()> },
+    /// End of recording: park for the idle window or release now.
+    Finish { reply: Reply<()> },
+}
+
+/// What a successful `Begin` hands back to the recording thread.
+struct BeginInfo {
+    sample_rate: u32,
+    start_offset: u64,
+}
+
+/// Handle to the process's mic-owner thread. `Send + Sync` on every
+/// platform (a plain channel sender plus a plain state handle), so
+/// the static is fine.
+struct MicOwnerHandle {
+    tx: std::sync::mpsc::Sender<OwnerCmd>,
+    shared: Arc<SharedMic>,
+}
+
+impl MicOwnerHandle {
+    /// Blocking begin round-trip. The cold path's device-open cost is
+    /// paid here either way (the owner opens it); the warm path costs
+    /// one channel hop (tens of µs).
+    fn begin(&self) -> anyhow::Result<MicSession> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send(OwnerCmd::Begin { reply: tx })
+            .map_err(|_| anyhow::anyhow!("mic owner thread is gone"))?;
+        let BeginInfo {
+            sample_rate,
+            start_offset,
+        } = rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("mic owner thread is gone"))??;
+        Ok(MicSession {
+            shared: Arc::clone(&self.shared),
+            sample_rate,
+            start_offset,
+            errors_at_begin: 0,
+            finished: false,
+            owner: Some(self.tx.clone()),
+        })
+    }
+}
+
+/// The owner thread's loop. Holds the one and only `cpal::Stream` as a
+/// plain local, parks or releases it per command, and treats a
+/// lapsed park deadline (its `recv_timeout`) as the release trigger.
+fn owner_loop(rx: std::sync::mpsc::Receiver<OwnerCmd>, mic: WarmMic) {
+    let mut stream: Option<cpal::Stream> = None;
+    loop {
+        // Parked → wake at the deadline; anything else (recording,
+        // released) → wait long enough that the thread is idle noise.
+        let timeout = match mic.shared.state.lock().phase {
+            Phase::Parked { deadline } => deadline.saturating_duration_since(Instant::now()),
+            _ => Duration::from_secs(3600),
+        };
+        if timeout.is_zero() {
+            // Deadline already lapsed between commands.
+            stream = None;
+            mic.release_for_idle();
+            continue;
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(OwnerCmd::Begin { reply }) => {
+                let res = mic.begin_owned(&mut stream);
+                let _ = reply.send(res);
+            }
+            Ok(OwnerCmd::Reopen { reply }) => {
+                let res = mic.reopen_owned(&mut stream);
+                let _ = reply.send(res);
+            }
+            Ok(OwnerCmd::Finish { reply }) => {
+                mic.finish_owned(&mut stream);
+                let _ = reply.send(Ok(()));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // The park window elapsed with no new command: fully
+                // release the stream (mic indicator off, device closed).
+                stream = None;
+                mic.release_for_idle();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Every handle dropped (process teardown): release and
+                // stop. Dropping the stream joins cpal's audio thread.
+                drop(stream);
+                return;
+            }
+        }
+    }
+}
+
+/// Process-global mic owner. First use spawns the thread; it lives
+/// until every handle (including the static) goes away, which in
+/// practice means process exit.
+fn owner() -> &'static MicOwnerHandle {
+    static OWNER: LazyLock<MicOwnerHandle> = LazyLock::new(|| {
+        let mic = WarmMic::new(PARK_WINDOW, RING_SECS);
+        let shared = Arc::clone(&mic.shared);
+        let (tx, rx) = std::sync::mpsc::channel::<OwnerCmd>();
+        std::thread::Builder::new()
+            .name("mic-warm-owner".to_string())
+            .spawn(move || owner_loop(rx, mic))
+            .expect("failed to spawn the mic-owner thread");
+        MicOwnerHandle { tx, shared }
+    });
+    &OWNER
 }
 
 /// Acquire the mic for a recording: reuse the parked stream when
-/// healthy (marks `mic_warm_reused`), else open a fresh one inline
-/// (marks `mic_device_opened` + `mic_stream_started`, the pre-vew
-/// path). Arms `first_audio` at the current write position either
-/// way.
+/// healthy (marks `mic_warm_reused`), else open a fresh one on the
+/// owner thread (marks `mic_device_opened` + `mic_stream_started`,
+/// the pre-vew path). Arms `first_audio` at the current write
+/// position either way.
 pub(crate) fn begin_recording() -> anyhow::Result<MicSession> {
-    global().begin_recording()
+    owner().begin()
 }
 
 impl WarmMic {
-    fn begin_recording(&self) -> anyhow::Result<MicSession> {
+    /// Owner-side begin (canario-2z0): `stream` is the owner thread's
+    /// local slot. Reuse the parked stream when healthy and opened for
+    /// the selection now wanted, else release it and cold-open the
+    /// wanted device — every decision identical to the pre-2z0 logic,
+    /// only the stream's home changed.
+    fn begin_owned(&self, stream: &mut Option<cpal::Stream>) -> anyhow::Result<BeginInfo> {
         // Fast path — a healthy parked stream opened for the device now
         // wanted: arm and go (µs). The arm runs under the state lock so a
         // concurrent data block cannot slip between the threshold store
@@ -462,7 +613,7 @@ impl WarmMic {
         let reused = {
             let mut st = self.shared.state.lock();
             if begin_verdict(
-                st.stream.is_some(),
+                stream.is_some(),
                 st.error_count > 0,
                 st.stream_selection.as_ref(),
                 &wanted,
@@ -472,7 +623,6 @@ impl WarmMic {
                 st.first_audio_marked = false;
                 st.first_audio_at = offset;
                 st.phase = Phase::Recording;
-                self.shared.cond.notify_all(); // reaper: re-read phase
                 st.stream_identity
                     .as_ref()
                     .map(|id| (offset, id.sample_rate))
@@ -486,45 +636,34 @@ impl WarmMic {
                 "Recording via parked mic stream at {}Hz (warm)",
                 sample_rate
             );
-            return Ok(MicSession {
-                shared: Arc::clone(&self.shared),
+            return Ok(BeginInfo {
                 sample_rate,
                 start_offset: offset,
-                errors_at_begin: 0,
-                finished: false,
             });
         }
 
         // A parked stream we must not reuse (errored, or opened for a
         // different device than the one now wanted — e.g. the
-        // preference changed while parked) is released here. Drop it
-        // OUTSIDE the lock first (cpal joins its audio thread on drop).
-        let (failed, wrong_device) = {
-            let mut st = self.shared.state.lock();
-            let wrong_device = st.stream.is_some()
-                && st.error_count == 0
-                && st.stream_selection.as_ref() != Some(&wanted);
-            st.stream_identity = None;
-            st.stream_selection = None;
-            if st.stream.is_some() {
-                st.phase = Phase::Released;
-            }
-            (st.stream.take(), wrong_device)
+        // preference changed while parked) is released here. The owner
+        // holds no state lock across the drop (cpal joins its audio
+        // thread on drop), so the discipline is structural now.
+        let wrong_device = {
+            let st = self.shared.state.lock();
+            stream.is_some() && st.error_count == 0 && st.stream_selection.as_ref() != Some(&wanted)
         };
         if wrong_device {
             tracing::info!(
                 "Parked mic stream was opened for a different device — \
                  releasing it and opening the wanted one"
             );
-        } else if failed.is_some() {
+        } else if stream.is_some() {
             tracing::info!("Parked mic stream was unhealthy — reopening input device");
         }
-        drop(failed);
+        *stream = None;
 
-        // Cold open, paid inline. Holding the state lock across the
-        // open is fine: no stream exists, so no data callback can
-        // contend (the only other waiter is the reaper condvar, which
-        // releases the lock while waiting).
+        // Cold open, paid by the recording thread's blocking round-trip
+        // to this owner thread. Holding the state lock across the open
+        // is fine: no stream exists, so no data callback can contend.
         let mut st = self.shared.state.lock();
         let host = cpal::default_host();
         let plan = resolve_device_plan(&wanted, &enumerate_input_devices(&host));
@@ -536,7 +675,7 @@ impl WarmMic {
         tracing::info!("Recording from '{}' at {}Hz", identity.name, sample_rate);
         timing::mark("mic_device_opened");
 
-        let stream = build_ring_stream(&device, &supported, self.shared.state_arc())?;
+        let new_stream = build_ring_stream(&device, &supported, self.shared.state_arc())?;
         st.ring
             .ensure_capacity_for(sample_rate, self.shared.ring_secs);
         // Arm before play: the first post-play block must be the one
@@ -548,23 +687,93 @@ impl WarmMic {
         st.stream_identity = Some(identity);
         st.stream_selection = Some(selection_of_plan(&plan));
         st.phase = Phase::Recording;
-        st.stream = Some(stream);
-        let played = st.stream.as_ref().expect("stored above").play();
-        drop(st);
+        let played = new_stream.play();
+        drop(st); // never hold the state lock across a stream drop
         if let Err(e) = played {
-            let failed = self.shared.state.lock().stream.take();
-            drop(failed);
+            drop(new_stream);
             return Err(e.into());
         }
+        *stream = Some(new_stream);
         timing::mark("mic_stream_started");
 
-        Ok(MicSession {
-            shared: Arc::clone(&self.shared),
+        Ok(BeginInfo {
             sample_rate,
             start_offset: offset,
-            errors_at_begin: 0,
-            finished: false,
         })
+    }
+
+    /// Owner-side mid-recording recovery: drop the failed stream and
+    /// open a fresh one continuing into the same ring. The owner holds
+    /// no state lock across the drop (cpal joins the audio thread).
+    fn reopen_owned(&self, stream: &mut Option<cpal::Stream>) -> anyhow::Result<()> {
+        *stream = None;
+
+        let mut st = self.shared.state.lock();
+        let host = cpal::default_host();
+        let wanted = current_selection();
+        let plan = resolve_device_plan(&wanted, &enumerate_input_devices(&host));
+        let device = open_input_device(&host, &plan)
+            .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
+        let supported = device.default_input_config()?;
+        let identity = DeviceIdentity::of(&device, &supported);
+        let new_stream = build_ring_stream(&device, &supported, self.shared.state_arc())?;
+        st.ring
+            .ensure_capacity_for(identity.sample_rate, self.shared.ring_secs);
+        st.stream_identity = Some(identity);
+        st.stream_selection = Some(selection_of_plan(&plan));
+        st.error_count = 0;
+        let played = new_stream.play();
+        drop(st); // never hold the state lock across a stream drop
+        if let Err(e) = played {
+            drop(new_stream);
+            return Err(e.into());
+        }
+        *stream = Some(new_stream);
+        Ok(())
+    }
+
+    /// Owner-side end of recording: disarm `first_audio`, then either
+    /// park for the idle window (the owner's idle wait — its
+    /// `recv_timeout` on the deadline in [`Phase::Parked`] — releases
+    /// after the window) or release now when the wanted device no
+    /// longer matches the captured one.
+    fn finish_owned(&self, stream: &mut Option<cpal::Stream>) {
+        let keep = {
+            let mut st = self.shared.state.lock();
+            st.first_audio_at = DISARMED;
+            let keep = stream.is_some()
+                && park_decision(
+                    st.stream_identity.as_ref(),
+                    &current_selection(),
+                    default_input_identity().as_ref(),
+                );
+            if keep {
+                st.phase = Phase::Parked {
+                    deadline: Instant::now() + self.shared.window,
+                };
+            } else {
+                st.stream_identity = None;
+                st.stream_selection = None;
+                st.phase = Phase::Released;
+            }
+            keep
+        };
+        if !keep {
+            *stream = None; // dropped here, no lock held: cpal joins the audio thread
+        }
+    }
+
+    /// The idle watch fired: fully release the parked stream (mic
+    /// indicator off, device closed). Called only from the owner loop.
+    fn release_for_idle(&self) {
+        {
+            let mut st = self.shared.state.lock();
+            st.stream_identity = None;
+            st.stream_selection = None;
+            st.phase = Phase::Released;
+        }
+        timing::mark("mic_idle_released");
+        tracing::info!("Warm mic idle window elapsed — capture stream released (mic off)");
     }
 }
 
@@ -573,14 +782,19 @@ impl WarmMic {
 /// A recording's handle on the warm mic: the press offset, the drain
 /// cursor API, mid-recording error recovery, and the park-on-finish
 /// transition. `finish` is idempotent; `Drop` finishes too, so a
-/// panic between begin and finish still parks (and the reaper still
-/// releases after the window).
+/// panic between begin and finish still parks (and the owner still
+/// releases after the window). Reads (drain/written/errors) go
+/// straight to the shared state; lifecycle ops round-trip the
+/// mic-owner thread (canario-2z0). The `owner` sender is `None` only
+/// for tests driving the state directly.
 pub(crate) struct MicSession {
     shared: Arc<SharedMic>,
     sample_rate: u32,
     start_offset: u64,
     errors_at_begin: u64,
     finished: bool,
+    /// Channel to the mic-owner thread; `None` in local/test mode.
+    owner: Option<std::sync::mpsc::Sender<OwnerCmd>>,
 }
 
 impl MicSession {
@@ -616,90 +830,58 @@ impl MicSession {
         (chunk, overran)
     }
 
-    /// Mid-recording fallback: the stream failed. Drop it and open a
-    /// fresh one continuing into the same ring — absolute offsets are
-    /// preserved, so the drain cursor and any unmarked `first_audio`
-    /// threshold stay valid. Costs a short audio gap (the reopen).
+    /// Mid-recording fallback: the stream failed. The owner thread
+    /// drops it and opens a fresh one continuing into the same ring —
+    /// absolute offsets are preserved, so the drain cursor and any
+    /// unmarked `first_audio` threshold stay valid. Costs a short
+    /// audio gap (the reopen).
     pub(crate) fn reopen_after_error(&self) -> anyhow::Result<()> {
         tracing::warn!(
             "Mic stream failed mid-recording — reopening the input device \
              (short gap in captured audio)"
         );
-        let failed = self.shared.state.lock().stream.take();
-        drop(failed); // outside the lock: cpal joins the audio thread
-
-        let mut st = self.shared.state.lock();
-        let host = cpal::default_host();
-        let wanted = current_selection();
-        let plan = resolve_device_plan(&wanted, &enumerate_input_devices(&host));
-        let device = open_input_device(&host, &plan)
-            .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
-        let supported = device.default_input_config()?;
-        let identity = DeviceIdentity::of(&device, &supported);
-        let stream = build_ring_stream(&device, &supported, self.shared.state_arc())?;
-        st.ring
-            .ensure_capacity_for(identity.sample_rate, self.shared.ring_secs);
-        st.stream_identity = Some(identity);
-        st.stream_selection = Some(selection_of_plan(&plan));
-        st.error_count = 0;
-        st.stream = Some(stream);
-        let played = st.stream.as_ref().expect("stored above").play();
-        drop(st);
-        if let Err(e) = played {
-            let failed = self.shared.state.lock().stream.take();
-            drop(failed);
-            return Err(e.into());
-        }
-        Ok(())
+        let Some(owner) = &self.owner else {
+            // Local/test sessions own no stream to recover.
+            anyhow::bail!("mic owner unavailable — cannot reopen");
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        owner
+            .send(OwnerCmd::Reopen { reply: tx })
+            .map_err(|_| anyhow::anyhow!("mic owner thread is gone"))?;
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("mic owner thread is gone"))?
     }
 
     /// End of recording: disarm `first_audio`, then either park for
-    /// the idle window (arming the reaper) or release now when the
-    /// wanted device no longer matches the captured one (with a
-    /// preferred device: it must be that device; in system-default
-    /// mode: the default input device must still match).
+    /// the idle window (the owner's idle watch releases it after the
+    /// window) or release now when the wanted device no longer matches
+    /// the captured one (with a preferred device: it must be that
+    /// device; in system-default mode: the default input device must
+    /// still match).
     pub(crate) fn finish(&mut self) {
         if self.finished {
             return;
         }
         self.finished = true;
 
-        let mut released: Option<cpal::Stream> = None;
-        let keep = {
-            let mut st = self.shared.state.lock();
-            st.first_audio_at = DISARMED;
-            let keep = st.stream.is_some()
-                && park_decision(
-                    st.stream_identity.as_ref(),
-                    &current_selection(),
-                    default_input_identity().as_ref(),
-                );
-            if keep {
-                st.phase = Phase::Parked {
-                    deadline: Instant::now() + self.shared.window,
-                };
-            } else {
-                st.stream_identity = None;
-                st.stream_selection = None;
-                st.phase = Phase::Released;
-                released = st.stream.take();
+        match &self.owner {
+            Some(owner) => {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                // Fire-and-forget on a dead owner is correct: with the
+                // owner gone there is no stream left to park.
+                if owner.send(OwnerCmd::Finish { reply: tx }).is_ok() {
+                    let _ = rx.recv();
+                }
             }
-            keep
-        };
-        drop(released); // outside the lock: cpal joins the audio thread
-
-        if keep && !ensure_reaper(&self.shared) {
-            // No watchdog possible — release now rather than risk a
-            // permanently lit mic indicator.
-            tracing::warn!("Warm mic reaper unspawnable — releasing stream immediately");
-            let failed = {
+            // Local/test mode: no stream exists, so finish is just the
+            // disarm + release bookkeeping the owner would have done.
+            None => {
                 let mut st = self.shared.state.lock();
+                st.first_audio_at = DISARMED;
                 st.stream_identity = None;
                 st.stream_selection = None;
                 st.phase = Phase::Released;
-                st.stream.take()
-            };
-            drop(failed);
+            }
         }
     }
 }
@@ -842,73 +1024,6 @@ pub(crate) fn mid_recording_verdict(stream_errored: bool, stalled_ms: u64) -> Mi
         MicVerdict::Reopen
     } else {
         MicVerdict::Keep
-    }
-}
-
-// ── Reaper ────────────────────────────────────────────────────────────
-
-/// Make sure a reaper thread is watching the park deadline (or re-read
-/// the fresh deadline if it already is). Returns `false` when the
-/// thread could not be spawned.
-fn ensure_reaper(shared: &Arc<SharedMic>) -> bool {
-    let mut st = shared.state.lock();
-    if st.reaper_alive {
-        shared.cond.notify_all();
-        return true;
-    }
-    st.reaper_alive = true;
-    drop(st);
-
-    let spawned = std::thread::Builder::new()
-        .name("mic-warm-reaper".to_string())
-        .spawn({
-            let shared = Arc::clone(shared);
-            move || reaper_loop(shared)
-        });
-    match spawned {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!("Could not spawn mic-warm reaper: {}", e);
-            shared.state.lock().reaper_alive = false;
-            false
-        }
-    }
-}
-
-/// Watch the parked stream and fully release it when the idle window
-/// lapses. Exits when there is nothing left to watch.
-fn reaper_loop(shared: Arc<SharedMic>) {
-    let mut st = shared.state.lock();
-    loop {
-        match st.phase {
-            Phase::Released => {
-                st.reaper_alive = false;
-                return;
-            }
-            Phase::Recording => {
-                // A recording owns the stream; wait for the next
-                // transition (finish notifies).
-                shared.cond.wait(&mut st);
-            }
-            Phase::Parked { deadline } => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    let stream = st.stream.take();
-                    st.stream_identity = None;
-                    st.stream_selection = None;
-                    st.phase = Phase::Released;
-                    st.reaper_alive = false;
-                    drop(st); // release the lock before joining the audio thread
-                    drop(stream);
-                    timing::mark("mic_idle_released");
-                    tracing::info!(
-                        "Warm mic idle window elapsed — capture stream released (mic off)"
-                    );
-                    return;
-                }
-                shared.cond.wait_for(&mut st, remaining);
-            }
-        }
     }
 }
 
@@ -1458,7 +1573,7 @@ mod tests {
         );
     }
 
-    // ── session / reaper lifecycle ────────────────────────────────────
+    // ── session / owner-loop lifecycle (canario-2z0) ──────────────────
 
     fn test_session(mic: &WarmMic) -> MicSession {
         MicSession {
@@ -1467,7 +1582,19 @@ mod tests {
             start_offset: 0,
             errors_at_begin: 0,
             finished: false,
+            owner: None,
         }
+    }
+
+    /// Run a real owner loop against `mic`, keeping the command sender
+    /// alive; returns it so the caller can stop the thread by dropping.
+    fn spawn_owner_loop(mic: &WarmMic) -> std::sync::mpsc::Sender<OwnerCmd> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mic = WarmMic {
+            shared: Arc::clone(&mic.shared),
+        };
+        std::thread::spawn(move || owner_loop(rx, mic));
+        tx
     }
 
     fn force_parked(mic: &WarmMic, window: Duration) {
@@ -1476,57 +1603,50 @@ mod tests {
         };
     }
 
-    /// The reaper fully releases a parked stream once the idle window
-    /// lapses — this is the "no leaked mic indicator" guarantee.
+    /// The owner loop fully releases a parked stream once the idle
+    /// window lapses — this is the "no leaked mic indicator" guarantee.
+    /// (The idle wait IS the watch: `recv_timeout` on the deadline in
+    /// `Phase::Parked` replaces the old reaper thread.)
     #[test]
-    fn reaper_releases_after_the_idle_window() {
+    fn owner_loop_releases_after_the_idle_window() {
         let mic = WarmMic::new(Duration::from_millis(50), 1.0);
         force_parked(&mic, Duration::from_millis(50));
-
-        assert!(ensure_reaper(&mic.shared));
+        let _keep_alive = spawn_owner_loop(&mic);
 
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let released = {
-                let st = mic.shared.state.lock();
-                matches!(st.phase, Phase::Released) && !st.reaper_alive
-            };
-            if released {
+            if matches!(mic.shared.state.lock().phase, Phase::Released) {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "reaper did not release within 2 s"
+                "owner loop did not release within 2 s"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 
-    /// A recording that begins inside the window must cancel the
-    /// pending release: begin notifies the reaper, which then waits
-    /// instead of dropping the stream mid-recording.
+    /// While a recording owns the stream the owner loop must NOT
+    /// release it: `Phase::Recording` means the idle wait has no
+    /// deadline to watch, so a parked-window that elapsed "during" the
+    /// recording can't fire into it.
     #[test]
-    fn reaper_holds_while_a_recording_owns_the_stream() {
+    fn owner_loop_holds_while_a_recording_owns_the_stream() {
         let mic = WarmMic::new(Duration::from_millis(40), 1.0);
-        force_parked(&mic, Duration::from_millis(40));
-        assert!(ensure_reaper(&mic.shared));
-
-        // Simulate begin_recording's phase transition + notify.
-        {
-            let mut st = mic.shared.state.lock();
-            st.phase = Phase::Recording;
-            mic.shared.cond.notify_all();
-        }
+        let _keep_alive = spawn_owner_loop(&mic);
+        mic.shared.state.lock().phase = Phase::Recording;
 
         std::thread::sleep(Duration::from_millis(300));
         assert!(
             matches!(mic.shared.state.lock().phase, Phase::Recording),
-            "reaper must not release while a recording is active"
+            "owner loop must not release while a recording is active"
         );
     }
 
-    /// finish() with no stream must leave Released (no park, no
-    /// reaper), and be idempotent across the explicit call and Drop.
+    /// finish() with no stream must leave Released (no park), and be
+    /// idempotent across the explicit call and Drop. Local-mode
+    /// sessions (owner: None) do the disarm/release bookkeeping the
+    /// owner would have — same observable end state.
     #[test]
     fn session_finish_without_stream_releases_and_is_idempotent() {
         let mic = WarmMic::new(Duration::from_secs(60), 1.0);
@@ -1539,6 +1659,5 @@ mod tests {
         let st = mic.shared.state.lock();
         assert!(matches!(st.phase, Phase::Released));
         assert_eq!(st.first_audio_at, DISARMED, "finish disarms first_audio");
-        assert!(!st.reaper_alive);
     }
 }

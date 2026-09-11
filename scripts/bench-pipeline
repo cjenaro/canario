@@ -628,10 +628,13 @@ def run_cli_backend(args, marklog: MarkLog) -> dict:
             t0 = t_press
             it = {
                 "index": i,
-                # script-clock anchors (CLOCK_REALTIME, comparable to marks)
+                # script-clock anchors (CLOCK_REALTIME, comparable to
+                # marks). A quiet room ("(no speech detected)") yields
+                # no transcript: both transcript-anchored metrics
+                # become None instead of crashing the run.
                 "press_to_first_audio_ms": diff_ms(t_press, m_fa["t"]),
-                "release_to_transcript_ms": diff_ms(t_release, m_tr["t"]),
-                "transcript_to_paste_ms": diff_ms(m_tr["t"], m_pd and m_pd["t"]),
+                "release_to_transcript_ms": diff_ms(t_release, m_tr and m_tr["t"]),
+                "transcript_to_paste_ms": diff_ms(m_tr and m_tr["t"], m_pd and m_pd["t"]),
                 "stages_ms": {
                     "stop_poll_wait": span(marks, "stop_recording_called",
                                            "stop_observed", t0),
