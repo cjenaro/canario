@@ -128,15 +128,10 @@ jobs:
         if: runner.os != 'Windows'
         run: chmod +x canario-app/sidecar/canario-electron
 
-      # @jitsi/robotjs compiles from source against Electron's ABI
-      # (no usable prebuild): on Linux it needs the X11 dev headers
-      # its keycode/keyboard code includes. The runner images don't
-      # ship them. robotjs is unused at runtime on Linux (paste goes
-      # through the sidecar's native path there); retiring it —
-      # canario "Retire @jitsi/robotjs" bead — removes this step too.
-      - name: Install X11 headers (Linux robotjs build)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev libxkbfile-dev libpng-dev
+      # No native node modules ship with the app (canario-ubb retired
+      # @jitsi/robotjs — paste goes through the sidecar's native
+      # backends), so @electron/rebuild has nothing to compile and no
+      # platform headers are needed.
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
