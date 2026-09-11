@@ -380,7 +380,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     await checkVersion();
 
     // Forward sidecar events to all renderer windows
-    onSidecarEvent((event) => {
+    onSidecarEvent(async (event) => {
       // Update tray based on events
       if (event.event === "RecordingStarted") {
         updateTrayState("recording");
@@ -395,6 +395,13 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       // Auto-paste (all platforms: Linux via xdotool ctrl+v, macOS/Windows via robotjs)
       // The sidecar no longer auto-pastes — Electron handles it for better reliability.
       if (event.event === "TranscriptionReady" && event.text) {
+        // Decide against fresh config, not the boot snapshot: config.json
+        // may have changed under us (GTK running concurrently, a manual
+        // edit, the CLI). One local round-trip (~0.1ms, see
+        // bench_get_config_roundtrip_latency in the sidecar protocol tests).
+        // fetchConfig keeps the last known config on failure.
+        // canario-dmp.18.
+        await fetchConfig();
         const config = cachedConfig;
         if (config?.auto_paste) {
           timingMark("electron:transcript_received");
@@ -526,6 +533,11 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       // Config fetch is non-critical
     }
   }
+
+  // NOTE: any future sidecar-crash-recovery / sidecar-restart path MUST call
+  // fetchConfig() again after the process comes back — the cache is only
+  // refreshed at boot, on renderer config:update-cache merges, and before
+  // each auto-paste decision (canario-dmp.18).
 
   // ── Onboarding flag migration (canario-xv9) ─────────────────────────────
   // The completion flag used to live in a main-process onboarding.json

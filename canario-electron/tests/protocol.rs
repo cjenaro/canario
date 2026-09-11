@@ -125,6 +125,93 @@ impl Drop for Sidecar {
     }
 }
 
+#[test]
+fn get_config_reflects_external_edits_without_restart() {
+    // canario-dmp.18: a config.json changed under a running sidecar
+    // (other frontend, manual edit, CLI) must show up in get_config —
+    // and a later update_config must not clobber the external change
+    // with a stale boot snapshot (lost update).
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config/canario/config.json");
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    sidecar.send(json!({ "cmd": "get_config", "id": "before" }));
+    let before = sidecar.wait_for("before")["data"].clone();
+    assert_eq!(before["auto_paste"], json!(true)); // default
+
+    // External edit while the sidecar runs.
+    let mut edited = before.clone();
+    edited["auto_paste"] = json!(false);
+    edited["sound_effects"] = json!(false);
+    std::fs::write(&config_path, serde_json::to_string(&edited).unwrap()).unwrap();
+
+    sidecar.send(json!({ "cmd": "get_config", "id": "after" }));
+    let after = sidecar.wait_for("after")["data"].clone();
+    assert_eq!(
+        after["auto_paste"],
+        json!(false),
+        "external edit must be visible without restart"
+    );
+    assert_eq!(after["sound_effects"], json!(false));
+
+    // update_config after an external edit keeps the external value:
+    // its read-modify-write starts from the refreshed state.
+    sidecar.send(json!({ "cmd": "update_config", "id": "upd", "config": { "auto_paste": true } }));
+    assert_eq!(sidecar.wait_for("upd")["ok"], json!(true));
+    sidecar.send(json!({ "cmd": "get_config", "id": "final" }));
+    let final_config = sidecar.wait_for("final")["data"].clone();
+    assert_eq!(final_config["auto_paste"], json!(true));
+    assert_eq!(
+        final_config["sound_effects"],
+        json!(false),
+        "update_config must not clobber the external edit"
+    );
+}
+
+/// Micro-benchmark: `get_config` round-trip latency (canario-dmp.18).
+///
+/// The Electron main process re-fetches config before each auto-paste
+/// decision, so this round-trip sits on the transcript-to-paste
+/// critical path — this bench is how a change to `get_config`'s cost
+/// (e.g. the disk reload added in canario-dmp.18) proves it stays
+/// negligible. Run explicitly:
+///
+/// ```text
+/// cargo test -p canario-electron --test protocol bench_get_config -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn bench_get_config_roundtrip_latency() {
+    let mut sidecar = Sidecar::spawn();
+
+    // Warm-up: first round-trip includes process/pipe setup.
+    for i in 0..20 {
+        sidecar.send(json!({ "cmd": "get_config", "id": format!("warm-{i}") }));
+        let _ = sidecar.wait_for(&format!("warm-{i}"));
+    }
+
+    const N: usize = 2000;
+    let mut samples_us: Vec<f64> = Vec::with_capacity(N);
+    for i in 0..N {
+        let id = format!("bench-{i}");
+        let start = std::time::Instant::now();
+        sidecar.send(json!({ "cmd": "get_config", "id": id }));
+        let resp = sidecar.wait_for(&id);
+        samples_us.push(start.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(resp["ok"], json!(true));
+    }
+
+    samples_us.sort_by(|a, b| a.total_cmp(b));
+    let mean = samples_us.iter().sum::<f64>() / N as f64;
+    println!(
+        "get_config round-trip over {N} calls: mean={mean:.1}µs p50={:.1}µs p95={:.1}µs p99={:.1}µs max={:.1}µs",
+        samples_us[N / 2],
+        samples_us[(N as f64 * 0.95) as usize],
+        samples_us[(N as f64 * 0.99) as usize],
+        samples_us[N - 1],
+    );
+}
+
 /// Seed a history.json with two entries before the sidecar starts.
 fn seed_history(tmp: &tempfile::TempDir) {
     let dir = tmp.path().join("data").join("canario");

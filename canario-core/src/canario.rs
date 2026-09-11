@@ -276,6 +276,31 @@ impl Canario {
         lock(&self.inner.config).clone()
     }
 
+    /// Re-read `config.json` from disk into the in-memory snapshot and
+    /// return the fresh value.
+    ///
+    /// The file can change under a running instance — the other
+    /// frontend, a manual edit, the CLI — so [`Self::config`] alone
+    /// would serve a boot-time snapshot forever. The sidecar's command
+    /// loop is serial, so this cannot interleave with
+    /// [`Self::update_config`]; a changed recognizer identity
+    /// invalidates the recognizer cache exactly like
+    /// [`Self::update_config`] does, regardless of who wrote the file.
+    pub fn refresh_config(&self) -> anyhow::Result<AppConfig> {
+        let loaded = crate::config::AppConfig::load()?;
+        let mut config = lock(&self.inner.config);
+        let cache_key_before = recognizer_cache_key(&config);
+        let cache_key_after = recognizer_cache_key(&loaded);
+        *config = loaded.clone();
+        drop(config);
+
+        if cache_key_after != cache_key_before {
+            crate::recording::recognizer_config_changed();
+            Self::prewarm_recognizer_if_ready(&self.config());
+        }
+        Ok(loaded)
+    }
+
     /// Update config atomically. Saves to disk.
     ///
     /// ```no_run

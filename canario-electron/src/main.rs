@@ -340,7 +340,17 @@ fn handle_command(
             write_json(&ok_data(&id, serde_json::json!(downloaded)));
         }
         Command::GetConfig { id } => {
-            let config = canario.config();
+            // Serve the on-disk truth, not the boot snapshot: the file
+            // may have changed under a running instance (other
+            // frontend, manual edit, CLI) — canario-dmp.18. Falls back
+            // to the in-memory snapshot if the reload fails.
+            let config = canario.refresh_config().unwrap_or_else(|e| {
+                warn!(
+                    "get_config: reloading config.json failed ({}), serving snapshot",
+                    e
+                );
+                canario.config()
+            });
             write_json(&ok_data(&id, serde_json::to_value(&config).unwrap()));
         }
         Command::UpdateConfig { id, config } => {
