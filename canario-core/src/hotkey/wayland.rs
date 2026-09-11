@@ -2,15 +2,99 @@
 ///
 use std::io;
 use std::os::unix::net::UnixDatagram;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tracing::{debug, error, info, warn};
 
 use super::processor::{HotkeyAction, HotkeyProcessor, ProcessorConfig};
-use super::OnAction;
+use super::{HotkeyStatus, OnAction};
+
+/// Result of probing read access to `/dev/input`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvdevAccess {
+    /// At least one `/dev/input/event*` node is readable.
+    Granted,
+    /// Event nodes exist but none are readable — the user is not in
+    /// the `input` group (the classic silent-hotkey failure).
+    PermissionDenied,
+    /// No event nodes at all (e.g. container or exotic system).
+    NoDevices,
+}
+
+impl EvdevAccess {
+    /// Map the probe result onto the frontend-facing status.
+    ///
+    /// `Granted` is optimistic: the listener thread refines it to
+    /// `socket-fallback` if no device actually supports the configured
+    /// key (see [`WaylandHotkey::start`]).
+    pub(crate) fn into_status(self) -> HotkeyStatus {
+        match self {
+            Self::Granted => HotkeyStatus::evdev(),
+            Self::PermissionDenied => HotkeyStatus::socket_fallback(
+                "No keyboard devices readable in /dev/input — the current user is \
+                 not in the 'input' group, so the hotkey cannot listen for key \
+                 presses until access is granted and the session is restarted."
+                    .into(),
+                true,
+            ),
+            Self::NoDevices => HotkeyStatus::socket_fallback(
+                "No readable keyboard devices under /dev/input; only external \
+                 triggers (e.g. canario-cli --toggle-external) work."
+                    .into(),
+                false,
+            ),
+        }
+    }
+}
+
+/// Probe read access to the system's raw-input devices (`/dev/input`).
+pub(crate) fn probe_evdev_access() -> EvdevAccess {
+    probe_evdev_access_in(Path::new("/dev/input"))
+}
+
+/// Open each `event*` node in `dir` read-only, closing immediately.
+///
+/// Opening an evdev node allocates a private kernel event queue and
+/// closing it without reading consumes nothing, so probing is
+/// side-effect free even while another process listens. This mirrors
+/// what `evdev::enumerate()` does internally — when access is denied
+/// it simply yields zero devices and the hotkey silently dies, which
+/// is exactly the failure this probe makes detectable.
+fn probe_evdev_access_in(dir: &Path) -> EvdevAccess {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return EvdevAccess::NoDevices,
+    };
+
+    let mut nodes = 0usize;
+    let mut denied = false;
+    for entry in entries.flatten() {
+        // Mice, joysticks, … — evdev only consumes event nodes.
+        if !entry.file_name().to_string_lossy().starts_with("event") {
+            continue;
+        }
+        nodes += 1;
+        match std::fs::File::open(entry.path()) {
+            Ok(_) => return EvdevAccess::Granted,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => denied = true,
+            Err(_) => {}
+        }
+    }
+
+    if nodes == 0 {
+        EvdevAccess::NoDevices
+    } else if denied {
+        EvdevAccess::PermissionDenied
+    } else {
+        // Nodes exist but fail for other reasons (e.g. ENODEV
+        // placeholders) — not a permissions problem.
+        EvdevAccess::NoDevices
+    }
+}
 
 /// Wayland hotkey listener. Tries multiple strategies.
 pub struct WaylandHotkey {
@@ -33,12 +117,17 @@ impl WaylandHotkey {
     /// 2. Socket-based activation (D-Bus or Unix socket)
     ///
     /// For evdev, `key_name` should be an evdev key code name (e.g., "KEY_LEFTMETA" for Super).
+    ///
+    /// `status` receives live backend health: it is pre-populated by
+    /// the caller from the synchronous `/dev/input` probe, and this
+    /// method refines it if the evdev loop cannot actually start.
     pub fn start(
         &mut self,
         key_name: &str,
         modifiers: &[String],
         processor_config: ProcessorConfig,
         on_action: OnAction,
+        status: Arc<Mutex<HotkeyStatus>>,
     ) -> Result<()> {
         if self.running.load(Ordering::SeqCst) {
             bail!("Hotkey listener already running");
@@ -80,6 +169,24 @@ impl WaylandHotkey {
 
                 // evdev not available — socket is already running as fallback
                 info!("evdev not available. Socket listener is running for external triggers.");
+                // Refine the (possibly optimistic) status: if the probe
+                // said /dev/input was readable but no device supports the
+                // configured key, report the real backend. Never overwrite
+                // a more specific verdict the probe already recorded
+                // (permission denial / no devices).
+                {
+                    let mut st = super::lock(&status);
+                    if st.backend == "evdev" {
+                        *st = HotkeyStatus::socket_fallback(
+                            format!(
+                                "No keyboard devices found supporting key '{}'; only \
+                                 external triggers work.",
+                                key_name
+                            ),
+                            false,
+                        );
+                    }
+                }
                 // Keep this thread alive until stopped
                 while running.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(100));
@@ -372,4 +479,102 @@ fn socket_loop(
     let _ = std::fs::remove_file(&socket_path);
     info!("Socket listener stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hotkey::INPUT_GROUP_FIX_COMMAND;
+
+    #[test]
+    fn probe_granted_when_an_event_node_is_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("event3"), b"x").unwrap();
+        assert_eq!(probe_evdev_access_in(dir.path()), EvdevAccess::Granted);
+    }
+
+    #[test]
+    fn probe_ignores_non_event_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mouse0"), b"x").unwrap();
+        std::fs::write(dir.path().join("js0"), b"x").unwrap();
+        assert_eq!(probe_evdev_access_in(dir.path()), EvdevAccess::NoDevices);
+    }
+
+    #[test]
+    fn probe_missing_input_dir_is_no_devices() {
+        assert_eq!(
+            probe_evdev_access_in(Path::new("/nonexistent-dev-input")),
+            EvdevAccess::NoDevices
+        );
+    }
+
+    /// The regression this bead exists for: unreadable event nodes must
+    /// be reported as a permissions failure (previously this state was
+    /// indistinguishable from "no keyboards" and only reached the log).
+    #[test]
+    fn probe_reports_permission_denied_for_unreadable_nodes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("event0");
+        std::fs::write(&node, b"x").unwrap();
+        let mut perms = std::fs::metadata(&node).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&node, perms).unwrap();
+
+        // Root (or a process with CAP_DAC_OVERRIDE) reads through mode
+        // 000 — the probe legitimately returns Granted there, so skip.
+        if std::fs::File::open(&node).is_ok() {
+            return;
+        }
+
+        assert_eq!(
+            probe_evdev_access_in(dir.path()),
+            EvdevAccess::PermissionDenied
+        );
+    }
+
+    /// One readable node wins even when a sibling is unreadable — the
+    /// evdev backend can monitor *some* keyboard.
+    #[test]
+    fn probe_granted_beats_denied_sibling() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("event0"), b"x").unwrap();
+        let denied = dir.path().join("event1");
+        std::fs::write(&denied, b"x").unwrap();
+        let mut perms = std::fs::metadata(&denied).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&denied, perms).unwrap();
+
+        if std::fs::File::open(&denied).is_ok() {
+            return; // running as root — mode bits don't block reads
+        }
+
+        assert_eq!(probe_evdev_access_in(dir.path()), EvdevAccess::Granted);
+    }
+
+    #[test]
+    fn permission_denied_maps_to_socket_fallback_with_fix_command() {
+        let status = EvdevAccess::PermissionDenied.into_status();
+        assert_eq!(status.backend, "socket-fallback");
+        assert!(status.permission_denied);
+        assert_eq!(status.fix_command.as_deref(), Some(INPUT_GROUP_FIX_COMMAND));
+        assert!(status.detail.as_deref().unwrap().contains("input"));
+    }
+
+    #[test]
+    fn granted_and_no_devices_map_without_fix_command() {
+        let granted = EvdevAccess::Granted.into_status();
+        assert_eq!(granted.backend, "evdev");
+        assert!(!granted.permission_denied);
+        assert_eq!(granted.fix_command, None);
+
+        let none = EvdevAccess::NoDevices.into_status();
+        assert_eq!(none.backend, "socket-fallback");
+        assert!(!none.permission_denied);
+        assert_eq!(none.fix_command, None);
+    }
 }
