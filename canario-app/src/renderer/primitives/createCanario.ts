@@ -312,6 +312,18 @@ export function createCanario(machine: AppMachine) {
           api.hideOverlay();
           break;
 
+        case "SidecarCrashed":
+          // Backend process died mid-flight (canario-dmp.6): no terminal
+          // core event will ever arrive, so force the machine idle, hide
+          // the overlay, and surface the failure — lastError triggers the
+          // AppPage error toast automatically.
+          updateContext({
+            lastError: `Speech backend exited unexpectedly (code ${event.code ?? "unknown"}) — please restart Canario`,
+          });
+          send({ type: "SIDECAR_CRASHED" });
+          api.hideOverlay();
+          break;
+
         case "AudioLevel":
           // No-op: nothing consumes per-frame audio levels yet.
           break;

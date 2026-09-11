@@ -7,10 +7,31 @@ import { versionWarningText } from "./version.js";
 let tray: Tray | null = null;
 let currentState: "idle" | "recording" | "transcribing" = "idle";
 let settingsWindow: BrowserWindow | null = null;
+let offline = false;
 
 /** Called from main.ts so tray can reference the settings window */
 export function setSettingsWindow(win: BrowserWindow | null) {
   settingsWindow = win;
+}
+
+/**
+ * Mark the backend as offline in the tooltip (canario-dmp.6): a dead
+ * sidecar leaves the tray otherwise indistinguishable from a healthy
+ * idle app. One-way by design — recovery requires an app restart.
+ */
+export function setTrayOffline(isOffline: boolean): void {
+  offline = isOffline;
+  if (tray) {
+    tray.setToolTip(baseTooltip());
+  }
+}
+
+function baseTooltip(): string {
+  const warning = versionWarningText();
+  const parts = ["Canario — Voice to Text"];
+  if (offline) parts.push("⚠ backend offline — restart Canario");
+  else if (warning) parts.push(`⚠ ${warning}`);
+  return parts.join(" ");
 }
 
 function getTrayIcon(): Electron.NativeImage {
@@ -40,10 +61,7 @@ export function createTray(): Tray {
   // checkVersion() runs before the tray is created, so a version or
   // protocol mismatch is visible in the tooltip from the start — and
   // stays visible for as long as the tray lives (canario-dmp.4).
-  const warning = versionWarningText();
-  tray.setToolTip(
-    warning ? `Canario — Voice to Text (⚠ ${warning})` : "Canario — Voice to Text"
-  );
+  tray.setToolTip(baseTooltip());
 
   updateTrayMenu(currentState);
 

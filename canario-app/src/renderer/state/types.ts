@@ -21,6 +21,7 @@ export type AppEvent =
   | { type: "TRANSCRIPTION_READY" }
   | { type: "RECORDING_STOPPED" }
   | { type: "RECORDING_CANCELLED" }
+  | { type: "SIDECAR_CRASHED" }
   | { type: "ERROR" };
 
 export type AppContext = {
@@ -63,16 +64,23 @@ export const transitions: TransitionMap = {
       return { status: "recording", startedAt: Date.now() };
     },
     START_DOWNLOAD: () => ({ status: "downloading", progress: 0 }),
+    // Backend death is a state change even from idle: a fresh object
+    // makes the signal notify watchers (e.g. the offline banner).
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   recording: {
     STOP_RECORDING: () => ({ status: "transcribing", startedAt: Date.now() }),
     // Escape-cancel from the core: audio discarded, no transcription/paste
     RECORDING_CANCELLED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    // No terminal core event can arrive anymore — force idle
+    // (canario-dmp.6: no zombie recording state).
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
     ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   transcribing: {
     TRANSCRIPTION_READY: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
     RECORDING_STOPPED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
     ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   downloading: {
@@ -82,5 +90,8 @@ export const transitions: TransitionMap = {
     },
     DOWNLOAD_COMPLETE: () => ({ status: "idle", hasModel: true }),
     DOWNLOAD_FAILED: () => ({ status: "idle", hasModel: false }),
+    // The download died with the process; readiness must be re-derived
+    // after restart, so land on idle with the last known truth.
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
 };

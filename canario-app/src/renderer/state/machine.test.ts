@@ -180,4 +180,44 @@ describe("createAppMachine", () => {
       expect(m.context().lastError).toBeNull();
     });
   });
+
+  // Backend death must force every active status back to idle — no
+  // terminal core event can arrive after the process is gone
+  // (canario-dmp.6: zombie recording/transcribing/download states).
+  describe("SIDECAR_CRASHED", () => {
+    it("forces recording back to idle", () => {
+      const m = createAppMachine();
+      m.updateContext({ modelReady: true });
+      m.send({ type: "START_RECORDING" });
+      m.send({ type: "SIDECAR_CRASHED" });
+      expect(m.state()).toEqual({ status: "idle", hasModel: true });
+    });
+
+    it("forces transcribing back to idle", () => {
+      const m = createAppMachine();
+      m.updateContext({ modelReady: true });
+      m.send({ type: "START_RECORDING" });
+      m.send({ type: "STOP_RECORDING" });
+      expect(m.state().status).toBe("transcribing");
+      m.send({ type: "SIDECAR_CRASHED" });
+      expect(m.state()).toEqual({ status: "idle", hasModel: true });
+    });
+
+    it("forces downloading back to idle, keeping the last readiness truth", () => {
+      const m = createAppMachine();
+      m.send({ type: "START_DOWNLOAD" });
+      m.updateContext({ modelReady: true });
+      m.send({ type: "SIDECAR_CRASHED" });
+      expect(m.state()).toEqual({ status: "idle", hasModel: true });
+    });
+
+    it("is a self-transition from idle that still notifies signal watchers", () => {
+      const m = createAppMachine();
+      const before = m.state();
+      m.send({ type: "SIDECAR_CRASHED" });
+      const after = m.state();
+      expect(after).toEqual({ status: "idle", hasModel: false });
+      expect(after).not.toBe(before); // fresh object → Solid signal fires
+    });
+  });
 });

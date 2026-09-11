@@ -1,7 +1,7 @@
 // Canario Electron — main process entry
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen } from "electron";
 import { join } from "path";
-import { createTray, setSettingsWindow, setTrayVisible, updateTrayMenu } from "./tray.js";
+import { createTray, setSettingsWindow, setTrayOffline, setTrayVisible, updateTrayMenu } from "./tray.js";
 import { startSidecar, stopSidecar, sendCommand, onSidecarEvent, onCommandResponse } from "./sidecar.js";
 import { loadWindowState, saveWindowState, trackWindowState } from "./windowState.js";
 import { setAutostart } from "./autostart.js";
@@ -424,6 +424,15 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
         }
       }
 
+      // Backend death is a first-class event (canario-dmp.6): reset the
+      // tray (its state icons would otherwise lie forever), mark it
+      // offline in the tooltip, and let the generic forward below carry
+      // the event to the renderer, whose machine force-resets to idle.
+      if (event.event === "SidecarCrashed") {
+        updateTrayState("idle");
+        setTrayOffline(true);
+      }
+
       mainWindow?.webContents.send("sidecar:event", event);
       overlayWindow?.webContents.send("sidecar:event", event);
     });
@@ -483,6 +492,16 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     if (cachedConfig?.show_tray_icon !== false) {
       createTray();
     }
+  }).catch((err) => {
+    // Startup failure must be visible, not an invisible hang: without
+    // this the process idles with no windows, tray, or dialog
+    // (canario-dmp.6).
+    console.error("[main] Startup failed:", err);
+    dialog.showErrorBox(
+      "Canario failed to start",
+      `The speech backend could not be started:\n\n${err instanceof Error ? err.message : String(err)}\n\nCanario will now exit.`
+    );
+    app.exit(1);
   });
 
   // Don't quit when windows close — app lives in tray
