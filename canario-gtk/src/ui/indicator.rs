@@ -53,14 +53,35 @@ const CAPTION_MAX_CHARS: usize = 600;
 /// The indicator is identified by its widget name.
 pub struct RecordingIndicator;
 
+/// The indicator window for this application, if one is showing.
+/// All indicator operations are no-ops without it (a late partial must
+/// never re-create it — see [`RecordingIndicator::update_caption`]).
+fn indicator_window(app: &adw::Application) -> Option<gtk4::Window> {
+    app.windows()
+        .into_iter()
+        .find(|w| w.widget_name() == "canario-indicator")
+}
+
+/// Run `f` on the indicator's caption label; `None` if the window (or,
+/// defensively, the label) is missing. Centralizes the widget-name walk
+/// the caption show/clear paths previously duplicated.
+fn with_caption_label<R>(app: &adw::Application, f: impl Fn(&gtk4::Label) -> R) -> Option<R> {
+    let win = indicator_window(app)?;
+    let mut result: Option<R> = None;
+    walk_indicator(win.upcast_ref::<gtk4::Widget>(), &mut |w| {
+        if result.is_none() && w.widget_name() == "canario-caption-label" {
+            if let Ok(label) = w.clone().downcast::<gtk4::Label>() {
+                result = Some(f(&label));
+            }
+        }
+    });
+    result
+}
+
 impl RecordingIndicator {
     /// Show the recording indicator. Creates one if none exists.
     pub fn show(app: &adw::Application) {
-        let existing = app
-            .windows()
-            .into_iter()
-            .find(|w| w.widget_name() == "canario-indicator");
-        if existing.is_some() {
+        if indicator_window(app).is_some() {
             return;
         }
 
@@ -70,22 +91,14 @@ impl RecordingIndicator {
 
     /// Hide the recording indicator
     pub fn hide(app: &adw::Application) {
-        let existing = app
-            .windows()
-            .into_iter()
-            .find(|w| w.widget_name() == "canario-indicator");
-        if let Some(win) = existing {
+        if let Some(win) = indicator_window(app) {
             win.close();
         }
     }
 
     /// Update the audio level meter (0.0 – 1.0)
     pub fn update_level(app: &adw::Application, level: f64) {
-        let existing = app
-            .windows()
-            .into_iter()
-            .find(|w| w.widget_name() == "canario-indicator");
-        if let Some(win) = existing {
+        if let Some(win) = indicator_window(app) {
             let clamped = level.clamp(0.0, 1.0);
             // Walk the widget tree to find the progress bar
             walk_indicator(win.upcast_ref::<gtk4::Widget>(), &mut |w| {
@@ -104,28 +117,19 @@ impl RecordingIndicator {
     /// partial racing a stop/cancel finds no window and is dropped; it must
     /// never (re)open the indicator.
     pub fn update_caption(app: &adw::Application, raw: &str) {
-        let existing = app
-            .windows()
-            .into_iter()
-            .find(|w| w.widget_name() == "canario-indicator");
-        if let Some(win) = existing {
-            let text = caption_text(raw);
-            if text.is_empty() {
-                return;
-            }
-            let mut shown = false;
-            walk_indicator(win.upcast_ref::<gtk4::Widget>(), &mut |w| {
-                if w.widget_name() == "canario-caption-label" {
-                    if let Ok(label) = w.clone().downcast::<gtk4::Label>() {
-                        // Plain text: set_text renders the transcript
-                        // literally — no markup or accelerator parsing.
-                        label.set_text(&text);
-                        label.set_visible(true);
-                        shown = true;
-                    }
-                }
-            });
-            if shown {
+        let text = caption_text(raw);
+        if text.is_empty() {
+            return;
+        }
+        let shown = with_caption_label(app, |label| {
+            // Plain text: set_text renders the transcript literally — no
+            // markup or accelerator parsing.
+            label.set_text(&text);
+            label.set_visible(true);
+        })
+        .is_some();
+        if shown {
+            if let Some(win) = indicator_window(app) {
                 // Live while mapped: for a non-resizable window a new
                 // default size takes effect on the next size negotiation.
                 win.set_default_size(CAPTION_WINDOW_WIDTH, CAPTION_WINDOW_HEIGHT);
@@ -136,19 +140,11 @@ impl RecordingIndicator {
     /// Clear the live caption and return the indicator to its starting size.
     /// Called on stop/cancel, before the window is hidden.
     pub fn clear_caption(app: &adw::Application) {
-        let existing = app
-            .windows()
-            .into_iter()
-            .find(|w| w.widget_name() == "canario-indicator");
-        if let Some(win) = existing {
-            walk_indicator(win.upcast_ref::<gtk4::Widget>(), &mut |w| {
-                if w.widget_name() == "canario-caption-label" {
-                    if let Ok(label) = w.clone().downcast::<gtk4::Label>() {
-                        label.set_text("");
-                        label.set_visible(false);
-                    }
-                }
-            });
+        with_caption_label(app, |label| {
+            label.set_text("");
+            label.set_visible(false);
+        });
+        if let Some(win) = indicator_window(app) {
             win.set_default_size(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT);
         }
     }
