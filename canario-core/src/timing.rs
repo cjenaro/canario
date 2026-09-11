@@ -26,7 +26,7 @@
 //! | `mic_device_opened` | `recording` | default input device queried/configured |
 //! | `mic_stream_started` | `recording` | `stream.play()` returned — capture requested |
 //! | `first_audio` | `recording` | first sample block arrived from the mic |
-//! | `stop_observed` | `recording` | capture loop noticed the stop flag (after its 50 ms poll sleep) |
+//! | `stop_observed` | `recording` | capture loop woke from the stop condvar (µs wake, canario-b1g) |
 //! | `audio_cloned` | `recording` | whole-buffer clone taken on stop |
 //! | `mic_released` | `recording` | capture stream dropped |
 //! | `beep_stop_start` / `beep_stop_done` | `recording` | stop beep handoff (µs — the sequence runs on its own detached thread, canario-9mw) |

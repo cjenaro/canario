@@ -4,7 +4,9 @@
 /// Communicates results via the `Sender<Event>` channel.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use parking_lot::{Condvar, Mutex};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
 use crate::config::ModelPaths;
@@ -12,19 +14,108 @@ use crate::event::Event;
 use crate::inference::postprocess::PostProcessor;
 use crate::timing;
 
+// ── Stop signalling ───────────────────────────────────────────────────
+// The capture loop used to poll a plain `AtomicBool` every 50 ms, so
+// every stop paid a uniform 0–50 ms wait before transcription began
+// (canario-b1g baseline: 14.3 ms mean / 28.5 max, 50 ms by
+// construction). `StopSignal` replaces the poll with a condvar wake:
+// `RecordingHandle::stop`/`cancel` flip the flag and notify while
+// holding the mutex the waiter owns while checking it, so the capture
+// thread reacts in microseconds and the `stop_observed` timing mark
+// measures the true wake latency.
+
+/// Shared stop/cancel signal between the recording API (`RecordingHandle`)
+/// and the capture thread (plus the live-captions worker, which reuses
+/// the same wait for its cadence slices).
+struct StopSignal {
+    /// Set when the capture loop should stop and transcribe.
+    stop: AtomicBool,
+    /// Set when stopping should also discard the audio (no transcription).
+    cancel: AtomicBool,
+    /// Notified after every flag flip. Pairing mutex exists only for
+    /// the condvar protocol — the flags are the payload.
+    cond: Condvar,
+    mutex: Mutex<()>,
+}
+
+impl StopSignal {
+    fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+            cond: Condvar::new(),
+            mutex: Mutex::new(()),
+        }
+    }
+
+    /// Signal the capture loop to stop and transcribe.
+    ///
+    /// The flag flip and the notify run under the mutex the waiter
+    /// holds while checking the flag, so a stop can never land in the
+    /// "checked the flag → not yet asleep" window where the notify
+    /// would be missed.
+    fn signal_stop(&self) {
+        let _guard = self.mutex.lock();
+        self.stop.store(true, Ordering::SeqCst);
+        self.cond.notify_all();
+    }
+
+    /// Signal stop **and** discard — same wake path as [`Self::signal_stop`].
+    fn signal_cancel(&self) {
+        let _guard = self.mutex.lock();
+        self.cancel.store(true, Ordering::SeqCst);
+        self.stop.store(true, Ordering::SeqCst);
+        self.cond.notify_all();
+    }
+
+    /// Has a stop (or cancel) been signalled?
+    fn is_stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Was the stop a cancel (discard) rather than a transcribe?
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// Block until a stop/cancel signal arrives or `timeout` elapses.
+    ///
+    /// Returns `true` when stopped (disambiguate with
+    /// [`Self::is_cancelled`]), `false` on timeout. Callers use the
+    /// timeout as their tick: the capture loop paces `Event::AudioLevel`
+    /// this way, and the live-captions worker slices its decode cadence.
+    /// Spurious wakes are re-checked, so `true` always means the flag
+    /// is actually set.
+    fn wait_for_stop(&self, timeout: Duration) -> bool {
+        let mut guard = self.mutex.lock();
+        let deadline = Instant::now() + timeout;
+        while !self.is_stopped() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let woke = self.cond.wait_for(&mut guard, remaining);
+            if woke.timed_out() {
+                return self.is_stopped();
+            }
+        }
+        true
+    }
+}
+
 /// Handle to stop a running recording and track thread completion.
 pub struct RecordingHandle {
-    stop: Arc<AtomicBool>,
-    /// Set when the recording should be discarded (no transcription).
-    cancel: Arc<AtomicBool>,
+    signal: Arc<StopSignal>,
     /// Set to `false` by the thread when it finishes (recording + transcription).
     busy: Arc<AtomicBool>,
 }
 
 impl RecordingHandle {
     /// Signal the recording thread to stop.
+    ///
+    /// Wakes the capture loop's condvar immediately — no poll to wait out.
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.signal.signal_stop();
     }
 
     /// Signal the recording thread to stop AND discard the audio:
@@ -32,8 +123,7 @@ impl RecordingHandle {
     /// `Event::RecordingCancelled` is emitted instead of
     /// `TranscriptionReady`/`RecordingStopped`.
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
-        self.stop.store(true, Ordering::SeqCst);
+        self.signal.signal_cancel();
     }
 
     /// Is the thread still running (capturing or transcribing)?
@@ -54,11 +144,9 @@ pub fn start_recording(
     sound_effects: bool,
     sound_volume: f32,
 ) -> anyhow::Result<RecordingHandle> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(StopSignal::new());
     let busy = Arc::new(AtomicBool::new(true));
-    let stop_clone = stop.clone();
-    let cancel_clone = cancel.clone();
+    let signal_clone = signal.clone();
     let busy_clone = busy.clone();
 
     // Play start beep
@@ -75,8 +163,7 @@ pub fn start_recording(
         let result = recording_loop(
             model_paths,
             tx.clone(),
-            stop_clone,
-            cancel_clone,
+            signal_clone,
             &post_processor,
             sound_effects,
             sound_volume,
@@ -93,16 +180,20 @@ pub fn start_recording(
         busy_clone.store(false, Ordering::SeqCst);
     });
 
-    Ok(RecordingHandle { stop, cancel, busy })
+    Ok(RecordingHandle { signal, busy })
 }
+
+/// Cadence of `Event::AudioLevel` while recording — also the timeout the
+/// capture loop's condvar wait uses, so level ticks keep their original
+/// 50 ms rhythm while a stop signal still wakes the loop immediately.
+const AUDIO_LEVEL_INTERVAL_MS: u64 = 50;
 
 /// The main recording loop — runs in a background thread.
 #[allow(clippy::too_many_arguments)] // thread-spawn plumbing, not an API
 fn recording_loop(
     model_paths: ModelPaths,
     tx: std::sync::mpsc::Sender<Event>,
-    stop: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
+    signal: Arc<StopSignal>,
     post_processor: &PostProcessor,
     sound_effects: bool,
     sound_volume: f32,
@@ -193,7 +284,7 @@ fn recording_loop(
     spawn_live_captions_worker(
         audio_buf.clone(),
         mic_sr,
-        stop.clone(),
+        signal.clone(),
         tx.clone(),
         model_paths.clone(),
         post_processor.clone(),
@@ -201,8 +292,15 @@ fn recording_loop(
     );
 
     // ── Wait for stop signal ────────────────────────────────────────
-    let mut log_timer = std::time::Instant::now();
-    while !stop.load(Ordering::SeqCst) {
+    // Condvar wake (canario-b1g): `RecordingHandle::stop`/`cancel`
+    // notify this wait directly, so the loop reacts in microseconds
+    // instead of finishing a 50 ms poll sleep — `stop_observed` below
+    // now measures the true wake latency. The `wait_for_stop` timeout
+    // only paces `Event::AudioLevel`, which stays on its original
+    // 50 ms cadence: each timeout is one level tick, exactly like the
+    // old loop body before its sleep.
+    let mut log_timer = Instant::now();
+    loop {
         let buf_snapshot = audio_buf.lock();
         let buf_len = buf_snapshot.len();
         let recent_start = buf_len.saturating_sub(4000);
@@ -217,17 +315,19 @@ fn recording_loop(
         let level = (rms * 5.0).min(1.0) as f64;
         let _ = tx.send(Event::AudioLevel { level });
 
-        if log_timer.elapsed() >= std::time::Duration::from_secs(3) {
+        if log_timer.elapsed() >= Duration::from_secs(3) {
             tracing::info!(
                 "Recording: {} samples ({:.1}s), RMS={:.3}",
                 buf_len,
                 buf_len as f64 / mic_sr as f64,
                 rms,
             );
-            log_timer = std::time::Instant::now();
+            log_timer = Instant::now();
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        if signal.wait_for_stop(Duration::from_millis(AUDIO_LEVEL_INTERVAL_MS)) {
+            break;
+        }
     }
 
     timing::mark("stop_observed");
@@ -235,7 +335,7 @@ fn recording_loop(
     // ── Stop: grab audio, release mic ───────────────────────────────
     // Cancel path: release the mic and discard the buffer — skip the
     // stop beep, resample, and transcription entirely.
-    if cancel.load(Ordering::SeqCst) {
+    if signal.is_cancelled() {
         drop(stream);
         audio_buf.lock().clear();
         tracing::info!("Recording cancelled — discarding captured audio");
@@ -365,7 +465,10 @@ fn live_window_range(buf_len: usize, mic_sr: u32, window_secs: f64) -> std::ops:
 struct LiveCaptionsCtx {
     audio_buf: Arc<parking_lot::Mutex<Vec<f32>>>,
     mic_sr: u32,
-    stop: Arc<AtomicBool>,
+    /// Shared with the capture loop — `wait_for_stop` wakes it the same
+    /// instant a stop/cancel fires (canario-b1g), instead of re-polling
+    /// the flag between decode cadence slices.
+    stop: Arc<StopSignal>,
     tx: std::sync::mpsc::Sender<Event>,
     model_paths: ModelPaths,
     post_processor: PostProcessor,
@@ -380,7 +483,7 @@ struct LiveCaptionsCtx {
 fn spawn_live_captions_worker(
     audio_buf: Arc<parking_lot::Mutex<Vec<f32>>>,
     mic_sr: u32,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
     tx: std::sync::mpsc::Sender<Event>,
     model_paths: ModelPaths,
     post_processor: PostProcessor,
@@ -437,14 +540,17 @@ fn live_captions_loop(ctx: LiveCaptionsCtx) {
     let mut last_text = String::new();
 
     loop {
-        // Wait out the cadence in small slices so `stop` (or cancel)
-        // interrupts within one poll instead of a full interval.
+        // Wait out the cadence in small slices, each a condvar wait on
+        // the shared stop signal — a stop (or cancel) interrupts the
+        // worker within the slice's wake latency rather than being
+        // noticed at the next 150 ms poll.
         let mut waited_ms = 0;
-        while waited_ms < LIVE_INTERVAL_MS && !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(LIVE_POLL_MS));
+        while waited_ms < LIVE_INTERVAL_MS
+            && !stop.wait_for_stop(Duration::from_millis(LIVE_POLL_MS))
+        {
             waited_ms += LIVE_POLL_MS;
         }
-        if stop.load(Ordering::SeqCst) {
+        if stop.is_stopped() {
             return;
         }
 
@@ -490,7 +596,7 @@ fn live_captions_loop(ctx: LiveCaptionsCtx) {
                 // Emit only fresh text, and never after stop: a late
                 // partial must not re-show captions that the final
                 // result (or RecordingStopped) already cleared.
-                if !stop.load(Ordering::SeqCst) && !text.is_empty() && text != last_text {
+                if !stop.is_stopped() && !text.is_empty() && text != last_text {
                     tracing::debug!(
                         "Live caption ({} chars, {:.1}s window)",
                         text.chars().count(),
@@ -959,5 +1065,122 @@ mod tests {
         let range = live_window_range(480_000, 16_000, 0.0);
         assert_eq!(range, 480_000..480_000);
         assert!(range.is_empty());
+    }
+
+    // ── StopSignal wake semantics (canario-b1g) ──────────────────────
+    // The condvar replaced a 50 ms flag poll, so the contract to pin
+    // down is: a signal wakes a waiting thread (instead of being
+    // noticed on the next poll tick or, worse, a missed-notify
+    // timeout), and a wait without a signal keeps ticking (timeout)
+    // so AudioLevel keeps its cadence.
+
+    /// A stop signalled *before* the wait must return immediately,
+    /// without touching the timeout — the capture thread's first wait
+    /// after a (theoretical) pre-signalled start must not sleep.
+    #[test]
+    fn stop_signal_presignalled_returns_without_waiting() {
+        let signal = StopSignal::new();
+        signal.signal_stop();
+
+        let start = Instant::now();
+        let stopped = signal.wait_for_stop(Duration::from_secs(30));
+
+        assert!(stopped, "flag already set — wait must return true");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "returned without waiting out the 30 s timeout"
+        );
+    }
+
+    /// The core of the fix: a stop signalled *while* the capture thread
+    /// is waiting must wake it well inside the 5 s timeout a missed
+    /// notify would hit (in practice the wake is microseconds; the
+    /// benchmark gates the millisecond number, this test gates the
+    /// mechanism).
+    #[test]
+    fn stop_signal_wakes_a_waiting_thread() {
+        let signal = Arc::new(StopSignal::new());
+        let waiter = {
+            let signal = signal.clone();
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                let stopped = signal.wait_for_stop(Duration::from_secs(5));
+                (stopped, start.elapsed())
+            })
+        };
+
+        std::thread::sleep(Duration::from_millis(50)); // let it block
+        signal.signal_stop();
+        let (stopped, elapsed) = waiter.join().unwrap();
+
+        assert!(stopped, "notify must wake the waiter with true");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "woke in {:?} — far under the 5 s missed-notify timeout",
+            elapsed
+        );
+        assert!(signal.is_stopped());
+        assert!(!signal.is_cancelled(), "plain stop must not discard");
+    }
+
+    /// Cancel takes the same wake path AND marks the recording for
+    /// discard, so the loop can skip transcription.
+    #[test]
+    fn stop_signal_cancel_wakes_and_marks_discard() {
+        let signal = Arc::new(StopSignal::new());
+        let waiter = {
+            let signal = signal.clone();
+            std::thread::spawn(move || signal.wait_for_stop(Duration::from_secs(5)))
+        };
+
+        std::thread::sleep(Duration::from_millis(50));
+        signal.signal_cancel();
+        let stopped = waiter.join().unwrap();
+
+        assert!(stopped, "cancel must wake the waiter like stop");
+        assert!(signal.is_stopped());
+        assert!(signal.is_cancelled(), "cancel must flag discard");
+    }
+
+    /// No signal → timeout returns `false` after (roughly) the full
+    /// timeout: this is the AudioLevel tick, so returning early (a
+    /// busy-spin) or late (a doubled sleep) both break the cadence.
+    #[test]
+    fn stop_signal_timeout_returns_false_after_the_timeout() {
+        let signal = StopSignal::new();
+
+        let start = Instant::now();
+        let stopped = signal.wait_for_stop(Duration::from_millis(50));
+
+        assert!(!stopped, "no signal — must time out with false");
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "waited {:?} — should honor (not shrink) the 50 ms tick",
+            start.elapsed()
+        );
+    }
+
+    /// The cadence pattern the capture loop runs: several timed-out
+    /// ticks, then a signal mid-sequence wakes the very next wait —
+    /// the waiter must not need to re-arm between ticks.
+    #[test]
+    fn stop_signal_times_out_then_wakes_on_the_next_wait() {
+        let signal = Arc::new(StopSignal::new());
+
+        assert!(!signal.wait_for_stop(Duration::from_millis(25)), "tick 1");
+        assert!(!signal.wait_for_stop(Duration::from_millis(25)), "tick 2");
+
+        let signaler = {
+            let signal = signal.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                signal.signal_stop();
+            })
+        };
+        assert!(
+            signal.wait_for_stop(Duration::from_secs(5)),
+            "signal during the third wait must wake it"
+        );
+        signaler.join().unwrap();
     }
 }
