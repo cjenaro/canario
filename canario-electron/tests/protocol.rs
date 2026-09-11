@@ -1087,3 +1087,155 @@ fn shutdown_responds_ok_and_exits() {
         }
     }
 }
+
+// ── canario-fgm.3: transformation rules + raw_text on the wire ─────────────
+//
+// The pipeline itself (rule matching, provider call, D5d fallback to
+// raw) lives in canario-core and is unit-tested at the
+// `emit_transcription_ready` seam (canario-core/src/recording.rs) — a
+// full through-the-sidecar recording cannot be driven hermetically
+// because it needs a microphone, a downloaded model and actual speech.
+// What the sidecar adds on top is the WIRE: rules persisting through
+// config, and history entries carrying `raw_text`. These tests pin
+// that surface.
+
+/// canario-fgm.3: `transform.rules[]` now has its real shape
+/// ({app_match, instruction}, empty app_match = default rule) and
+/// round-trips through update_config/get_config — the path the fgm.4
+/// rule CRUD UI will write through. A wrong-typed rule entry keeps the
+/// whole previous block (the generic merge policy).
+#[test]
+fn transform_rules_round_trip_through_config() {
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "rules-on",
+        "config": {
+            "transform": {
+                "enabled": true,
+                "provider": { "base_url": "http://localhost:11434/v1", "model": "llama3" },
+                "timeout_ms": 4000,
+                "rules": [
+                    { "app_match": "whatsapp", "instruction": "be informal" },
+                    { "app_match": "", "instruction": "tidy everything" }
+                ]
+            }
+        }
+    }));
+    assert_eq!(sidecar.wait_for("rules-on")["ok"], json!(true));
+
+    sidecar.send(json!({ "cmd": "get_config", "id": "rules-read" }));
+    let config = sidecar.wait_for("rules-read");
+    assert_eq!(
+        config["data"]["transform"]["rules"][0]["app_match"],
+        json!("whatsapp")
+    );
+    assert_eq!(
+        config["data"]["transform"]["rules"][0]["instruction"],
+        json!("be informal")
+    );
+    // The default rule (empty app_match) round-trips as an entry.
+    assert_eq!(
+        config["data"]["transform"]["rules"][1]["app_match"],
+        json!("")
+    );
+    assert_eq!(
+        config["data"]["transform"]["rules"][1]["instruction"],
+        json!("tidy everything")
+    );
+
+    // fgm.2-era placeholder entries still load (unknown keys ignored,
+    // missing fields defaulted) instead of failing the block.
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "rules-old",
+        "config": {
+            "transform": {
+                "enabled": true,
+                "provider": { "base_url": "http://localhost:11434/v1", "model": "llama3" },
+                "timeout_ms": 4000,
+                "rules": [{ "app": "firefox", "instruction": "be terse" }]
+            }
+        }
+    }));
+    assert_eq!(sidecar.wait_for("rules-old")["ok"], json!(true));
+    sidecar.send(json!({ "cmd": "get_config", "id": "rules-old-read" }));
+    let config = sidecar.wait_for("rules-old-read");
+    assert_eq!(
+        config["data"]["transform"]["rules"][0]["app_match"],
+        json!("")
+    );
+    assert_eq!(
+        config["data"]["transform"]["rules"][0]["instruction"],
+        json!("be terse")
+    );
+
+    // A wrong-typed rule entry skips the whole transform key (existing
+    // merge policy — the renderer always sends the full block).
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "rules-bad",
+        "config": { "transform": { "rules": [{ "app_match": 42 }] } }
+    }));
+    assert_eq!(sidecar.wait_for("rules-bad")["ok"], json!(true));
+    sidecar.send(json!({ "cmd": "get_config", "id": "rules-bad-read" }));
+    let config = sidecar.wait_for("rules-bad-read");
+    assert_eq!(
+        config["data"]["transform"]["rules"][0]["app_match"],
+        json!(""),
+        "the invalid replacement must not have applied"
+    );
+}
+
+/// canario-fgm.3 D3: history entries carry `raw_text` only when a
+/// transformation changed the text — the renderer's reveal-raw
+/// affordance (fgm.4) reads exactly this shape over get_history.
+#[test]
+fn history_entries_carry_raw_text_over_the_protocol() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data").join("canario");
+    std::fs::create_dir_all(&dir).unwrap();
+    // One transformed entry (raw kept), one plain entry (no key), one
+    // pre-fgm.3 entry shape.
+    std::fs::write(
+        dir.join("history.json"),
+        serde_json::to_string(&json!({
+            "entries": [
+                {
+                    "id": "transformed",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "text": "Hello, world.",
+                    "duration_secs": 2.0,
+                    "source_app": null,
+                    "raw_text": "hello wrld"
+                },
+                {
+                    "id": "plain",
+                    "timestamp": "2026-01-01T00:01:00Z",
+                    "text": "plain dictation",
+                    "duration_secs": 1.0,
+                    "source_app": null
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    sidecar.send(json!({ "cmd": "get_history", "id": "hist" }));
+    let resp = sidecar.wait_for("hist");
+    assert_eq!(resp["ok"], json!(true));
+    // most recent first
+    let entries = resp["data"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["id"], json!("plain"));
+    assert!(
+        entries[0].get("raw_text").is_none(),
+        "a raw dictation must not carry raw_text: {entries:?}"
+    );
+    assert_eq!(entries[1]["id"], json!("transformed"));
+    assert_eq!(entries[1]["raw_text"], json!("hello wrld"));
+    assert_eq!(entries[1]["text"], json!("Hello, world."));
+}

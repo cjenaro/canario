@@ -200,6 +200,7 @@ impl Canario {
         let config = self.config().clone();
         let model_paths = config.model_paths()?;
         let post_processor = config.post_processor.clone();
+        let transform = config.transform.clone();
         let sound_effects = config.sound_effects;
         let sound_volume = config.sound_effects_volume;
 
@@ -216,6 +217,7 @@ impl Canario {
             model_paths,
             tx,
             post_processor,
+            transform,
             sound_effects,
             sound_volume,
         ) {
@@ -470,9 +472,18 @@ impl Canario {
 
     // ── History ──────────────────────────────────────────────────────
 
-    /// Add a transcription to history.
-    pub fn add_history(&self, text: String, duration_secs: f64, source_app: Option<String>) {
-        lock(&self.inner.history).add(text, duration_secs, source_app);
+    /// Add a transcription to history (fgm.3 D3: `text` is the
+    /// canonical — transformed — transcript; `raw_text` rides along
+    /// only when a transformation changed it, and the store drops it
+    /// when it equals `text`).
+    pub fn add_history(
+        &self,
+        text: String,
+        duration_secs: f64,
+        source_app: Option<String>,
+        raw_text: Option<String>,
+    ) {
+        lock(&self.inner.history).add(text, duration_secs, source_app, raw_text);
     }
 
     /// Get recent history entries (most recent first).

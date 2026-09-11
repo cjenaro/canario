@@ -18,10 +18,30 @@ pub enum Event {
     /// recording UI; do NOT paste or store in history.
     RecordingCancelled,
 
-    /// Transcription is ready (after post-processing).
-    /// `text` is the final processed string.
+    /// Transcription is ready (after post-processing, and after
+    /// transformation when `transform.enabled` — fgm.3 D3: the pipeline
+    /// runs BEFORE this event, so what arrives here is canonical).
+    /// `text` is the final string (the transformed transcript when a
+    /// transformation ran — this is what gets pasted and stored as
+    /// history `text`).
     /// `duration_secs` is the recording length in seconds.
-    TranscriptionReady { text: String, duration_secs: f64 },
+    /// `raw_text` carries the pre-transformation transcript, present
+    /// ONLY when a transformation changed the text (D3: the
+    /// reveal-raw affordance; history stores it alongside `text`).
+    /// `transform_failed` — fgm.1 D5d: a transformation was attempted
+    /// and failed or timed out, so the raw transcript flowed on.
+    /// Frontends use it for the fallback affordance (fgm.4). Absent
+    /// (false) covers everything else: not configured, no rule, or a
+    /// clean transformation. Both fields are skipped on the wire when
+    /// unset, so pre-fgm.3 frontends see the exact old shape.
+    TranscriptionReady {
+        text: String,
+        duration_secs: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        raw_text: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        transform_failed: bool,
+    },
 
     /// Recording/transcription error. Do NOT paste or store in history.
     #[serde(rename = "Error")]
@@ -70,6 +90,42 @@ mod tests {
         assert_eq!(
             json,
             r#"{"event":"PartialTranscript","text":"live preview"}"#
+        );
+    }
+
+    /// fgm.3 D5a/D3: with no transformation (disabled, no rule, or a
+    /// clean no-op) the wire shape is BYTE-IDENTICAL to the
+    /// pre-fgm.3 event — old frontends must never see new fields.
+    #[test]
+    fn transcription_ready_without_transform_keeps_the_old_wire_shape() {
+        let json = serde_json::to_string(&Event::TranscriptionReady {
+            text: "hello".into(),
+            duration_secs: 1.5,
+            raw_text: None,
+            transform_failed: false,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"TranscriptionReady","text":"hello","duration_secs":1.5}"#
+        );
+    }
+
+    /// fgm.3: a changed transcript carries the raw one alongside, and
+    /// a failed transformation flags itself (D5d) — the two new keys
+    /// the renderer (fgm.4) will read.
+    #[test]
+    fn transcription_ready_serializes_raw_text_and_failure_flag() {
+        let json = serde_json::to_string(&Event::TranscriptionReady {
+            text: "Hello, world.".into(),
+            duration_secs: 2.0,
+            raw_text: Some("hello wrld".into()),
+            transform_failed: true,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"TranscriptionReady","text":"Hello, world.","duration_secs":2.0,"raw_text":"hello wrld","transform_failed":true}"#
         );
     }
 }

@@ -220,6 +220,8 @@ fn handle_event(
         Event::TranscriptionReady {
             text,
             duration_secs,
+            raw_text,
+            ..
         } => {
             tracing::info!("✅ Transcription: {}", text);
 
@@ -240,8 +242,10 @@ fn handle_event(
                 }
             }
 
-            // Store in history
-            canario.add_history(text, duration_secs, None);
+            // Store in history. fgm.3 D3: `text` is the canonical
+            // (transformed) transcript; the pre-transform text rides
+            // along only when a transformation changed it.
+            canario.add_history(text, duration_secs, None, raw_text);
         }
 
         Event::Error { message: err } => {

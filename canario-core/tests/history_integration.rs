@@ -44,6 +44,7 @@ fn make_entry(id: &str, text: &str) -> HistoryEntry {
         text: text.to_string(),
         duration_secs: 1.5,
         source_app: None,
+        raw_text: None,
     }
 }
 
@@ -63,8 +64,8 @@ fn add_assigns_unique_ids_and_persists() {
     let (_guard, history_file) = isolated_data_dir();
 
     let mut history = History::load();
-    history.add("hello world".into(), 1.0, None);
-    history.add("second entry".into(), 2.5, Some("firefox".into()));
+    history.add("hello world".into(), 1.0, None, None);
+    history.add("second entry".into(), 2.5, Some("firefox".into()), None);
 
     assert_eq!(history.entries.len(), 2);
     assert_ne!(history.entries[0].id, history.entries[1].id);
@@ -85,8 +86,8 @@ fn delete_removes_entry_and_persists() {
     let (_guard, _history_file) = isolated_data_dir();
 
     let mut history = History::load();
-    history.add("keep me".into(), 1.0, None);
-    history.add("delete me".into(), 1.0, None);
+    history.add("keep me".into(), 1.0, None, None);
+    history.add("delete me".into(), 1.0, None, None);
     let doomed_id = history.entries[1].id.clone();
 
     history.delete(&doomed_id);
@@ -104,7 +105,7 @@ fn delete_unknown_id_is_a_no_op() {
     let (_guard, _history_file) = isolated_data_dir();
 
     let mut history = History::load();
-    history.add("still here".into(), 1.0, None);
+    history.add("still here".into(), 1.0, None, None);
 
     history.delete("no-such-id");
 
@@ -116,8 +117,8 @@ fn clear_empties_history_and_persists() {
     let (_guard, history_file) = isolated_data_dir();
 
     let mut history = History::load();
-    history.add("one".into(), 1.0, None);
-    history.add("two".into(), 1.0, None);
+    history.add("one".into(), 1.0, None, None);
+    history.add("two".into(), 1.0, None, None);
 
     history.clear();
 
@@ -136,7 +137,7 @@ fn enforces_1000_entry_cap_dropping_oldest() {
 
     let mut history = History::load();
     for i in 0..1005 {
-        history.add(format!("entry {i}"), 0.5, None);
+        history.add(format!("entry {i}"), 0.5, None, None);
     }
 
     assert_eq!(history.entries.len(), 1000, "cap must hold at 1000");
@@ -223,4 +224,50 @@ fn history_json_round_trip_via_serde() {
     assert_eq!(loaded.entries.len(), 2);
     assert_eq!(loaded.entries[0].id, "a");
     assert_eq!(loaded.entries[1].source_app.as_deref(), Some("code"));
+}
+
+// ── raw_text (fgm.3 D3: stored only when a transformation changed it) ────
+
+#[test]
+fn add_persists_raw_text_only_when_it_differs() {
+    let (_guard, history_file) = isolated_data_dir();
+
+    let mut history = History::load();
+    history.add("Formal text.".into(), 1.0, None, Some("formal text".into()));
+    history.add("Plain dictation.".into(), 1.0, None, None);
+    history.add(
+        "Unchanged.".into(),
+        1.0,
+        None,
+        Some("Unchanged.".into()), // provider echoed the input back
+    );
+
+    // The differing raw transcript survives the disk round trip; the
+    // identical and absent ones store nothing.
+    let reloaded = History::load();
+    assert_eq!(reloaded.entries[0].text, "Formal text.");
+    assert_eq!(reloaded.entries[0].raw_text.as_deref(), Some("formal text"));
+    assert_eq!(reloaded.entries[1].raw_text, None);
+    assert_eq!(reloaded.entries[2].raw_text, None);
+    // The stored file carries the key only on the first entry.
+    let raw = std::fs::read_to_string(&history_file).unwrap();
+    assert!(raw.contains(r#""raw_text""#), "missing raw_text in {raw}");
+    assert_eq!(raw.matches(r#""raw_text""#).count(), 1);
+}
+
+#[test]
+fn pre_fgm3_history_files_without_raw_text_load() {
+    let (_guard, history_file) = isolated_data_dir();
+    std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &history_file,
+        r#"{"entries":[{"id":"old-1","timestamp":"2026-01-01T00:00:00Z","text":"old entry","duration_secs":1.0,"source_app":"firefox"}]}"#,
+    )
+    .unwrap();
+
+    let history = History::load();
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].text, "old entry");
+    assert_eq!(history.entries[0].source_app.as_deref(), Some("firefox"));
+    assert_eq!(history.entries[0].raw_text, None);
 }

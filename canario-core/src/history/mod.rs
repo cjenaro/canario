@@ -14,12 +14,20 @@ pub struct HistoryEntry {
     pub id: String,
     /// When the transcription happened (UTC)
     pub timestamp: DateTime<Utc>,
-    /// The transcribed text (after post-processing)
+    /// The final transcribed text (after post-processing AND
+    /// transformation, when one ran — fgm.3 D3: the canonical text the
+    /// user received).
     pub text: String,
     /// Duration of the recording in seconds
     pub duration_secs: f64,
     /// Source application (if detectable)
     pub source_app: Option<String>,
+    /// The pre-transformation transcript (fgm.3 D3), stored ONLY when
+    /// a transformation changed the text — `None` for raw dictations
+    /// (no storage doubling) and on transform failure. Old history
+    /// files without the field load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
 }
 
 /// The history store — manages a JSON file of entries.
@@ -75,13 +83,27 @@ impl History {
     }
 
     /// Add a new entry to the history.
-    pub fn add(&mut self, text: String, duration_secs: f64, source_app: Option<String>) {
+    ///
+    /// `raw_text` (fgm.3 D3) is stored only when it differs from
+    /// `text` — a caller that passes `Some(equal)` (e.g. a provider
+    /// echoing the input back unchanged) stores nothing extra.
+    pub fn add(
+        &mut self,
+        text: String,
+        duration_secs: f64,
+        source_app: Option<String>,
+        raw_text: Option<String>,
+    ) {
+        // D3: raw_text is stored only when it differs from the final
+        // text — no storage doubling for raw dictations.
+        let raw_text = raw_text.filter(|raw| raw != &text);
         let entry = HistoryEntry {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             text,
             duration_secs,
             source_app,
+            raw_text,
         };
         info!(
             "History entry added: {} ({:.1}s)",
@@ -127,5 +149,59 @@ impl History {
             .filter(|e| e.text.to_lowercase().contains(&query_lower))
             .cloned()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// fgm.3 D3: raw_text is stored ONLY when it differs from `text` —
+    /// history never doubles storage for raw dictations, and a
+    /// transformation that changed nothing stores nothing extra.
+    #[test]
+    fn add_stores_raw_text_only_when_different() {
+        let mut history = History::default();
+        history.add("formal text".into(), 1.0, None, Some("raw text".into()));
+        history.add("plain dictation".into(), 1.0, None, None);
+        history.add(
+            "unchanged".into(),
+            1.0,
+            None,
+            Some("unchanged".into()), // provider echoed the input back
+        );
+
+        assert_eq!(history.entries[0].raw_text.as_deref(), Some("raw text"));
+        assert_eq!(history.entries[1].raw_text, None);
+        assert_eq!(
+            history.entries[2].raw_text, None,
+            "an unchanged transcript must not be stored twice"
+        );
+    }
+
+    /// fgm.3: the field round-trips through JSON, and old entries
+    /// without it load as `None` (serde default keeps old history
+    /// files loading). `None` entries serialize WITHOUT the key — the
+    /// on-disk shape old builds already understand.
+    #[test]
+    fn raw_text_round_trips_and_old_entries_load() {
+        let mut history = History::default();
+        history.add("formal text".into(), 1.0, None, Some("raw text".into()));
+        history.add("plain".into(), 1.0, None, None);
+
+        let json = serde_json::to_string(&history).unwrap();
+        let reloaded: History = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.entries[0].raw_text.as_deref(), Some("raw text"));
+        assert_eq!(reloaded.entries[1].raw_text, None);
+
+        // A pre-fgm.3 file (no raw_text key anywhere) loads untouched.
+        let old = r#"{"entries":[{"id":"e1","timestamp":"2026-01-01T00:00:00Z","text":"old entry","duration_secs":1.0,"source_app":null}]}"#;
+        let old: History = serde_json::from_str(old).unwrap();
+        assert_eq!(old.entries.len(), 1);
+        assert_eq!(old.entries[0].raw_text, None);
+
+        // The serialized shape omits the key when unset.
+        let one = serde_json::to_string(&history.entries[1]).unwrap();
+        assert!(!one.contains("raw_text"), "{one}");
     }
 }

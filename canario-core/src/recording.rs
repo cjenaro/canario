@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
-use crate::config::ModelPaths;
+use crate::config::{ModelPaths, TransformSettings};
 use crate::event::Event;
 use crate::inference::postprocess::PostProcessor;
 use crate::mic_warm::{self, MicSession, MicVerdict};
@@ -139,12 +139,14 @@ impl RecordingHandle {
 /// Start recording from the microphone.
 ///
 /// Captures audio until `RecordingHandle::stop()` is called, then
-/// transcribes the entire buffer, applies post-processing, and sends
-/// events via `tx`.
+/// transcribes the entire buffer, applies post-processing, runs the
+/// LLM transformation pipeline when `transform.enabled` (fgm.3 D3 —
+/// before the `TranscriptionReady` event), and sends events via `tx`.
 pub fn start_recording(
     model_paths: ModelPaths,
     tx: std::sync::mpsc::Sender<Event>,
     post_processor: PostProcessor,
+    transform: TransformSettings,
     sound_effects: bool,
     sound_volume: f32,
 ) -> anyhow::Result<RecordingHandle> {
@@ -169,6 +171,7 @@ pub fn start_recording(
             tx.clone(),
             signal_clone,
             &post_processor,
+            transform,
             sound_effects,
             sound_volume,
             num_threads,
@@ -199,6 +202,7 @@ fn recording_loop(
     tx: std::sync::mpsc::Sender<Event>,
     signal: Arc<StopSignal>,
     post_processor: &PostProcessor,
+    transform: TransformSettings,
     sound_effects: bool,
     sound_volume: f32,
     num_threads: i32,
@@ -394,7 +398,11 @@ fn recording_loop(
     let audio_secs = audio_16k.len() as f64 / 16000.0;
     tracing::info!("Transcribing {:.1}s of audio...", audio_secs);
 
-    with_recognizer(&model_paths, num_threads, |recognizer| {
+    // The closure returns the raw transcript so post-processing and the
+    // fgm.3 transform pipeline run AFTER the recognizer cache lock is
+    // released — a provider call (up to `timeout_ms`, D5d) must never
+    // hold the decode cache hostage (live captions share it).
+    let transcript = with_recognizer(&model_paths, num_threads, |recognizer| {
         let rec_stream = recognizer.create_stream();
         rec_stream.accept_waveform(16000, &audio_16k);
         let decode_start = std::time::Instant::now();
@@ -413,29 +421,114 @@ fn recording_loop(
             },
         );
 
-        if let Some(result) = rec_stream.get_result() {
-            let raw_text = result.text.trim().to_string();
-            if !raw_text.is_empty() {
-                let text = post_processor.process(&raw_text);
-                tracing::info!(
-                    "✅ Transcription ({} chars): {}",
-                    text.chars().count(),
-                    text
-                );
-                timing::mark("transcript_ready");
-                let _ = tx.send(Event::TranscriptionReady {
-                    text,
-                    duration_secs: duration,
-                });
-            } else {
-                tracing::info!("(no speech detected)");
-            }
-        }
+        rec_stream
+            .get_result()
+            .map(|result| result.text.trim().to_string())
+            .filter(|text| !text.is_empty())
     })?;
+
+    match transcript {
+        Some(raw_transcript) => {
+            let transcript = post_processor.process(&raw_transcript);
+            tracing::info!(
+                "✅ Transcription ({} chars): {}",
+                transcript.chars().count(),
+                transcript
+            );
+            emit_transcription_ready(&tx, transcript, duration, &transform);
+        }
+        None => tracing::info!("(no speech detected)"),
+    }
 
     let _ = tx.send(Event::RecordingStopped);
     timing::mark("recording_stopped");
     Ok(())
+}
+
+// ── Transformation pipeline (fgm.3, fgm.1 D3/D5d) ─────────────────────
+//
+// Runs between the final decode and the TranscriptionReady event: the
+// event's `text` is the transformed transcript (what gets pasted and
+// stored — D3), with the raw transcript riding along as `raw_text`
+// only when it differs. On ANY failure — provider unreachable, HTTP
+// error, timeout, even failing to build the throwaway runtime — the
+// raw transcript flows on (D5d): dictation never blocks, audio is
+// never lost. Failures surface as a debug log plus the event's
+// `transform_failed` flag (fgm.4's fallback affordance); no Event
+// variant was added for this — one flag on the existing event keeps
+// the protocol minimal.
+
+/// Map [`crate::transform::apply_transformation`]'s reserved
+/// infrastructure error (the tokio runtime build failing): D5d applies
+/// here too — even that falls back to the raw transcript instead of
+/// blocking the dictation.
+fn infra_error_outcome(transcript: &str, err: anyhow::Error) -> crate::transform::TransformOutcome {
+    crate::transform::TransformOutcome::Raw {
+        text: transcript.to_owned(),
+        reason: crate::transform::RawReason::Provider(err.to_string()),
+    }
+}
+
+/// Transform `transcript` (the post-processed dictation — the text
+/// that would be pasted without a transformation) when `transform` is
+/// enabled, then emit [`Event::TranscriptionReady`].
+///
+/// The focused app and the in-memory credential are read here, at
+/// transform time: the paste that follows lands in whatever window is
+/// focused NOW, so the rule match and the paste target agree, and the
+/// credential store (D2) needs no threading through the recording API.
+fn emit_transcription_ready(
+    tx: &std::sync::mpsc::Sender<Event>,
+    transcript: String,
+    duration_secs: f64,
+    transform: &TransformSettings,
+) {
+    let mut text = transcript.clone();
+    let mut raw_text = None;
+    let mut transform_failed = false;
+
+    if transform.enabled {
+        let focused = crate::transform::focused_app();
+        let credential = crate::transform::credential();
+        timing::mark("transform_start");
+        let outcome = crate::transform::apply_transformation(
+            transform,
+            &transform.rules,
+            credential.as_deref(),
+            &transcript,
+            focused.as_deref(),
+        )
+        // D5d applies to the runtime too: even an infrastructure error
+        // falls back to raw instead of blocking the dictation.
+        .unwrap_or_else(|e| infra_error_outcome(&transcript, e));
+        timing::mark("transform_done");
+
+        match outcome {
+            crate::transform::TransformOutcome::Transformed(transformed) => {
+                // raw_text only when the transformation actually changed
+                // something (D3: no storage doubling for no-ops).
+                if transformed != transcript {
+                    raw_text = Some(transcript.clone());
+                    text = transformed;
+                }
+            }
+            crate::transform::TransformOutcome::Raw { text: raw, reason } => {
+                text = raw;
+                if reason.is_failure() {
+                    transform_failed = true;
+                }
+                tracing::debug!("transformation skipped: {}", reason);
+            }
+        }
+    }
+
+    timing::mark("transcript_ready");
+    let _ = tx.send(Event::TranscriptionReady {
+        text,
+        duration_secs,
+        raw_text,
+        transform_failed,
+    });
 }
 
 // ── Live captions ────────────────────────────────────────────────────
@@ -900,9 +993,12 @@ fn resolve_num_threads(configured: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{TransformProvider, TransformSettings};
     use crate::inference::validate::test_support::{
         model_paths_in, write_garbage_onnx_model, write_model_files, MINIMAL_ONNX,
     };
+    use crate::transform::test_support::{spawn_black_hole_server, spawn_one_shot_server};
+    use crate::transform::{TransformOutcome, TransformRule};
 
     #[test]
     #[ignore = "requires CANARIO_TEST_MODEL_DIR pointing to a downloaded model"]
@@ -1189,5 +1285,225 @@ mod tests {
             "signal during the third wait must wake it"
         );
         signaler.join().unwrap();
+    }
+
+    // ── Transformation pipeline emission (fgm.3 D3/D5d) ──────────────
+    //
+    // These drive `emit_transcription_ready` — the exact function the
+    // recording loop calls between the final decode and the event —
+    // with a live default rule so they are independent of the test
+    // machine's session (Wayland focused=None, X11 focused=Some both
+    // match a leading default rule). A full through-the-sidecar
+    // recording cannot be driven hermetically (it needs a microphone,
+    // a model download and actual speech); this seam is the pipeline's
+    // real production path minus the decode.
+
+    /// Everything on except the provider, which each test points where
+    /// it needs. The default rule leads so the focused app — whatever
+    /// this machine detects — always matches.
+    fn transform_settings(base_url: String, timeout_ms: u64) -> TransformSettings {
+        TransformSettings {
+            enabled: true,
+            provider: TransformProvider {
+                base_url,
+                model: "llama3".into(),
+            },
+            timeout_ms,
+            rules: vec![
+                TransformRule {
+                    app_match: String::new(),
+                    instruction: "be terse".into(),
+                },
+                TransformRule {
+                    app_match: "never-matches-xyzzy".into(),
+                    instruction: "unused".into(),
+                },
+            ],
+        }
+    }
+
+    /// D5d, the whole point: transform ENABLED but the provider is
+    /// unreachable (127.0.0.1:9 — the discard port, nothing listens)
+    /// with a short timeout — the TranscriptionReady event STILL flows,
+    /// with the raw transcript, no raw_text (nothing changed) and the
+    /// failure flag set for the fgm.4 fallback affordance.
+    #[test]
+    fn emit_transcription_ready_survives_an_unreachable_provider() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let settings = transform_settings("http://127.0.0.1:9/v1".into(), 250);
+
+        let started = Instant::now();
+        emit_transcription_ready(&tx, "hello world".into(), 1.25, &settings);
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Event::TranscriptionReady {
+                text,
+                duration_secs,
+                raw_text,
+                transform_failed,
+            }) => {
+                assert_eq!(text, "hello world", "the raw transcript must flow on");
+                assert_eq!(duration_secs, 1.25);
+                assert_eq!(raw_text, None, "nothing was transformed");
+                assert!(transform_failed, "D5d: the failure must be flagged");
+            }
+            other => panic!("expected TranscriptionReady, got {other:?}"),
+        }
+        // The refused connection (plus the clamped 250 ms timeout
+        // window) must not wedge the pipeline.
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// The happy path (D3): the provider's text becomes the event's
+    /// `text`, the pre-transform transcript rides along as `raw_text`
+    /// (only because it differs), and no failure is flagged.
+    #[test]
+    fn emit_transcription_ready_emits_transformed_text_with_raw() {
+        let (addr, captured) =
+            spawn_one_shot_server(r#"{"choices":[{"message":{"content":"Hello, world."}}]}"#);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let settings = transform_settings(format!("http://{addr}/v1"), 2000);
+
+        emit_transcription_ready(&tx, "hello wrld".into(), 2.0, &settings);
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Event::TranscriptionReady {
+                text,
+                raw_text,
+                transform_failed,
+                ..
+            }) => {
+                assert_eq!(text, "Hello, world.");
+                assert_eq!(raw_text.as_deref(), Some("hello wrld"));
+                assert!(!transform_failed);
+            }
+            other => panic!("expected TranscriptionReady, got {other:?}"),
+        }
+        // The provider really was asked: the request carried the
+        // rendered instruction + the transcript (D5b payload).
+        let (_headers, body) = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("be terse"), "system message: {system}");
+        assert_eq!(body["messages"][1]["content"], "hello wrld");
+    }
+
+    /// D5a: with the transform disabled the event is the plain raw
+    /// dictation — no provider call happens at all (proven against a
+    /// black-hole server: a call would have cost the 250 ms timeout),
+    /// no new fields fire.
+    #[test]
+    fn emit_transcription_ready_disabled_makes_no_provider_call() {
+        let addr = spawn_black_hole_server();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut settings = transform_settings(format!("http://{addr}/v1"), 250);
+        settings.enabled = false;
+
+        let started = Instant::now();
+        emit_transcription_ready(&tx, "raw dictation".into(), 1.0, &settings);
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Event::TranscriptionReady {
+                text,
+                raw_text,
+                transform_failed,
+                ..
+            }) => {
+                assert_eq!(text, "raw dictation");
+                assert_eq!(raw_text, None);
+                assert!(!transform_failed);
+            }
+            other => panic!("expected TranscriptionReady, got {other:?}"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "a disabled transform must not pay the provider timeout (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    /// A transformation that returns the transcript unchanged must not
+    /// double-store it (D3): raw_text stays `None` when nothing
+    /// differs, and the event is not flagged as failed.
+    #[test]
+    fn emit_transcription_ready_noop_transformation_carries_no_raw() {
+        let (addr, _captured) =
+            spawn_one_shot_server(r#"{"choices":[{"message":{"content":"same text"}}]}"#);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let settings = transform_settings(format!("http://{addr}/v1"), 2000);
+
+        emit_transcription_ready(&tx, "same text".into(), 1.0, &settings);
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Event::TranscriptionReady {
+                text,
+                raw_text,
+                transform_failed,
+                ..
+            }) => {
+                assert_eq!(text, "same text");
+                assert_eq!(raw_text, None, "nothing changed — no raw_text");
+                assert!(!transform_failed);
+            }
+            other => panic!("expected TranscriptionReady, got {other:?}"),
+        }
+    }
+
+    /// D5d, timeout flavor: a provider that accepts but never answers
+    /// is cut off at the timeout and the raw transcript still flows —
+    /// dictation waits at most `timeout_ms`, never forever.
+    #[test]
+    fn emit_transcription_ready_times_out_to_raw() {
+        let addr = spawn_black_hole_server();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let settings = transform_settings(format!("http://{addr}/v1"), 250);
+
+        let started = Instant::now();
+        emit_transcription_ready(&tx, "hello world".into(), 1.0, &settings);
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Event::TranscriptionReady {
+                text,
+                raw_text,
+                transform_failed,
+                ..
+            }) => {
+                assert_eq!(text, "hello world");
+                assert_eq!(raw_text, None);
+                assert!(transform_failed, "a timeout is a flagged failure");
+            }
+            other => panic!("expected TranscriptionReady, got {other:?}"),
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "returned after {elapsed:?} — before the timeout could fire"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "returned after {elapsed:?} — the timeout did not bound the pipeline"
+        );
+    }
+
+    /// The infrastructure-error mapping (`apply_transformation`'s
+    /// reserved `Err` — the tokio runtime build failing): even that
+    /// maps to a flagged raw event, never a lost dictation. The Err
+    /// itself cannot be forced hermetically, so this pins the exact
+    /// `infra_error_outcome` helper the emit path wires in.
+    #[test]
+    fn infra_error_outcome_maps_to_a_flagged_raw_event() {
+        let outcome = infra_error_outcome(
+            "hello world",
+            anyhow::anyhow!("failed to init tokio runtime"),
+        );
+        let TransformOutcome::Raw { text, reason } = outcome else {
+            panic!("infra errors map to Raw");
+        };
+        assert_eq!(text, "hello world");
+        assert!(reason.is_failure());
+        assert_eq!(
+            reason.to_string(),
+            "transform failed: failed to init tokio runtime"
+        );
     }
 }

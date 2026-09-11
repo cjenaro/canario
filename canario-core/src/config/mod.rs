@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::inference::postprocess::PostProcessor;
+use crate::transform::TransformRule;
 
 /// Current config schema version. Bump when making breaking changes.
 pub const CONFIG_VERSION: u32 = 1;
@@ -242,11 +243,11 @@ pub struct TransformSettings {
     /// (D5d — enforced where the pipeline lands, canario-fgm.3/4).
     pub timeout_ms: u64,
 
-    /// Placeholder array for per-app transformation rules. The
-    /// semantics are owned by canario-fgm.3, so entries are kept as
-    /// raw JSON that round-trips untouched instead of guessing the
-    /// rule shape here.
-    pub rules: Vec<serde_json::Value>,
+    /// Per-app transformation rules (fgm.3): first match wins,
+    /// case-insensitive substring of the focused-app identifier against
+    /// `app_match`; the empty `app_match` is the default (catch-all)
+    /// rule. See `canario_core::transform::match_rule`.
+    pub rules: Vec<TransformRule>,
 }
 
 impl Default for TransformSettings {
@@ -966,7 +967,9 @@ mod tests {
     #[test]
     fn parses_transform_block() {
         // Explicit block parses with the D1 wire shape (enabled,
-        // provider{base_url,model}, timeout_ms, rules).
+        // provider{base_url,model}, timeout_ms, rules) — rules are the
+        // fgm.3 shape: {app_match, instruction}, empty app_match = the
+        // default rule.
         let json = r#"{
             "transform": {
                 "enabled": true,
@@ -975,7 +978,10 @@ mod tests {
                     "model": "llama3"
                 },
                 "timeout_ms": 1500,
-                "rules": [ { "app": "firefox", "instruction": "be terse" } ]
+                "rules": [
+                    { "app_match": "firefox", "instruction": "be terse" },
+                    { "app_match": "", "instruction": "tidy everything" }
+                ]
             }
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
@@ -986,13 +992,52 @@ mod tests {
         );
         assert_eq!(config.transform.provider.model, "llama3");
         assert_eq!(config.transform.timeout_ms, 1500);
-        // Placeholder rules round-trip untouched (fgm.3 owns semantics).
         assert_eq!(
             config.transform.rules,
-            vec![serde_json::json!({ "app": "firefox", "instruction": "be terse" })]
+            vec![
+                TransformRule {
+                    app_match: "firefox".into(),
+                    instruction: "be terse".into()
+                },
+                TransformRule {
+                    app_match: String::new(),
+                    instruction: "tidy everything".into()
+                },
+            ]
         );
         // Untouched fields fall back to defaults
         assert_eq!(config.model, ModelVariant::ParakeetV3);
+    }
+
+    #[test]
+    fn transform_rules_placeholder_shapes_still_load() {
+        // fgm.2 shipped rules as raw JSON placeholders; those entries
+        // deserialize without quarantining the whole config — old files
+        // keep loading. The placeholder `instruction` field happens to
+        // match the real shape (it becomes a working default rule's
+        // instruction); only the unknown `app` key is ignored.
+        let config: AppConfig = serde_json::from_str(
+            r#"{ "transform": { "rules": [ { "app": "firefox", "instruction": "be terse" } ] } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.transform.rules,
+            vec![TransformRule {
+                app_match: String::new(),
+                instruction: "be terse".into()
+            }]
+        );
+        // A rule with only one field set keeps it, defaults the other.
+        let config: AppConfig =
+            serde_json::from_str(r#"{ "transform": { "rules": [ { "app_match": "vim" } ] } }"#)
+                .unwrap();
+        assert_eq!(
+            config.transform.rules,
+            vec![TransformRule {
+                app_match: "vim".into(),
+                instruction: String::new()
+            }]
+        );
     }
 
     #[test]
@@ -1017,12 +1062,21 @@ mod tests {
                     model: "gpt-4o-mini".into(),
                 },
                 timeout_ms: 2500,
-                rules: vec![serde_json::json!({ "placeholder": true })],
+                rules: vec![
+                    TransformRule {
+                        app_match: "whatsapp".into(),
+                        instruction: "be informal".into(),
+                    },
+                    TransformRule {
+                        app_match: String::new(),
+                        instruction: "tidy everything".into(),
+                    },
+                ],
             },
             ..AppConfig::default()
         };
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains(r#""transform":{"enabled":true,"provider":{"base_url":"https://api.openai.com/v1","model":"gpt-4o-mini"},"timeout_ms":2500,"rules":[{"placeholder":true}]}"#));
+        assert!(json.contains(r#""transform":{"enabled":true,"provider":{"base_url":"https://api.openai.com/v1","model":"gpt-4o-mini"},"timeout_ms":2500,"rules":[{"app_match":"whatsapp","instruction":"be informal"},{"app_match":"","instruction":"tidy everything"}]}"#));
         let loaded: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.transform, config.transform);
     }
@@ -1050,7 +1104,10 @@ mod tests {
                     model: "qwen".into(),
                 },
                 timeout_ms: 4000,
-                rules: vec![serde_json::json!({ "app": "vim" })],
+                rules: vec![TransformRule {
+                    app_match: "vim".into(),
+                    instruction: String::new(),
+                }],
             },
             ..AppConfig::default()
         })
@@ -1060,13 +1117,19 @@ mod tests {
             "enabled": false,
             "provider": { "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini" },
             "timeout_ms": 4000,
-            "rules": [{ "app": "vim" }]
+            "rules": [{ "app_match": "vim", "instruction": "code comments only" }]
         });
         let merged: AppConfig = serde_json::from_value(merged).unwrap();
         assert!(!merged.transform.enabled);
         assert_eq!(merged.transform.provider.model, "gpt-4o-mini");
-        // The rules entry survived because the FULL block travelled.
-        assert_eq!(merged.transform.rules.len(), 1);
+        // The rules entry survived because the FULL block travelled…
+        assert_eq!(
+            merged.transform.rules,
+            vec![TransformRule {
+                app_match: "vim".into(),
+                instruction: "code comments only".into()
+            }]
+        );
 
         // A PARTIAL block resets unmentioned subfields — which is why
         // the renderer always sends every key.

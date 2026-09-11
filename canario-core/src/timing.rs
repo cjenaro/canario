@@ -33,7 +33,8 @@
 //! | `resample_start` / `resample_done` | `recording` | resample to 16 kHz |
 //! | `recognizer_load_start` / `recognizer_load_done` | `recording` | model load on cache miss (cold dictation) |
 //! | `decode_start` / `decode_end` | `recording` | final whole-buffer decode |
-//! | `transcript_ready` | `recording` | `TranscriptionReady` about to be sent |
+//! | `transform_start` / `transform_done` | `recording` | LLM transformation pipeline (fgm.3; only when `transform.enabled` — includes rule match, focused-app probe and the bounded provider call) |
+//! | `transcript_ready` | `recording` | `TranscriptionReady` about to be sent (after the transform, so release-to-transcript still measures to the real emission) |
 //! | `paste_start` / `paste_done` | [`crate::paste_text`] | native paste (clipboard + injection) |
 //! | `sidecar_cmd_*` / `sidecar_event_*` | `canario-electron` | sidecar observed a command / forwarded an event |
 //! | `electron:paste_*` | Electron main | auto-paste in the real app |

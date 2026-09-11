@@ -231,12 +231,16 @@ fn main() -> anyhow::Result<()> {
             // Special handling: auto-add transcription to history
             // Note: auto-paste is handled by the Electron main process, not the sidecar.
             // The sidecar only adds to history here.
+            // fgm.3 D3: `text` is the canonical (transformed) transcript;
+            // `raw_text` rides along only when a transformation changed it.
             if let canario_core::Event::TranscriptionReady {
                 ref text,
                 duration_secs,
+                ref raw_text,
+                ..
             } = event
             {
-                event_tx_canario.add_history(text.clone(), duration_secs, None);
+                event_tx_canario.add_history(text.clone(), duration_secs, None, raw_text.clone());
             }
             if let Some(stage) = event_timing_stage(&event) {
                 canario_core::timing::mark(stage);
@@ -552,42 +556,24 @@ fn handle_command(
 
 // ── Transform provider plumbing (canario-fgm.1 D1/D2, canario-fgm.2) ─────────
 //
-// Hook points for the LLM transform feature. The dictation pipeline
-// itself is canario-fgm.3/4 — nothing here touches recording.
+// Hook points for the LLM transform feature. fgm.3 moved the in-memory
+// credential store INTO canario-core (`canario_core::transform`), so
+// the recording pipeline — which runs in this same process — reads the
+// key without threading it through the recording API. The thin
+// wrappers below keep the sidecar's command loop and redaction reading
+// one source of truth.
 
-/// In-memory copy of the transform provider API key (D2). Arrives via
-/// `set_transform_credential` (pushed by the Electron main process,
-/// which persists it via safeStorage), is read by `transform_test` and
-/// (from fgm.3) the transform pipeline. NEVER persisted: not to
-/// config.json, not to logs (every payload-derived log line runs
-/// through `redact_for_log`), not to diagnostics.
-static TRANSFORM_CREDENTIAL: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
-    std::sync::OnceLock::new();
-
-fn transform_credential_lock() -> &'static std::sync::Mutex<Option<String>> {
-    TRANSFORM_CREDENTIAL.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-/// Clone of the currently held key, if any. Callers must treat the
-/// value as a secret: use it in request headers, never in logs or
+/// Clone of the currently held key, if any (D2). Callers must treat
+/// the value as a secret: use it in request headers, never in logs or
 /// serialized output.
 fn transform_credential() -> Option<String> {
-    transform_credential_lock()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
+    canario_core::transform::credential()
 }
 
 /// Store (`Some` non-empty) or drop (`None`/blank) the credential.
 /// Returns whether a key is held afterwards.
 fn set_transform_credential(key: Option<&str>) -> bool {
-    let stored = key
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .map(str::to_owned);
-    let mut guard = transform_credential_lock().lock().unwrap();
-    *guard = stored;
-    guard.is_some()
+    canario_core::transform::set_credential(key)
 }
 
 /// Redact credential-bearing fields from a raw command line before it
