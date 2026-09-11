@@ -3,9 +3,11 @@
 // NOT a toast: the condition survives restarts until the user acts on
 // it, so the guidance must too.
 import { showToast } from "./Toast";
+import { t } from "../i18n";
 import type { HotkeyStatusInfo } from "../primitives/hotkeyStatus";
 
-/** Fallback shown if the sidecar ever omits fix_command unexpectedly. */
+/** Fallback shown if the sidecar ever omits fix_command unexpectedly.
+ *  Deliberately NOT translated: it's a shell command, not prose. */
 const DEFAULT_FIX_COMMAND = "sudo usermod -aG input $USER";
 
 export function HotkeyPermissionNotice(props: { status: HotkeyStatusInfo }) {
@@ -14,9 +16,9 @@ export function HotkeyPermissionNotice(props: { status: HotkeyStatusInfo }) {
   async function copyCommand() {
     try {
       await navigator.clipboard.writeText(command());
-      showToast("Command copied to clipboard", "success", 3000);
+      showToast(t("hotkey.notice.commandCopied"), "success", 3000);
     } catch {
-      showToast("Could not copy — select the command text and copy it manually", "error", 6000);
+      showToast(t("hotkey.notice.copyFailed"), "error", 6000);
     }
   }
 
@@ -31,12 +33,10 @@ export function HotkeyPermissionNotice(props: { status: HotkeyStatusInfo }) {
       <span class="text-lg leading-none mt-0.5">⌨️</span>
       <div class="flex-1">
         <p class="text-sm font-medium" style={{ color: "var(--warning)" }}>
-          Hotkey can’t read your keyboard yet
+          {t("hotkey.notice.title")}
         </p>
         <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-          On Linux, Canario listens for the global hotkey through /dev/input, and your user
-          isn’t in the “input” group — so the hotkey stays silent. Recording still works from
-          the button above, the tray, or an external trigger such as{" "}
+          {t("hotkey.notice.body")}{" "}
           <code>canario-cli --toggle-external</code>.
         </p>
         <div class="mt-2 flex items-center gap-2">
@@ -59,18 +59,18 @@ export function HotkeyPermissionNotice(props: { status: HotkeyStatusInfo }) {
               border: "1px solid var(--border)",
             }}
             onClick={() => void copyCommand()}
-            title="Copy the command to the clipboard"
+            title={t("hotkey.notice.copyTitle")}
           >
-            📋 Copy
+            {t("common.copyButton")}
           </button>
         </div>
         <ol
           class="text-xs mt-2 space-y-0.5 list-decimal list-inside"
           style={{ color: "var(--text-secondary)" }}
         >
-          <li>Copy the command and run it in a terminal.</li>
-          <li>Log out and back in — group membership only applies to new sessions.</li>
-          <li>Start Canario again.</li>
+          <li>{t("hotkey.notice.step1")}</li>
+          <li>{t("hotkey.notice.step2")}</li>
+          <li>{t("hotkey.notice.step3")}</li>
         </ol>
       </div>
     </div>

@@ -15,8 +15,22 @@ export interface MicDevice {
 /** The dropdown/config sentinel for "no preference — use the system default". */
 export const SYSTEM_DEFAULT_INPUT_DEVICE = "";
 
-/** Label of the dropdown's first option. */
+/** Default label of the dropdown's first option (English — i18n callers
+ *  override via micDropdownOptions' labels parameter; the default keeps
+ *  this module's node tests free of any i18n dependency). */
 export const SYSTEM_DEFAULT_OPTION_LABEL = "System default";
+
+/** Dropdown label strings — supplied by the caller (the i18n catalog in
+ *  MicSection); the English defaults below keep this module standalone. */
+export interface MicOptionLabels {
+  systemDefault: string;
+  notConnected: (name: string) => string;
+}
+
+export const DEFAULT_MIC_OPTION_LABELS: MicOptionLabels = {
+  systemDefault: SYSTEM_DEFAULT_OPTION_LABEL,
+  notConnected: (name) => `${name} (not connected)`,
+};
 
 /**
  * Extract the input-device names from a list_audio_devices response.
@@ -70,9 +84,13 @@ export interface MicDeviceOption {
  * shows the wrong row, and the core falls back to the system default
  * while it stays missing.
  */
-export function micDropdownOptions(devices: MicDevice[], selected?: string): MicDeviceOption[] {
+export function micDropdownOptions(
+  devices: MicDevice[],
+  selected?: string,
+  labels: MicOptionLabels = DEFAULT_MIC_OPTION_LABELS,
+): MicDeviceOption[] {
   const options: MicDeviceOption[] = [
-    { value: SYSTEM_DEFAULT_INPUT_DEVICE, label: SYSTEM_DEFAULT_OPTION_LABEL },
+    { value: SYSTEM_DEFAULT_INPUT_DEVICE, label: labels.systemDefault },
     ...devices.map((d) => ({ value: d.name, label: d.name })),
   ];
   if (
@@ -80,7 +98,7 @@ export function micDropdownOptions(devices: MicDevice[], selected?: string): Mic
     selected !== SYSTEM_DEFAULT_INPUT_DEVICE &&
     !devices.some((d) => d.name === selected)
   ) {
-    options.push({ value: selected, label: `${selected} (not connected)` });
+    options.push({ value: selected, label: labels.notConnected(selected) });
   }
   return options;
 }

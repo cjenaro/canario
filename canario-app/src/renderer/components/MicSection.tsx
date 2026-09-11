@@ -7,7 +7,8 @@
 // primitives/micDevice.ts. Re-enumerates when the section opens so
 // hotplug (USB plug, Bluetooth connect) is reflected.
 import { For, onMount } from "solid-js";
-import { micDropdownOptions, type MicDevice } from "../primitives/micDevice";
+import { t } from "../i18n";
+import { micDropdownOptions, type MicDevice, type MicOptionLabels } from "../primitives/micDevice";
 
 interface Props {
   /** Enumerated devices (list_audio_devices; empty = default only). */
@@ -20,6 +21,14 @@ interface Props {
   onRefresh: () => void;
 }
 
+/** Dropdown labels from the i18n catalog (see primitives/micDevice.ts
+ *  for why the primitive takes them as a parameter). Built per call so
+ *  the strings re-resolve if the locale ever changes. */
+const micLabels = (): MicOptionLabels => ({
+  systemDefault: t("mic.systemDefault"),
+  notConnected: (name) => t("mic.notConnected", { name }),
+});
+
 export function MicSection(props: Props) {
   // Re-enumerate on section open: the device list changes with
   // hotplug between settings visits.
@@ -29,9 +38,9 @@ export function MicSection(props: Props) {
     <div class="flex flex-col gap-2">
       <div class="flex items-center justify-between">
         <div>
-          <p class="text-sm font-medium">Dictation microphone</p>
+          <p class="text-sm font-medium">{t("mic.title")}</p>
           <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Which input device Canario records from
+            {t("mic.desc")}
           </p>
         </div>
         <select
@@ -45,14 +54,13 @@ export function MicSection(props: Props) {
           value={props.selected}
           onChange={(e) => props.onDeviceChange(e.currentTarget.value)}
         >
-          <For each={micDropdownOptions(props.devices, props.selected)}>
+          <For each={micDropdownOptions(props.devices, props.selected, micLabels())}>
             {(option) => <option value={option.value}>{option.label}</option>}
           </For>
         </select>
       </div>
       <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-        Switching releases the warm microphone stream and reopens it on the new device at the next
-        dictation.
+        {t("mic.note")}
       </p>
     </div>
   );

@@ -63,13 +63,33 @@ export function nextOverlayStatusOnPush(
   return null;
 }
 
-/** Island label for a busy phase, or null when there is none to show. */
-export function overlayBusyLabel(status: OverlayStatus): string | null {
+/**
+ * Island label for a busy phase, or null when there is none to show.
+ *
+ * `labels` defaults to English so this module stays pure and
+ * node-testable; OverlayPage passes the i18n catalog's overlay labels
+ * so a future locale localizes the pill without this file knowing
+ * about i18n.
+ */
+export interface OverlayBusyLabels {
+  transcribing: string;
+  transforming: string;
+}
+
+export const DEFAULT_OVERLAY_BUSY_LABELS: OverlayBusyLabels = {
+  transcribing: "Transcribing…",
+  transforming: "Transforming…",
+};
+
+export function overlayBusyLabel(
+  status: OverlayStatus,
+  labels: OverlayBusyLabels = DEFAULT_OVERLAY_BUSY_LABELS,
+): string | null {
   switch (status) {
     case "transcribing":
-      return "Transcribing…";
+      return labels.transcribing;
     case "transforming":
-      return "Transforming…";
+      return labels.transforming;
     default:
       return null;
   }

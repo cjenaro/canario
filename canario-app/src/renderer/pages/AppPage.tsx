@@ -2,6 +2,7 @@
 // Phase 2: Polish - animations, error states, empty states, autostart
 import { createSignal, Show, For, onMount, onCleanup, createEffect } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
+import { t, type MessageKey } from "../i18n";
 import { useAppState } from "../state/context";
 import { createCanario } from "../primitives/createCanario";
 import { HotkeyCapture, toAccelerator } from "../components/HotkeyCapture";
@@ -64,14 +65,28 @@ import {
 } from "../primitives/micDevice";
 import { isTransformedHistoryEntry } from "../primitives/historyEntry";
 
+// Display name/description live in the i18n catalog (canario-7ah.7);
+// ids are the AppConfig model identifiers and stay literal.
 const MODELS = [
-  { id: "ParakeetV3", name: "Parakeet TDT v3", desc: "Multilingual · ~640MB" },
-  { id: "ParakeetV2", name: "Parakeet TDT v2", desc: "English only · ~640MB" },
-] as const;
+  { id: "ParakeetV3", nameKey: "model.parakeetV3.name", descKey: "model.parakeetV3.desc" },
+  { id: "ParakeetV2", nameKey: "model.parakeetV2.name", descKey: "model.parakeetV2.desc" },
+] as const satisfies ReadonlyArray<{ id: string; nameKey: MessageKey; descKey: MessageKey }>;
 
 // Local-only variant — no download; core resolves custom_*_path files.
-const CUSTOM_MODEL = { id: CUSTOM_MODEL_ID, name: "Custom model", desc: "Local sherpa-onnx files · no download" };
+const CUSTOM_MODEL = {
+  id: CUSTOM_MODEL_ID,
+  nameKey: "model.custom.name",
+  descKey: "model.custom.desc",
+} as const satisfies { id: string; nameKey: MessageKey; descKey: MessageKey };
 const ALL_MODELS = [...MODELS, CUSTOM_MODEL];
+
+// i18n keys for the three custom-model path fields (labels render
+// capitalized via CSS — see the capitalize class on the <span>).
+const CUSTOM_FIELD_LABEL_KEYS = {
+  encoder: "model.custom.field.encoder",
+  decoder: "model.custom.field.decoder",
+  tokens: "model.custom.field.tokens",
+} as const satisfies Record<keyof CustomModelPaths, MessageKey>;
 
 // raw_text: optional pre-transform transcript (fgm.1 D3) — the sidecar
 // stores it ONLY when it differs from the canonical `text`; absent on
@@ -168,13 +183,13 @@ export function AppPage() {
     try {
       const response = await canario.command("diagnostics");
       if (response?.ok !== true || !response.data || typeof response.data !== "object") {
-        showToast("Could not collect diagnostics. Check that the sidecar is running.", "error");
+        showToast(t("about.diagnostics.collectFailed"), "error");
         return;
       }
       await navigator.clipboard.writeText(JSON.stringify(response.data, null, 2));
-      showToast("Diagnostics copied to clipboard", "success", 3000);
+      showToast(t("about.diagnostics.copied"), "success", 3000);
     } catch {
-      showToast("Could not copy diagnostics to the clipboard", "error");
+      showToast(t("about.diagnostics.copyFailed"), "error");
     } finally {
       setCopyingDiagnostics(false);
     }
@@ -188,10 +203,10 @@ export function AppPage() {
         setUpdateAvailable(true);
         setUpdateVersion(result.version || "?");
       } else {
-        showToast("Canario is up to date", "success", 3000);
+        showToast(t("about.upToDate"), "success", 3000);
       }
     } catch {
-      showToast("Could not check for updates", "error");
+      showToast(t("about.updateCheckFailed"), "error");
     }
     setUpdateChecking(false);
   }
@@ -369,23 +384,23 @@ export function AppPage() {
 
       // 5. Get version info
       const ver = await canario.getVersion();
-      if (ver) setAppVersion(ver.electron + (ver.sidecar ? ` (sidecar ${ver.sidecar})` : ""));
+      if (ver) setAppVersion(ver.sidecar ? t("about.version.withSidecar", { app: ver.electron, sidecar: ver.sidecar }) : ver.electron);
       // Protocol/version skew must be loud, not silent feature loss
       // (canario-dmp.4): persistent About banner + tray tooltip.
       if (ver?.protocolMismatch) {
         setVersionWarning(
           ver.protocol === null
-            ? "The speech backend predates protocol versioning — commands and events may have drifted. Restart with a matching build."
-            : `App and speech backend speak different protocol versions (backend reports ${ver.protocol}). Restart with a matching build.`
+            ? t("about.versionMismatch.noProtocol")
+            : t("about.versionMismatch.protocol", { protocol: String(ver.protocol) })
         );
       } else if (ver?.mismatch && ver.sidecar) {
         setVersionWarning(
-          `Speech backend ${ver.sidecar} does not match app ${ver.electron} — a stale backend may be running. Restart Canario.`
+          t("about.versionMismatch.staleSidecar", { sidecar: ver.sidecar, app: ver.electron })
         );
       }
     } catch (err) {
       console.error("[AppPage] init error:", err);
-      showToast("Failed to initialize. Check that canario-electron sidecar is running.", "error", 8000);
+      showToast(t("errors.initFailed.electron"), "error", 8000);
     }
     setLoading(false);
   });
@@ -433,7 +448,7 @@ export function AppPage() {
   onMount(() => {
     const unsub = canario.onTransformFallback((event) => {
       if (shouldShowTransformFallbackToast(transformSettings().enabled, event)) {
-        showToast("Transformation fell back to the raw transcript", "warning", 5000);
+        showToast(t("transform.fellBack"), "warning", 5000);
       }
     });
     onCleanup(unsub);
@@ -442,9 +457,9 @@ export function AppPage() {
   async function handleToggle() {
     const res = await canario.toggleRecording();
     if (res && !res.ok) {
-      const errMsg = (res.error as string) || "Recording failed";
+      const errMsg = (res.error as string) || t("record.failed");
       if (errMsg.toLowerCase().includes("no mic") || errMsg.toLowerCase().includes("microphone") || errMsg.toLowerCase().includes("audio")) {
-        showToast("No microphone detected. Check your audio settings.", "error", 6000);
+        showToast(t("record.noMic"), "error", 6000);
       } else {
         showToast(errMsg, "error");
       }
@@ -479,7 +494,7 @@ export function AppPage() {
     // already running) returns the machine to idle — surface the reason
     // the same way handleToggle reports command errors.
     if (res && !res.ok) {
-      showToast((res.error as string) || "Download failed to start", "error");
+      showToast((res.error as string) || t("model.downloadStartFailed"), "error");
     }
   }
 
@@ -510,11 +525,11 @@ export function AppPage() {
       setAutostart(value);
       const ok = await canario.setAutostart(value);
       if (!ok) {
-        showToast("Could not change autostart setting.", "warning");
+        showToast(t("behavior.autostart.failed"), "warning");
         setAutostart(!value);
         return;
       }
-      showToast(value ? "Canario will start on login" : "Autostart disabled", "info", 3000);
+      showToast(value ? t("behavior.autostart.enabled") : t("behavior.autostart.disabled"), "info", 3000);
       return;
     }
     const ok = await canario.updateConfig({ [field]: value });
@@ -522,7 +537,7 @@ export function AppPage() {
       // Truthful ack (canario-dmp.7): the write failed. The Toggle is
       // controlled and its signal hasn't moved, so it simply stays where
       // it was — no revert code needed.
-      showToast("Could not save setting.", "warning");
+      showToast(t("common.couldNotSaveSetting"), "warning");
       return;
     }
     if (field === "auto_paste") setAutoPaste(value);
@@ -531,7 +546,7 @@ export function AppPage() {
     if (field === "show_tray_icon") {
       setShowTrayIcon(value);
       if (!value) {
-        showToast("Tray icon hidden — relaunch Canario to reopen this window", "info", 5000);
+        showToast(t("behavior.trayIcon.hidden"), "info", 5000);
       }
     }
   }
@@ -561,7 +576,7 @@ export function AppPage() {
     if (!ok) {
       // Truthful ack (canario-dmp.7): keep showing what's persisted.
       setInputDevice(previous);
-      showToast("Could not save microphone selection.", "warning");
+      showToast(t("mic.saveFailed"), "warning");
     }
   }
 
@@ -626,16 +641,20 @@ export function AppPage() {
     const res = await canario.setTransformKey(action === "store" ? key : "");
     if (res?.ok) {
       setTransformCredentialPresent(res.stored);
-      showToast(res.stored ? "API key saved" : "API key removed", "success", 2500);
+      showToast(res.stored ? t("transform.keySaved") : t("transform.keyRemoved"), "success", 2500);
     } else {
-      showToast(res?.error || "Could not save the API key — try again", "error");
+      showToast(res?.error || t("transform.keySaveFailed"), "error");
     }
     // Sync with the sidecar's own view (covers clear-after-failure etc.).
     void refreshTransformStatus();
   }
 
   async function handleTransformTest(): Promise<TransformTestState> {
-    return transformTestResultFromResponse(await canario.transformTest());
+    return transformTestResultFromResponse(await canario.transformTest(), {
+      unreachable: t("transform.test.unreachable"),
+      unexpected: t("transform.test.unexpected"),
+      failed: t("transform.test.failed"),
+    });
   }
 
   async function handleDeleteHistory(id: string) {
@@ -646,7 +665,7 @@ export function AppPage() {
     if (!ok) {
       // Truthful ack (canario-dmp.7): the entry survived — loadHistory
       // below restores it.
-      showToast("Could not delete entry.", "warning");
+      showToast(t("history.deleteFailed"), "warning");
     }
     await loadHistory();
     setDeletingIds(prev => {
@@ -659,7 +678,7 @@ export function AppPage() {
   async function handleClearHistory() {
     await canario.clearHistory();
     setHistory([]);
-    showToast("History cleared", "info", 2000);
+    showToast(t("history.cleared"), "info", 2000);
   }
 
   async function handleModeChange(mode: ThemeMode) {
@@ -697,7 +716,7 @@ export function AppPage() {
     if (!ok) {
       // Truthful ack (canario-dmp.7): keep showing what's persisted.
       setIndicator(previous);
-      showToast("Could not save indicator setting.", "warning");
+      showToast(t("indicator.saveFailed"), "warning");
     }
   }
 
@@ -782,7 +801,7 @@ export function AppPage() {
           <Show when={state().status === "recording"}>
             <div class="flex items-center gap-1.5">
               <div class="w-2.5 h-2.5 rounded-full animate-pulse-dot" style={{ "background-color": "var(--recording-dot)" }} />
-              <span class="text-sm font-medium" style={{ color: "var(--recording-dot)" }}>REC</span>
+              <span class="text-sm font-medium" style={{ color: "var(--recording-dot)" }}>{t("common.rec")}</span>
             </div>
           </Show>
           <Show when={state().status === "idle" && context().modelReady}>
@@ -791,7 +810,7 @@ export function AppPage() {
               style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
               onClick={handleToggle}
             >
-              🎤 Record
+              {t("record.recordButton")}
             </button>
           </Show>
         </div>
@@ -801,7 +820,7 @@ export function AppPage() {
         <div class="flex items-center justify-center h-64">
           <div class="flex flex-col items-center gap-3">
             <div class="w-6 h-6 rounded-full border-2 border-t-transparent animate-spin" style={{ "border-color": "var(--accent)", "border-top-color": "transparent" }} />
-            <p class="text-sm" style={{ color: "var(--text-secondary)" }}>Loading...</p>
+            <p class="text-sm" style={{ color: "var(--text-secondary)" }}>{t("common.loading")}</p>
           </div>
         </div>
       }>
@@ -809,7 +828,7 @@ export function AppPage() {
 
           {/* ── Model section ─────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Model</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("model.sectionTitle")}</h2>
 
             <div class="flex flex-col gap-2 mb-4">
               <For each={ALL_MODELS}>
@@ -823,8 +842,8 @@ export function AppPage() {
                     onClick={() => handleSelectModel(model.id)}
                   >
                     <div class="text-left">
-                      <p class="text-sm font-medium">{model.name}</p>
-                      <p class="text-xs mt-0.5" style={{ color: "var(--text-secondary)" }}>{model.desc}</p>
+                      <p class="text-sm font-medium">{t(model.nameKey)}</p>
+                      <p class="text-xs mt-0.5" style={{ color: "var(--text-secondary)" }}>{t(model.descKey)}</p>
                     </div>
                     <div class="flex items-center gap-2">
                       <Show when={downloadedModels().has(model.id)}>
@@ -851,19 +870,19 @@ export function AppPage() {
                    sherpa-onnx paths instead. */
                 <div class="flex flex-col gap-3">
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                    Point Canario at your own sherpa-onnx files. joiner.int8.onnx must sit next to the encoder.
+                    {t("model.custom.hint")}
                   </p>
                   <For each={(["encoder", "decoder", "tokens"] as const)}>
                     {(field) => (
                       <div class="flex items-center gap-2">
                         <span class="text-xs w-16 shrink-0 capitalize" style={{ color: "var(--text-secondary)" }}>
-                          {field}
+                          {t(CUSTOM_FIELD_LABEL_KEYS[field])}
                         </span>
                         <input
                           type="text"
                           readOnly
                           value={customPaths()[field]}
-                          placeholder="Not set"
+                          placeholder={t("common.notSet")}
                           title={customPaths()[field]}
                           class="flex-1 min-w-0 px-2 py-1.5 rounded-lg border text-xs"
                           style={{
@@ -883,24 +902,27 @@ export function AppPage() {
                           }}
                           onClick={() => handlePickCustomPath(field)}
                         >
-                          Browse…
+                          {t("common.browse")}
                         </button>
                       </div>
                     )}
                   </For>
                   <Show when={customMissing()}>
                     <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                      ⚠ Set the {customMissing()!.join(", ")} path{customMissing()!.length > 1 ? "s" : ""} — recording will fail until all three are configured.
+                      {t("model.custom.missingPaths", {
+                        fields: customMissing()!.join(", "),
+                        plural: customMissing()!.length > 1 ? "s" : "",
+                      })}
                     </p>
                   </Show>
                   <Show when={customStatus().kind === "files-missing"}>
                     <p class="text-xs" style={{ color: "var(--error)" }}>
-                      ⚠ One or more model files weren't found on disk — check the paths above.
+                      {t("model.custom.filesMissing")}
                     </p>
                   </Show>
                   <Show when={customStatus().kind === "ready"}>
                     <p class="text-sm font-medium py-1" style={{ color: "var(--success)" }}>
-                      ✓ Custom model is ready
+                      {t("model.custom.ready")}
                     </p>
                   </Show>
                 </div>
@@ -918,11 +940,11 @@ export function AppPage() {
                         style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
                         onClick={handleDownload}
                       >
-                        Download {currentModel().name}
+                        {t("model.download", { name: t(currentModel().nameKey) })}
                       </button>
                       <Show when={initialModelCheck() && !currentModelDownloaded()}>
                         <p class="text-xs text-center" style={{ color: "var(--text-secondary)" }}>
-                          The ASR model runs locally on your device. Download required before first use.
+                          {t("model.downloadHint")}
                         </p>
                       </Show>
                     </div>
@@ -949,24 +971,24 @@ export function AppPage() {
                         color: "var(--text-secondary)",
                         cursor: "pointer",
                       }}
-                      title="Stop the download — progress is kept and resumed next time"
+                      title={t("model.stopDownloadTitle")}
                       onClick={() => {
                         canario.cancelDownload();
-                        showToast("Download cancelled — it will resume next time", "info", 3000);
+                        showToast(t("model.downloadCancelled"), "info", 3000);
                       }}
                     >
-                      Cancel
+                      {t("common.cancel")}
                     </button>
                   </div>
                   <p class="text-xs mt-2 text-center" style={{ color: "var(--text-secondary)" }}>
-                    Downloading model... this may take a few minutes.
+                    {t("model.downloading")}
                   </p>
                 </Show>
               }
             >
               <div class="flex items-center justify-between py-1">
                 <span class="text-sm font-medium" style={{ color: "var(--success)" }}>
-                  ✓ {currentModel().name} is ready
+                  {t("model.ready", { name: t(currentModel().nameKey) })}
                 </span>
                 <button
                   class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
@@ -975,7 +997,7 @@ export function AppPage() {
                     const ok = await canario.deleteModel();
                     if (!ok) {
                       // Truthful ack (canario-dmp.7): the model survived.
-                      showToast("Could not delete model.", "warning");
+                      showToast(t("model.deleteFailed"), "warning");
                       return;
                     }
                     setDownloadedModels(prev => {
@@ -984,10 +1006,10 @@ export function AppPage() {
                       return next;
                     });
                     updateContext({ modelReady: false });
-                    showToast("Model deleted", "info", 3000);
+                    showToast(t("model.deleted"), "info", 3000);
                   }}
                 >
-                  Delete
+                  {t("common.delete")}
                 </button>
               </div>
             </Show>
@@ -997,7 +1019,7 @@ export function AppPage() {
           {/* ── Quick Record ──────────────────────────────────────── */}
           <Show when={context().modelReady}>
             <section class="rounded-xl border p-5" style={sectionStyle}>
-              <h2 class={sectionHeader} style={sectionHeaderStyle}>Record</h2>
+              <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("record.sectionTitle")}</h2>
               <div class="flex items-center justify-center py-3">
                 <Show
                   when={state().status !== "recording"}
@@ -1011,7 +1033,7 @@ export function AppPage() {
                           "box-shadow": "0 0 0 5px rgba(239, 68, 68, 0.2)",
                           cursor: "pointer",
                         }}
-                        title="Stop and transcribe"
+                        title={t("record.stopTitle")}
                         onClick={handleToggle}
                       >
                         ⏹
@@ -1025,10 +1047,10 @@ export function AppPage() {
                           color: "var(--text-secondary)",
                           cursor: "pointer",
                         }}
-                        title="Cancel (discard audio, no transcription)"
+                        title={t("record.cancelTitle")}
                         onClick={() => {
                           canario.cancelRecording();
-                          showToast("Recording cancelled", "info", 2500);
+                          showToast(t("record.cancelled"), "info", 2500);
                         }}
                       >
                         ✕
@@ -1053,11 +1075,11 @@ export function AppPage() {
               </div>
               <p class="text-center text-sm" style={{ color: "var(--text-secondary)" }}>
                 <Show when={state().status === "recording"} fallback={
-                  <Show when={state().status === "transcribing"} fallback="Click or press your hotkey to record">
-                    Transcribing...
+                  <Show when={state().status === "transcribing"} fallback={t("record.clickOrHotkey")}>
+                    {t("record.transcribing")}
                   </Show>
                 }>
-                  Listening... speak now
+                  {t("record.listening")}
                 </Show>
               </p>
             </section>
@@ -1068,18 +1090,17 @@ export function AppPage() {
             <div class="rounded-xl border p-4 flex items-start gap-3" style={{ "background-color": "rgba(239, 68, 68, 0.06)", "border-color": "rgba(239, 68, 68, 0.2)" }}>
               <span class="text-lg leading-none mt-0.5">🎙️</span>
               <div class="flex-1">
-                <p class="text-sm font-medium" style={{ color: "var(--error)" }}>Model not ready</p>
+                <p class="text-sm font-medium" style={{ color: "var(--error)" }}>{t("model.notReady")}</p>
                 <Show
                   when={selectedModel() === CUSTOM_MODEL_ID}
                   fallback={
                     <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                      Download a speech recognition model above to start transcribing.
+                      {t("model.notReadyHint.download")}
                     </p>
                   }
                 >
                   <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                    Point Canario at your local model files above (encoder, decoder, tokens — plus
-                    joiner.int8.onnx next to the encoder) to start transcribing.
+                    {t("model.notReadyHint.custom")}
                   </p>
                 </Show>
               </div>
@@ -1090,19 +1111,19 @@ export function AppPage() {
           <Show when={context().lastTranscription}>
             <section class="rounded-xl border p-5" style={sectionStyle}>
               <div class="flex items-center justify-between mb-2">
-                <h2 class={sectionHeader} style={sectionHeaderStyle}>Last Transcription</h2>
+                <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("history.lastTitle")}</h2>
                 <button
                   class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
                   style={{ color: "var(--text-secondary)", cursor: "pointer", "background-color": "var(--bg)" }}
                   onClick={() => {
                     if (context().lastTranscription) {
                       navigator.clipboard.writeText(context().lastTranscription!);
-                      showToast("Copied to clipboard", "success", 2000);
+                      showToast(t("common.copiedToClipboard"), "success", 2000);
                     }
                   }}
-                  title="Copy to clipboard"
+                  title={t("common.copyTitle")}
                 >
-                  📋 Copy
+                  {t("common.copyButton")}
                 </button>
               </div>
               <p class="text-base leading-relaxed">"{context().lastTranscription}"</p>
@@ -1116,17 +1137,17 @@ export function AppPage() {
 
           {/* ── Hotkey ────────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Hotkey</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("hotkey.sectionTitle")}</h2>
             <HotkeyCapture value={hotkey()} onChange={handleHotkeyChange} />
             <p class="text-xs mt-2" style={{ color: "var(--text-secondary)" }}>
-              Press-and-hold to record. Release to stop and transcribe.
+              {t("hotkey.hint")}
             </p>
             <div class="flex flex-col gap-4 mt-4">
               {/* Double-tap to lock */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Double-tap to lock</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Double-tap the hotkey to toggle recording on/off</p>
+                  <p class="text-sm font-medium">{t("hotkey.doubleTapLock.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("hotkey.doubleTapLock.desc")}</p>
                 </div>
                 <Toggle checked={doubleTapLock()} onChange={(v) => handleDoubleTapLockChange(v)} />
               </div>
@@ -1134,8 +1155,8 @@ export function AppPage() {
               {/* Minimum hold time */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Minimum hold time</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Seconds to hold before recording starts</p>
+                  <p class="text-sm font-medium">{t("hotkey.minHold.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("hotkey.minHold.desc")}</p>
                 </div>
                 <input
                   type="number"
@@ -1159,8 +1180,8 @@ export function AppPage() {
               {/* Double-tap window */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Double-tap window</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Milliseconds within which two taps count as a double-tap</p>
+                  <p class="text-sm font-medium">{t("hotkey.doubleTapWindow.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("hotkey.doubleTapWindow.desc")}</p>
                 </div>
                 <input
                   type="number"
@@ -1190,13 +1211,13 @@ export function AppPage() {
 
           {/* ── Behavior ──────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Behavior</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("behavior.sectionTitle")}</h2>
             <div class="flex flex-col gap-4">
               {/* Auto-paste */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Auto-paste transcription</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Automatically paste result into focused app</p>
+                  <p class="text-sm font-medium">{t("behavior.autoPaste.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.autoPaste.desc")}</p>
                 </div>
                 <Toggle checked={autoPaste()} onChange={(v) => handleConfigToggle("auto_paste", v)} />
               </div>
@@ -1204,8 +1225,8 @@ export function AppPage() {
               {/* Sound effects */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Sound effects</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Play sounds on recording start/stop</p>
+                  <p class="text-sm font-medium">{t("behavior.soundEffects.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.soundEffects.desc")}</p>
                 </div>
                 <Toggle checked={soundEffects()} onChange={(v) => handleConfigToggle("sound_effects", v)} />
               </div>
@@ -1213,9 +1234,9 @@ export function AppPage() {
               {/* Sound effects volume */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Sound volume</p>
+                  <p class="text-sm font-medium">{t("behavior.soundVolume.title")}</p>
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                    Loudness of the beeps ({Math.round(soundEffectsVolume() * 100)}%)
+                    {t("behavior.soundVolume.desc", { percent: Math.round(soundEffectsVolume() * 100) })}
                   </p>
                 </div>
                 <input
@@ -1242,16 +1263,16 @@ export function AppPage() {
               {/* Live captions */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Live captions</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Stream a text preview in the overlay during long recordings</p>
+                  <p class="text-sm font-medium">{t("behavior.liveCaptions.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.liveCaptions.desc")}</p>
                 </div>
                 <Toggle checked={liveCaptions()} onChange={(v) => handleConfigToggle("live_captions", v)} />
               </div>
 
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Show tray icon</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Show Canario in the system tray</p>
+                  <p class="text-sm font-medium">{t("behavior.trayIcon.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.trayIcon.desc")}</p>
                 </div>
                 <Toggle checked={showTrayIcon()} onChange={(v) => handleConfigToggle("show_tray_icon", v)} />
               </div>
@@ -1259,8 +1280,8 @@ export function AppPage() {
               {/* Autostart */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Start on login</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Launch Canario when you log in</p>
+                  <p class="text-sm font-medium">{t("behavior.autostart.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.autostart.desc")}</p>
                 </div>
                 <Toggle checked={autostart()} onChange={(v) => handleConfigToggle("autostart", v)} />
               </div>
@@ -1268,8 +1289,8 @@ export function AppPage() {
               {/* Audio during recording */}
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Audio during recording</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>System audio behavior while recording</p>
+                  <p class="text-sm font-medium">{t("behavior.audioBehavior.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.audioBehavior.desc")}</p>
                 </div>
                 <select
                   class="px-3 py-1.5 rounded-lg border text-sm"
@@ -1282,15 +1303,13 @@ export function AppPage() {
                   value={audioBehavior()}
                   onChange={(e) => handleAudioBehaviorChange(e.currentTarget.value)}
                 >
-                  <option value="DoNothing">Do nothing</option>
-                  <option value="Mute">Mute system audio</option>
+                  <option value="DoNothing">{t("behavior.audioBehavior.doNothing")}</option>
+                  <option value="Mute">{t("behavior.audioBehavior.mute")}</option>
                 </select>
               </div>
               <Show when={audioBehavior() === "Mute"}>
                 <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                  Mute mutes the default audio output via pactl (PulseAudio/PipeWire) while recording and restores
-                  its previous state when the recording stops or is cancelled. If pactl isn't available (e.g. macOS,
-                  Windows, or a minimal Linux install), audio simply stays on and a warning is logged.
+                  {t("behavior.audioBehavior.muteNote")}
                 </p>
               </Show>
             </div>
@@ -1298,7 +1317,7 @@ export function AppPage() {
 
           {/* ── Microphone ────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Microphone</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("mic.sectionTitle")}</h2>
             <MicSection
               devices={micDevices()}
               selected={inputDevice()}
@@ -1309,19 +1328,19 @@ export function AppPage() {
 
           {/* ── Word Remapping ────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Word Remapping</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("remap.sectionTitle")}</h2>
             <Show when={remappings().length > 0 || removals().length > 0} fallback={
               <div class="py-4 text-center">
                 <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
-                  No remapping rules yet. Add rules to fix common misrecognitions.
+                  {t("remap.empty.title")}
                 </p>
                 <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                  e.g. "I llama" → "I'll ama"
+                  {t("remap.empty.example")}
                 </p>
               </div>
             }>
               <p class="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
-                Fix common misrecognitions and remove filler words
+                {t("remap.hint")}
               </p>
             </Show>
             <WordRemapping
@@ -1333,7 +1352,7 @@ export function AppPage() {
 
           {/* ── Transformation ───────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Transformation</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("transform.sectionTitle")}</h2>
             <TransformSection
               settings={transformSettings()}
               credentialPresent={transformCredentialPresent()}
@@ -1345,7 +1364,7 @@ export function AppPage() {
 
           {/* ── Appearance ────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Appearance</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("appearance.sectionTitle")}</h2>
             <AppearanceSection
               mode={themeMode()}
               accent={accent()}
@@ -1356,9 +1375,9 @@ export function AppPage() {
             {/* Indicator style (canario-aud.2) — same Appearance area:
                 which on-screen indicator to show while dictating. */}
             <div class="mt-6">
-              <p class="text-sm font-medium">Indicator</p>
+              <p class="text-sm font-medium">{t("indicator.title")}</p>
               <p class="text-xs mb-2.5" style={{ color: "var(--text-secondary)" }}>
-                What appears on screen while you dictate
+                {t("indicator.desc")}
               </p>
               <IndicatorSection mode={indicator()} onChange={handleIndicatorChange} />
             </div>
@@ -1366,7 +1385,7 @@ export function AppPage() {
 
           {/* ── Motion ────────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>Motion</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("motion.sectionTitle")}</h2>
             <MotionSection
               settings={animations()}
               reducedMotion={reducedMotion()}
@@ -1376,7 +1395,7 @@ export function AppPage() {
 
           {/* ── About & Updates ────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
-            <h2 class={sectionHeader} style={sectionHeaderStyle}>About</h2>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("about.sectionTitle")}</h2>
             <div class="flex flex-col gap-3">
               <Show when={versionWarning()}>
                 {(warning) => (
@@ -1389,14 +1408,14 @@ export function AppPage() {
                       color: "var(--text-primary)",
                     }}
                   >
-                    <p class="font-medium">⚠ Version mismatch</p>
+                    <p class="font-medium">{t("about.versionMismatch.title")}</p>
                     <p style={{ color: "var(--text-secondary)" }}>{warning()}</p>
                   </div>
                 )}
               </Show>
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Version</p>
+                  <p class="text-sm font-medium">{t("about.version.title")}</p>
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{appVersion()}</p>
                 </div>
                 <Show when={updateChecking()} fallback={
@@ -1405,32 +1424,32 @@ export function AppPage() {
                     style={{ "background-color": "var(--bg)", "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
                     onClick={handleCheckUpdate}
                   >
-                    Check for Updates
+                    {t("about.version.checkButton")}
                   </button>
                 }>
                   <div class="flex items-center gap-2">
                     <div class="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin" style={{ "border-color": "var(--accent)", "border-top-color": "transparent" }} />
-                    <span class="text-xs" style={{ color: "var(--text-secondary)" }}>Checking...</span>
+                    <span class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("common.checking")}</span>
                   </div>
                 </Show>
               </div>
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">Onboarding</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Replay the first-launch setup wizard</p>
+                  <p class="text-sm font-medium">{t("about.onboarding.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("about.onboarding.desc")}</p>
                 </div>
                 <button
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:opacity-80"
                   style={{ "background-color": "var(--bg)", "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
                   onClick={handleRerunOnboarding}
                 >
-                  Re-run
+                  {t("about.onboarding.rerun")}
                 </button>
               </div>
               <div class="flex items-center justify-between gap-3">
                 <div>
-                  <p class="text-sm font-medium">Diagnostics</p>
-                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Copy system info, configuration, and recent logs</p>
+                  <p class="text-sm font-medium">{t("about.diagnostics.title")}</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("about.diagnostics.desc")}</p>
                 </div>
                 <button
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:opacity-80 disabled:opacity-50"
@@ -1439,16 +1458,16 @@ export function AppPage() {
                   aria-busy={copyingDiagnostics()}
                   onClick={handleCopyDiagnostics}
                 >
-                  {copyingDiagnostics() ? "Copying…" : "Copy diagnostics"}
+                  {copyingDiagnostics() ? t("common.copying") : t("about.diagnostics.copy")}
                 </button>
               </div>
               <Show when={updateAvailable()}>
                 <div class="rounded-lg p-3 flex items-start gap-2" style={{ "background-color": "rgba(74, 222, 128, 0.06)", border: "1px solid rgba(74, 222, 128, 0.2)" }}>
                   <span class="text-sm leading-none mt-0.5">🎉</span>
                   <div class="flex-1">
-                    <p class="text-sm font-medium" style={{ color: "var(--success)" }}>Update available: v{updateVersion()}</p>
+                    <p class="text-sm font-medium" style={{ color: "var(--success)" }}>{t("about.update.title", { version: updateVersion() })}</p>
                     <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                      Restart Canario to install the latest version.
+                      {t("about.update.desc")}
                     </p>
                   </div>
                 </div>
@@ -1465,14 +1484,14 @@ export function AppPage() {
             style={sectionStyle}
           >
             <div class="flex items-center justify-between mb-3">
-              <h2 class={sectionHeader} style={sectionHeaderStyle}>History</h2>
+              <h2 class={sectionHeader} style={sectionHeaderStyle}>{t("history.sectionTitle")}</h2>
               <Show when={history().length > 0}>
                 <button
                   class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
                   style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                   onClick={handleClearHistory}
                 >
-                  Clear All
+                  {t("history.clearAll")}
                 </button>
               </Show>
             </div>
@@ -1482,7 +1501,7 @@ export function AppPage() {
               <div class="mb-3">
                 <input
                   type="text"
-                  placeholder="🔍  Search transcriptions..."
+                  placeholder={t("history.searchPlaceholder")}
                   value={historySearch()}
                   onInput={(e) => {
                     setHistorySearch(e.currentTarget.value);
@@ -1510,24 +1529,24 @@ export function AppPage() {
                   <div class="flex flex-col items-center gap-2">
                     <span class="text-3xl">🎤</span>
                     <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
-                      No transcriptions yet
+                      {t("history.empty.title")}
                     </p>
                     <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                      Press your hotkey and start talking!
+                      {t("history.empty.hint")}
                     </p>
                   </div>
                 }>
                   <div class="flex flex-col items-center gap-2">
                     <span class="text-2xl">🔍</span>
                     <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
-                      No results found for “{historySearch()}”
+                      {t("history.noResults", { query: historySearch() })}
                     </p>
                     <button
                       class="text-xs px-3 py-1 rounded-md"
                       style={{ color: "var(--accent)", cursor: "pointer", "background-color": "var(--bg)" }}
                       onClick={() => { setHistorySearch(""); loadHistory(); }}
                     >
-                      Clear search
+                      {t("history.clearSearch")}
                     </button>
                   </div>
                 </Show>
@@ -1567,7 +1586,10 @@ export function AppPage() {
                           <div class="flex items-center justify-between mt-1.5 gap-2">
                             <div class="flex items-center gap-1.5 min-w-0">
                               <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                                {entry.duration_secs.toFixed(1)}s · {formatTimestamp(entry.timestamp)}
+                                {t("history.meta", {
+                                  duration: entry.duration_secs.toFixed(1),
+                                  timestamp: formatTimestamp(entry.timestamp),
+                                })}
                               </p>
                               {/* Transformed badge (fgm.4, fgm.1 D3): the
                                   canonical `text` went through an LLM pass;
@@ -1582,9 +1604,9 @@ export function AppPage() {
                                     "background-color": "var(--bg)",
                                     color: "var(--text-secondary)",
                                   }}
-                                  title={`Transformed — raw transcript: ${String(entry.raw_text ?? "")}`}
+                                  title={t("history.transformedTitle", { raw: String(entry.raw_text ?? "") })}
                                 >
-                                  ✨ Transformed
+                                  {t("history.transformedBadge")}
                                 </span>
                               </Show>
                             </div>
@@ -1594,9 +1616,9 @@ export function AppPage() {
                                 style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                                 onClick={() => {
                                   navigator.clipboard.writeText(entry.text);
-                                  showToast("Copied to clipboard", "success", 2000);
+                                  showToast(t("common.copiedToClipboard"), "success", 2000);
                                 }}
-                                title="Copy"
+                                title={t("common.copy")}
                               >
                                 📋
                               </button>
@@ -1604,7 +1626,7 @@ export function AppPage() {
                                 class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"
                                 style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                                 onClick={() => handleDeleteHistory(entry.id)}
-                                title="Delete"
+                                title={t("common.delete")}
                               >
                                 🗑️
                               </button>
@@ -1640,9 +1662,13 @@ function formatTimestamp(ts: string): string {
   const diffHours = Math.floor(diffMs / 3600000);
   const diffDays = Math.floor(diffMs / 86400000);
 
-  if (diffMins < 1) return "Just now";
-  if (diffMins < 60) return `${diffMins} min ago`;
-  if (diffHours < 24) return `Today at ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-  if (diffDays === 1) return `Yesterday at ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ` at ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  const clock = () => date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (diffMins < 1) return t("history.time.justNow");
+  if (diffMins < 60) return t("history.time.minutesAgo", { n: diffMins });
+  if (diffHours < 24) return t("history.time.todayAt", { time: clock() });
+  if (diffDays === 1) return t("history.time.yesterdayAt", { time: clock() });
+  return t("history.time.dateAt", {
+    date: date.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    time: clock(),
+  });
 }

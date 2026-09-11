@@ -11,6 +11,7 @@
 // whole block absent) dictation stays fully on-device, byte-identical
 // to a Canario without this feature.
 import { createEffect, createSignal, Show } from "solid-js";
+import { t } from "../i18n";
 import { Toggle } from "./Toggle";
 import {
   apiKeyPlaceholder,
@@ -23,9 +24,17 @@ import {
   MAX_TRANSFORM_TIMEOUT_MS,
   MIN_TRANSFORM_TIMEOUT_MS,
   shouldWarnRemoteEndpoint,
+  type ApiKeyPlaceholderLabels,
   type TransformSettings,
   type TransformTestState,
 } from "../primitives/transform";
+
+/** Write-only-field placeholder copy from the i18n catalog (see
+ *  primitives/transform.ts for why the primitive takes it as a parameter). */
+const apiKeyLabels = (): ApiKeyPlaceholderLabels => ({
+  present: t("transform.apiKey.placeholderPresent"),
+  absent: t("transform.apiKey.placeholderAbsent"),
+});
 
 interface Props {
   settings: TransformSettings;
@@ -133,7 +142,7 @@ export function TransformSection(props: Props) {
     try {
       setTestState(await props.onTest());
     } catch {
-      setTestState({ phase: "error", message: "Connection test failed" });
+      setTestState({ phase: "error", message: t("transform.test.failed") });
     }
   }
 
@@ -162,9 +171,9 @@ export function TransformSection(props: Props) {
       {/* Master toggle — D5a: OFF by default, everything below hidden */}
       <div class="flex items-center justify-between">
         <div>
-          <p class="text-sm font-medium">Transform transcriptions</p>
+          <p class="text-sm font-medium">{t("transform.enable.title")}</p>
           <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Clean up each transcript with your own LLM before pasting (off by default)
+            {t("transform.enable.desc")}
           </p>
         </div>
         <Toggle checked={props.settings.enabled} onChange={setEnabled} />
@@ -175,34 +184,33 @@ export function TransformSection(props: Props) {
           {/* Base URL */}
           <div>
             <div class="flex items-center justify-between mb-1">
-              <p class="text-sm font-medium">Base URL</p>
+              <p class="text-sm font-medium">{t("transform.baseUrl.title")}</p>
               <Show when={invalidBaseUrl()}>
                 <span class="text-xs" style={{ color: "var(--error)" }}>
-                  Enter a full http(s):// URL
+                  {t("transform.baseUrl.invalid")}
                 </span>
               </Show>
             </div>
             <input
               type="text"
               value={props.settings.provider.base_url}
-              placeholder="https://api.openai.com/v1 — or http://localhost:11434/v1 (Ollama)"
+              placeholder={t("transform.baseUrl.placeholder")}
               onChange={(e) => commitBaseUrl(e.currentTarget.value)}
               class="w-full px-3 py-1.5 rounded-lg border text-sm"
               style={invalidBaseUrl() ? { ...inputStyle, "border-color": "var(--error)" } : inputStyle}
             />
             <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-              Any OpenAI-compatible endpoint, including local servers (Ollama, llama.cpp) — include
-              the version path.
+              {t("transform.baseUrl.hint")}
             </p>
           </div>
 
           {/* Model */}
           <div>
-            <p class="text-sm font-medium mb-1">Model</p>
+            <p class="text-sm font-medium mb-1">{t("transform.model.title")}</p>
             <input
               type="text"
               value={props.settings.provider.model}
-              placeholder="gpt-4o-mini · llama3 · qwen2.5:7b …"
+              placeholder={t("transform.model.placeholder")}
               onChange={(e) => commitModel(e.currentTarget.value)}
               class="w-full px-3 py-1.5 rounded-lg border text-sm"
               style={inputStyle}
@@ -211,11 +219,11 @@ export function TransformSection(props: Props) {
 
           {/* API key — write-only (D2) */}
           <div>
-            <p class="text-sm font-medium mb-1">API key</p>
+            <p class="text-sm font-medium mb-1">{t("transform.apiKey.title")}</p>
             <input
               type="password"
               value={keyDraft()}
-              placeholder={apiKeyPlaceholder(props.credentialPresent)}
+              placeholder={apiKeyPlaceholder(props.credentialPresent, apiKeyLabels())}
               autocomplete="off"
               onChange={(e) => commitKey(e.currentTarget.value)}
               class="w-full px-3 py-1.5 rounded-lg border text-sm"
@@ -223,17 +231,17 @@ export function TransformSection(props: Props) {
             />
             <p class="text-xs mt-1" style={{ color: props.credentialPresent ? "var(--success)" : "var(--text-secondary)" }}>
               {props.credentialPresent
-                ? "✓ Key saved — stored encrypted by Canario, never printed or synced"
-                : "No key stored — local endpoints (Ollama, llama.cpp server) don't need one"}
+                ? t("transform.apiKey.presentNote")
+                : t("transform.apiKey.absentNote")}
             </p>
           </div>
 
           {/* Timeout (D5d) */}
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-sm font-medium">Timeout</p>
+              <p class="text-sm font-medium">{t("transform.timeout.title")}</p>
               <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                Milliseconds to wait before falling back to the raw transcript
+                {t("transform.timeout.desc")}
               </p>
             </div>
             <input
@@ -260,21 +268,20 @@ export function TransformSection(props: Props) {
             >
               <span class="leading-none mt-0.5">⚠</span>
               <div class="flex-1">
-                <p class="font-medium">Remote endpoint</p>
+                <p class="font-medium">{t("transform.warning.title")}</p>
                 <p class="mt-1" style={{ color: "var(--text-secondary)" }}>
-                  Transcripts and a short style instruction will be sent to{" "}
+                  {t("transform.warning.bodyIntro")}{" "}
                   <span style={{ color: "var(--text-primary)" }}>
                     {baseUrlHostname(props.settings.provider.base_url)}
                   </span>
-                  . Nothing else ever leaves your machine — never audio, never history. Local
-                  endpoints (localhost) never leave this device.
+                  {t("transform.warning.bodyOutro")}
                 </p>
                 <button
                   class="mt-1 underline"
                   style={{ color: "var(--accent)", cursor: "pointer" }}
                   onClick={dismissWarning}
                 >
-                  Don't show this again
+                  {t("transform.warning.dismiss")}
                 </button>
               </div>
             </div>
@@ -294,10 +301,10 @@ export function TransformSection(props: Props) {
                     cursor: testable() ? "pointer" : "not-allowed",
                   }}
                   disabled={!testable()}
-                  title={testable() ? "Send a minimal chat-completions request" : "Enter a valid Base URL first"}
+                  title={testable() ? t("transform.test.titleEnabled") : t("transform.test.titleDisabled")}
                   onClick={handleTest}
                 >
-                  Test connection
+                  {t("transform.test.button")}
                 </button>
               }
             >
@@ -307,21 +314,21 @@ export function TransformSection(props: Props) {
                   style={{ "border-color": "var(--accent)", "border-top-color": "transparent" }}
                 />
                 <span class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                  Testing…
+                  {t("transform.test.running")}
                 </span>
               </div>
             </Show>
             <Show when={testOk()}>
-              {(t) => (
+              {(tst) => (
                 <span class="text-xs font-medium" style={{ color: "var(--success)" }}>
-                  ✓ Connected — {t().latencyMs} ms
+                  {t("transform.test.ok", { ms: tst().latencyMs })}
                 </span>
               )}
             </Show>
             <Show when={testError()}>
-              {(t) => (
+              {(tst) => (
                 <span class="text-xs" style={{ color: "var(--error)" }}>
-                  ✗ {t().message}
+                  ✗ {tst().message}
                 </span>
               )}
             </Show>
@@ -329,9 +336,7 @@ export function TransformSection(props: Props) {
 
           {/* Privacy footnote (D5) */}
           <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Your key stays on this device (encrypted at rest) and is held in the transcription
-            backend's memory only. If the provider fails or times out, the raw transcript is pasted
-            unchanged — dictation never blocks.
+            {t("transform.privacyNote")}
           </p>
         </div>
       </Show>

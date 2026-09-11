@@ -274,11 +274,24 @@ export function keyCommitAction(
   return credentialPresent ? "clear" : "noop";
 }
 
+/** Placeholder-copy defaults (English) — i18n callers override via the
+ *  `labels` parameter; defaults keep this module's node tests standalone. */
+export interface ApiKeyPlaceholderLabels {
+  present: string;
+  absent: string;
+}
+
+export const DEFAULT_API_KEY_PLACEHOLDER_LABELS: ApiKeyPlaceholderLabels = {
+  present: "API key saved — type to replace, clear + unfocus to remove",
+  absent: "sk-… (not needed for local endpoints)",
+};
+
 /** Placeholder copy explaining the write-only field's semantics. */
-export function apiKeyPlaceholder(credentialPresent: boolean): string {
-  return credentialPresent
-    ? "API key saved — type to replace, clear + unfocus to remove"
-    : "sk-… (not needed for local endpoints)";
+export function apiKeyPlaceholder(
+  credentialPresent: boolean,
+  labels: ApiKeyPlaceholderLabels = DEFAULT_API_KEY_PLACEHOLDER_LABELS,
+): string {
+  return credentialPresent ? labels.present : labels.absent;
 }
 
 // ── update_config payload (whole-key merge semantics) ───────────────────────
@@ -353,6 +366,24 @@ export type TransformTestState =
   | { phase: "error"; message: string };
 
 /**
+ * Renderer-authored fallback strings for a failed/unreachable probe.
+ * Sidecar-authored `error` strings pass through untranslated (they come
+ * from the Rust backend); these defaults keep the module's node tests
+ * standalone — i18n callers override via the `fallbacks` parameter.
+ */
+export interface TransformTestFallbacks {
+  unreachable: string;
+  unexpected: string;
+  failed: string;
+}
+
+export const DEFAULT_TRANSFORM_TEST_FALLBACKS: TransformTestFallbacks = {
+  unreachable: "Could not reach the speech backend",
+  unexpected: "Unexpected response from the speech backend",
+  failed: "Connection test failed",
+};
+
+/**
  * Reduce a `transform_test` sidecar response (or a null from a dead
  * backend / bridge failure) into the display state. Error strings are
  * the sidecar's — they carry no key material (the credential only ever
@@ -360,19 +391,20 @@ export type TransformTestState =
  */
 export function transformTestResultFromResponse(
   res: Record<string, unknown> | null | undefined,
+  fallbacks: TransformTestFallbacks = DEFAULT_TRANSFORM_TEST_FALLBACKS,
 ): TransformTestState {
   if (!res) {
-    return { phase: "error", message: "Could not reach the speech backend" };
+    return { phase: "error", message: fallbacks.unreachable };
   }
   if (res.ok === true) {
     const latency = (res.data as { latency_ms?: unknown } | undefined)?.latency_ms;
     return typeof latency === "number" && Number.isFinite(latency) && latency >= 0
       ? { phase: "ok", latencyMs: latency }
-      : { phase: "error", message: "Unexpected response from the speech backend" };
+      : { phase: "error", message: fallbacks.unexpected };
   }
   const message =
     typeof res.error === "string" && res.error.trim().length > 0
       ? res.error
-      : "Connection test failed";
+      : fallbacks.failed;
   return { phase: "error", message };
 }

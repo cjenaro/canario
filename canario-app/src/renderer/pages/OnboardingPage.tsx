@@ -2,6 +2,7 @@
 // 3 steps: Download Model → Set Hotkey → Ready (practice area)
 // Reached when the state machine is in `onboarding` (see App.tsx routing).
 import { createSignal, Show, For, onMount, onCleanup, createEffect } from "solid-js";
+import { t, type MessageKey } from "../i18n";
 import { useAppState } from "../state/context";
 import { createCanario } from "../primitives/createCanario";
 import { HotkeyCapture, toAccelerator } from "../components/HotkeyCapture";
@@ -9,19 +10,21 @@ import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
 import { applyTheme } from "../theme";
 
+// Display name/description live in the i18n catalog (canario-7ah.7);
+// ids are the AppConfig model identifiers and stay literal.
 const MODELS = [
-  { id: "ParakeetV3", name: "Parakeet TDT v3", desc: "Multilingual · ~640MB" },
-  { id: "ParakeetV2", name: "Parakeet TDT v2", desc: "English only · ~640MB" },
-] as const;
+  { id: "ParakeetV3", nameKey: "model.parakeetV3.name", descKey: "model.parakeetV3.desc" },
+  { id: "ParakeetV2", nameKey: "model.parakeetV2.name", descKey: "model.parakeetV2.desc" },
+] as const satisfies ReadonlyArray<{ id: string; nameKey: MessageKey; descKey: MessageKey }>;
 
 const MODEL_SIZE_MB = 640;
-const STEP_LABELS = ["Download Model", "Set Hotkey", "Ready"];
+const STEP_LABEL_KEYS = ["onboarding.step.downloadModel", "onboarding.step.setHotkey", "onboarding.step.ready"] as const satisfies readonly MessageKey[];
 const MIC_TEST_MS = 3000;
 
 function formatEta(seconds: number): string {
   if (!isFinite(seconds) || seconds <= 0) return "";
-  if (seconds < 60) return `${Math.ceil(seconds)}s`;
-  return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`;
+  if (seconds < 60) return t("common.etaSeconds", { n: Math.ceil(seconds) });
+  return t("common.etaMinutes", { m: Math.floor(seconds / 60), s: Math.ceil(seconds % 60) });
 }
 
 export function OnboardingPage() {
@@ -76,11 +79,15 @@ export function OnboardingPage() {
     const p = dlProgress();
     if (p === null) return "";
     const done = Math.round(p * MODEL_SIZE_MB);
+    const base = t("onboarding.dlStats.plain", { done, total: MODEL_SIZE_MB });
     if (speedEma > 0.1) {
       const eta = formatEta(((1 - p) * MODEL_SIZE_MB) / speedEma);
-      return `${done} / ${MODEL_SIZE_MB} MB · ${speedEma.toFixed(1)} MB/s${eta ? ` · ~${eta} left` : ""}`;
+      return (
+        t("onboarding.dlStats.speed", { done, total: MODEL_SIZE_MB, speed: speedEma.toFixed(1) }) +
+        (eta ? t("onboarding.dlStats.etaSuffix", { eta }) : "")
+      );
     }
-    return `${done} / ${MODEL_SIZE_MB} MB`;
+    return base;
   };
 
   // Surface sidecar errors as toasts (mirrors AppPage), except during mic test
@@ -119,7 +126,7 @@ export function OnboardingPage() {
     if (micTesting()) return;
     const res = await canario.command("start_recording");
     if (!res?.ok) {
-      showToast("Could not access the microphone. Check your audio settings.", "error", 6000);
+      showToast(t("onboarding.micTest.noAccess"), "error", 6000);
       return;
     }
     setMicTesting(true);
@@ -151,7 +158,7 @@ export function OnboardingPage() {
     await canario.updateConfig({ autostart: value });
     const ok = await canario.setAutostart(value);
     if (!ok) {
-      showToast("Could not change autostart setting.", "warning");
+      showToast(t("behavior.autostart.failed"), "warning");
       setAutostart(!value);
     }
   }
@@ -208,7 +215,7 @@ export function OnboardingPage() {
       setModelReady(await canario.checkModel());
     } catch (err) {
       console.error("[OnboardingPage] init error:", err);
-      showToast("Failed to initialize. Check that the canario sidecar is running.", "error", 8000);
+      showToast(t("onboarding.initFailed"), "error", 8000);
     }
 
     // Wizard-local sidecar events: live download progress + mic levels.
@@ -224,7 +231,7 @@ export function OnboardingPage() {
           case "ModelDownloadComplete":
             setDlProgress(null);
             setModelReady(true);
-            showToast("Model downloaded — you're good to go!", "success", 3000);
+            showToast(t("onboarding.step1.modelDownloaded"), "success", 3000);
             break;
           case "ModelDownloadFailed":
             setDlProgress(null);
@@ -265,7 +272,7 @@ export function OnboardingPage() {
       >
         <div class="flex items-center gap-2">
           <span class="text-lg">🎙️</span>
-          <span class="text-base font-semibold tracking-tight">Welcome to Canario</span>
+          <span class="text-base font-semibold tracking-tight">{t("onboarding.header")}</span>
         </div>
         <div class="ml-auto" style={{ "-webkit-app-region": "no-drag" } as any}>
           <button
@@ -273,7 +280,7 @@ export function OnboardingPage() {
             style={{ color: "var(--text-secondary)", cursor: "pointer" }}
             onClick={() => completeWizard(false)}
           >
-            Skip setup
+            {t("onboarding.skip")}
           </button>
         </div>
       </div>
@@ -282,14 +289,14 @@ export function OnboardingPage() {
         {/* Tagline */}
         <div class="text-center">
           <p class="text-sm" style={{ color: "var(--text-secondary)" }}>
-            Voice-to-text, instant and invisible. Press a hotkey, speak, release. Done.
+            {t("onboarding.tagline")}
           </p>
         </div>
 
         {/* Step indicator */}
         <div class="flex items-center gap-2">
-          <For each={STEP_LABELS}>
-            {(label, i) => (
+          <For each={STEP_LABEL_KEYS}>
+            {(labelKey, i) => (
               <div class="flex-1 flex flex-col gap-1.5">
                 <div
                   class="h-1 rounded-full transition-colors"
@@ -301,7 +308,7 @@ export function OnboardingPage() {
                   class="text-[11px] text-center"
                   style={{ color: step() === i() + 1 ? "var(--text-primary)" : "var(--text-secondary)" }}
                 >
-                  {label}
+                  {t(labelKey)}
                 </span>
               </div>
             )}
@@ -312,10 +319,9 @@ export function OnboardingPage() {
         <Show when={step() === 1}>
           <section class="rounded-xl border p-5 flex flex-col gap-4" style={sectionStyle}>
             <div>
-              <h2 class="text-base font-semibold">Step 1 of 3: Download Model</h2>
+              <h2 class="text-base font-semibold">{t("onboarding.step1.title")}</h2>
               <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                Canario uses Parakeet TDT — a state-of-the-art speech recognition model that runs
-                entirely on your device. Nothing you say ever leaves your machine.
+                {t("onboarding.step1.desc")}
               </p>
             </div>
 
@@ -331,8 +337,8 @@ export function OnboardingPage() {
                     onClick={() => handleSelectModel(model.id)}
                   >
                     <div class="text-left">
-                      <p class="text-sm font-medium">{model.name}</p>
-                      <p class="text-xs mt-0.5" style={{ color: "var(--text-secondary)" }}>{model.desc}</p>
+                      <p class="text-sm font-medium">{t(model.nameKey)}</p>
+                      <p class="text-xs mt-0.5" style={{ color: "var(--text-secondary)" }}>{t(model.descKey)}</p>
                     </div>
                     <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center"
                       style={{ "border-color": selectedModel() === model.id ? "var(--accent)" : "var(--border)" }}
@@ -350,7 +356,7 @@ export function OnboardingPage() {
               when={!modelReady()}
               fallback={
                 <p class="text-sm font-medium text-center py-1" style={{ color: "var(--success)" }}>
-                  ✓ {MODELS.find((m) => m.id === selectedModel())?.name} is ready
+                  {t("model.ready", { name: t(MODELS.find((m) => m.id === selectedModel())?.nameKey ?? "model.parakeetV3.name") })}
                 </p>
               }
             >
@@ -362,7 +368,7 @@ export function OnboardingPage() {
                     style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
                     onClick={handleDownload}
                   >
-                    Download {MODELS.find((m) => m.id === selectedModel())?.name}
+                    {t("model.download", { name: t(MODELS.find((m) => m.id === selectedModel())?.nameKey ?? "model.parakeetV3.name") })}
                   </button>
                 }
               >
@@ -385,13 +391,13 @@ export function OnboardingPage() {
                         color: "var(--text-secondary)",
                         cursor: "pointer",
                       }}
-                      title="Stop the download — progress is kept and resumed next time"
+                      title={t("model.stopDownloadTitle")}
                       onClick={() => {
                         void window.canario?.sendCommand({ id: `cancel-dl-${Date.now()}`, cmd: "cancel_download" });
-                        showToast("Download cancelled — it will resume next time", "info", 3000);
+                        showToast(t("model.downloadCancelled"), "info", 3000);
                       }}
                     >
-                      Cancel
+                      {t("common.cancel")}
                     </button>
                   </div>
                   <p class="text-xs text-center tabular-nums" style={{ color: "var(--text-secondary)" }}>
@@ -404,17 +410,19 @@ export function OnboardingPage() {
             {/* Mic test widget */}
             <div class="rounded-lg border p-3 flex flex-col gap-2" style={{ "border-color": "var(--border)", "background-color": "var(--bg)" }}>
               <div class="flex items-center justify-between">
-                <p class="text-sm font-medium">🎤 Microphone Test</p>
+                <p class="text-sm font-medium">{t("onboarding.micTest.title")}</p>
                 <button
                   class="text-xs px-2.5 py-1 rounded-md border transition-colors hover:opacity-80 disabled:opacity-40"
                   style={{ "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
                   onClick={() => (micTesting() ? stopMicTest() : startMicTest())}
                 >
-                  {micTesting() ? "Stop" : "Test microphone"}
+                  {micTesting() ? t("onboarding.micTest.stop") : t("onboarding.micTest.start")}
                 </button>
               </div>
               <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                {micTesting() ? "Say something..." : `Records ${MIC_TEST_MS / 1000}s of audio to check your mic level.`}
+                {micTesting()
+                  ? t("onboarding.micTest.saying")
+                  : t("onboarding.micTest.desc", { secs: MIC_TEST_MS / 1000 })}
               </p>
               <div class="h-2 rounded-full overflow-hidden" style={{ "background-color": "var(--border)" }}>
                 <div
@@ -434,12 +442,12 @@ export function OnboardingPage() {
                 style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
                 onClick={() => gotoStep(2)}
               >
-                Next →
+                {t("onboarding.next")}
               </button>
             </div>
             <Show when={!modelReady() && dlProgress() === null}>
               <p class="text-xs text-center -mt-2" style={{ color: "var(--text-secondary)" }}>
-                You can continue without the model, but transcription won't work until it's downloaded.
+                {t("onboarding.step1.continueWithout")}
               </p>
             </Show>
           </section>
@@ -449,9 +457,9 @@ export function OnboardingPage() {
         <Show when={step() === 2}>
           <section class="rounded-xl border p-5 flex flex-col gap-4" style={sectionStyle}>
             <div>
-              <h2 class="text-base font-semibold">Step 2 of 3: Set Hotkey</h2>
+              <h2 class="text-base font-semibold">{t("onboarding.step2.title")}</h2>
               <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                Pick a key combination that starts and stops recording from anywhere.
+                {t("onboarding.step2.desc")}
               </p>
             </div>
 
@@ -459,17 +467,17 @@ export function OnboardingPage() {
 
             <div class="rounded-lg p-3 flex flex-col gap-1.5" style={{ "background-color": "var(--bg)" }}>
               <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                <strong style={{ color: "var(--text-primary)" }}>Press-and-hold:</strong> hold the combo
-                while you speak, release to transcribe.
+                <strong style={{ color: "var(--text-primary)" }}>{t("onboarding.step2.pressHoldLabel")}</strong>{" "}
+                {t("onboarding.step2.pressHoldBody")}
               </p>
               <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                <strong style={{ color: "var(--text-primary)" }}>Double-tap:</strong> tap the combo to start
-                recording, tap again to stop — hands-free for longer dictation.
+                <strong style={{ color: "var(--text-primary)" }}>{t("onboarding.step2.doubleTapLabel")}</strong>{" "}
+                {t("onboarding.step2.doubleTapBody")}
               </p>
               <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
                 {platform().isLinux
-                  ? "On Linux the hotkey is handled by Canario's own listener."
-                  : "On this platform the hotkey is registered globally with the OS."}
+                  ? t("onboarding.step2.linux")
+                  : t("onboarding.step2.other")}
               </p>
             </div>
 
@@ -479,14 +487,14 @@ export function OnboardingPage() {
                 style={{ "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
                 onClick={() => gotoStep(1)}
               >
-                ← Back
+                {t("onboarding.back")}
               </button>
               <button
                 class={primaryBtn}
                 style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
                 onClick={() => gotoStep(3)}
               >
-                Next →
+                {t("onboarding.next")}
               </button>
             </div>
           </section>
@@ -496,20 +504,20 @@ export function OnboardingPage() {
         <Show when={step() === 3}>
           <section class="rounded-xl border p-5 flex flex-col gap-4" style={sectionStyle}>
             <div>
-              <h2 class="text-base font-semibold">Step 3 of 3: Ready</h2>
+              <h2 class="text-base font-semibold">{t("onboarding.step3.title")}</h2>
               <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-                Try it now! Click the field below, press{" "}
+                {t("onboarding.step3.descIntro")}{" "}
                 <strong style={{ color: "var(--text-primary)" }}>
-                  {hotkey().length > 0 ? hotkey().join(" + ") : "your hotkey"}
+                  {hotkey().length > 0 ? hotkey().join(" + ") : t("onboarding.step3.yourHotkey")}
                 </strong>
-                , speak, and release — your words will appear right here.
+                {t("onboarding.step3.descOutro")}
               </p>
             </div>
 
             <textarea
               ref={practiceRef}
               rows={4}
-              placeholder="Press your hotkey and say something…"
+              placeholder={t("onboarding.step3.placeholder")}
               class="rounded-lg border text-sm w-full p-3 resize-none"
               style={{
                 "background-color": "var(--bg)",
@@ -521,20 +529,19 @@ export function OnboardingPage() {
 
             <Show when={context().lastTranscription}>
               <p class="text-xs" style={{ color: "var(--success)" }}>
-                ✓ It works! Last transcription: "{context().lastTranscription}"
+                {t("onboarding.step3.works", { text: context().lastTranscription ?? "" })}
               </p>
             </Show>
             <Show when={!modelReady()}>
               <p class="text-xs" style={{ color: "var(--warning)" }}>
-                Heads up: no speech model is downloaded yet, so practice dictation won't transcribe.
-                You can download it later from Settings → Model.
+                {t("onboarding.step3.noModel")}
               </p>
             </Show>
 
             <div class="flex items-center justify-between">
               <div>
-                <p class="text-sm font-medium">Start on login</p>
-                <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Launch Canario when you log in</p>
+                <p class="text-sm font-medium">{t("behavior.autostart.title")}</p>
+                <p class="text-xs" style={{ color: "var(--text-secondary)" }}>{t("behavior.autostart.desc")}</p>
               </div>
               <Toggle checked={autostart()} onChange={handleAutostart} />
             </div>
@@ -545,14 +552,14 @@ export function OnboardingPage() {
                 style={{ "border-color": "var(--border)", color: "var(--text-primary)", cursor: "pointer" }}
                 onClick={() => gotoStep(2)}
               >
-                ← Back
+                {t("onboarding.back")}
               </button>
               <button
                 class={primaryBtn}
                 style={{ "background-color": "var(--accent)", color: "white", cursor: "pointer" }}
                 onClick={() => completeWizard(true)}
               >
-                Done — minimize to tray
+                {t("onboarding.done")}
               </button>
             </div>
           </section>

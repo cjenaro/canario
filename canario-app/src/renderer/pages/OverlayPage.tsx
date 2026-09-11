@@ -29,6 +29,7 @@ import {
   nextOverlayStatusOnPush,
   overlayBusyLabel,
   overlayStatusFromEvent,
+  type OverlayBusyLabels,
   type OverlayStatus,
 } from "../primitives/overlayStatus";
 // Indicator presence modes + the pure mode×status render-gating table
@@ -42,6 +43,14 @@ import {
   overlayPresenceFromConfig,
   type OverlayPresence,
 } from "../primitives/overlayPresence";
+import { t } from "../i18n";
+
+/** Busy-phase labels from the i18n catalog — the locale-aware half of
+ *  primitives/overlayStatus.ts's overlayBusyLabel (see that file). */
+const busyLabels = (): OverlayBusyLabels => ({
+  transcribing: t("overlay.transcribing"),
+  transforming: t("overlay.transforming"),
+});
 
 /** Island rect in window-relative client coords, reported to the main process. */
 type IslandRect = { x: number; y: number; width: number; height: number };
@@ -490,7 +499,7 @@ export function OverlayPage() {
               // ONLY reactive key — it flips while the island is invisible.
               visibility: measured() ? "visible" : "hidden",
             }}
-            title="Drag to move · double-click to reset"
+            title={t("overlay.dragTitle")}
             onPointerDown={(e) => {
               // Left button only, and only while the window is interactive
               if (e.button !== 0 || !interactive()) return;
@@ -579,7 +588,7 @@ export function OverlayPage() {
                 class="text-[11px] font-medium flex-shrink-0"
                 style={{ color: "rgba(232, 232, 240, 0.9)" }}
               >
-                {overlayBusyLabel(status())}
+                {overlayBusyLabel(status(), busyLabels())}
               </span>
             </Show>
           </div>

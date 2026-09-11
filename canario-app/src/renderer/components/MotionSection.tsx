@@ -3,6 +3,7 @@
 // reduced-motion override notice.
 // Pure presentation: AppPage owns the state and the persistence.
 import { For, Show } from "solid-js";
+import { t, type MessageKey } from "../i18n";
 import { Toggle } from "./Toggle";
 import {
   ANIMATION_EFFECTS,
@@ -10,26 +11,26 @@ import {
   type AnimationSettings,
 } from "../primitives/animations";
 
-const EFFECT_LABELS: Record<AnimationEffect, { name: string; desc: string }> = {
+const EFFECT_LABEL_KEYS: Record<AnimationEffect, { name: MessageKey; desc: MessageKey }> = {
   overlay_slide: {
-    name: "Overlay slide-in",
-    desc: "Recording island slides down when recording starts",
+    name: "motion.effect.overlay_slide.name",
+    desc: "motion.effect.overlay_slide.desc",
   },
   recording_dot_pulse: {
-    name: "Recording dot pulse",
-    desc: "Pulsing red dot while recording",
+    name: "motion.effect.recording_dot_pulse.name",
+    desc: "motion.effect.recording_dot_pulse.desc",
   },
   toggle_slide: {
-    name: "Toggle slide",
-    desc: "Switches slide and change color",
+    name: "motion.effect.toggle_slide.name",
+    desc: "motion.effect.toggle_slide.desc",
   },
   delete_slide: {
-    name: "Delete slide-out",
-    desc: "History items slide out when deleted",
+    name: "motion.effect.delete_slide.name",
+    desc: "motion.effect.delete_slide.desc",
   },
   window_fade: {
-    name: "Window fade-in",
-    desc: "Windows fade and scale in when they open",
+    name: "motion.effect.window_fade.name",
+    desc: "motion.effect.window_fade.desc",
   },
 };
 
@@ -50,9 +51,9 @@ export function MotionSection(props: Props) {
       {/* Master toggle */}
       <div class="flex items-center justify-between">
         <div>
-          <p class="text-sm font-medium">Animations</p>
+          <p class="text-sm font-medium">{t("motion.master.title")}</p>
           <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Play interface animations
+            {t("motion.master.desc")}
           </p>
         </div>
         <Toggle checked={props.settings.enabled} onChange={(v) => setFlag("enabled", v)} />
@@ -62,8 +63,7 @@ export function MotionSection(props: Props) {
       <Show when={props.reducedMotion}>
         <div class="rounded-lg p-3" style={{ "background-color": "var(--surface-hover)" }}>
           <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-            Your system requests reduced motion — animations stay off while that OS
-            setting is on, regardless of the toggles here.
+            {t("motion.reducedMotion")}
           </p>
         </div>
       </Show>
@@ -75,9 +75,9 @@ export function MotionSection(props: Props) {
             {(effect) => (
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-sm font-medium">{EFFECT_LABELS[effect].name}</p>
+                  <p class="text-sm font-medium">{t(EFFECT_LABEL_KEYS[effect].name)}</p>
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                    {EFFECT_LABELS[effect].desc}
+                    {t(EFFECT_LABEL_KEYS[effect].desc)}
                   </p>
                 </div>
                 <Toggle

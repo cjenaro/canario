@@ -1,5 +1,6 @@
 // Hotkey capture widget — captures key combos for hotkey configuration
 import { createSignal, Show, onCleanup, onMount } from "solid-js";
+import { t } from "../i18n";
 
 interface Props {
   /** Current hotkey keys (e.g., ["Super", "Alt", "Space"]) */
@@ -53,7 +54,7 @@ export function HotkeyCapture(props: Props) {
   // Display the key combo
   const displayKeys = () => {
     const keys = capturing() ? currentKeys() : props.value;
-    if (keys.length === 0) return "Not set";
+    if (keys.length === 0) return t("common.notSet");
     return keys.join(" + ");
   };
 
@@ -130,7 +131,8 @@ export function HotkeyCapture(props: Props) {
         }}
       >
         <Show when={capturing()} fallback={displayKeys()}>
-          Press key combination… <span style={{ opacity: 0.6 }}>(Esc to cancel)</span>
+          {t("hotkey.capture.pressKeys")}{" "}
+          <span style={{ opacity: 0.6 }}>{t("hotkey.capture.escHint")}</span>
         </Show>
       </button>
       <Show when={!capturing()}>
@@ -147,7 +149,7 @@ export function HotkeyCapture(props: Props) {
             setCurrentKeys([]);
           }}
         >
-          Change
+          {t("hotkey.capture.change")}
         </button>
       </Show>
     </div>

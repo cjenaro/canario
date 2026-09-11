@@ -2,6 +2,7 @@
 // color (preset swatches + custom hex with validation).
 // Pure presentation: AppPage owns the state and the persistence.
 import { createEffect, createSignal, For, Show } from "solid-js";
+import { t, type MessageKey } from "../i18n";
 import {
   ACCENT_PRESETS,
   isHexColor,
@@ -11,11 +12,22 @@ import {
   type ThemeMode,
 } from "../primitives/appearance";
 
-const MODE_LABELS: Record<ThemeMode, string> = {
-  dark: "Dark",
-  light: "Light",
-  system: "System",
+const MODE_LABEL_KEYS: Record<ThemeMode, MessageKey> = {
+  dark: "appearance.mode.dark",
+  light: "appearance.mode.light",
+  system: "appearance.mode.system",
 };
+
+// Accent preset display names, keyed by preset id (the hex/value table
+// stays in primitives/appearance.ts — only the label is localized).
+const PRESET_NAME_KEYS = {
+  canary: "appearance.accent.preset.canary",
+  ocean: "appearance.accent.preset.ocean",
+  violet: "appearance.accent.preset.violet",
+  emerald: "appearance.accent.preset.emerald",
+  amber: "appearance.accent.preset.amber",
+  rose: "appearance.accent.preset.rose",
+} as const satisfies Record<string, MessageKey>;
 
 interface Props {
   mode: ThemeMode;
@@ -76,7 +88,7 @@ export function AppearanceSection(props: Props) {
               aria-pressed={props.mode === m}
               onClick={() => props.onModeChange(m)}
             >
-              {MODE_LABELS[m]}
+              {t(MODE_LABEL_KEYS[m])}
             </button>
           )}
         </For>
@@ -84,9 +96,9 @@ export function AppearanceSection(props: Props) {
 
       {/* Accent color */}
       <div class="mt-4">
-        <p class="text-sm font-medium">Accent color</p>
+        <p class="text-sm font-medium">{t("appearance.accent.title")}</p>
         <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-          Used for buttons, highlights, and the recording glow
+          {t("appearance.accent.desc")}
         </p>
 
         <div class="flex items-center gap-2 mt-2.5 flex-wrap">
@@ -94,8 +106,8 @@ export function AppearanceSection(props: Props) {
           <button
             class="w-7 h-7 rounded-full border-2 flex items-center justify-center transition-transform hover:scale-105"
             style={swatchStyle(props.accent === null, "var(--accent-default)")}
-            title="Default — each theme's built-in accent"
-            aria-label="Default accent"
+            title={t("appearance.accent.defaultTitle")}
+            aria-label={t("appearance.accent.defaultLabel")}
             aria-pressed={props.accent === null}
             onClick={() => props.onAccentChange(null)}
           >
@@ -109,8 +121,10 @@ export function AppearanceSection(props: Props) {
               <button
                 class="w-7 h-7 rounded-full border-2 flex items-center justify-center transition-transform hover:scale-105"
                 style={swatchStyle(props.accent === preset.hex, preset.hex)}
-                title={preset.name}
-                aria-label={`${preset.name} accent`}
+                title={t(PRESET_NAME_KEYS[preset.id as keyof typeof PRESET_NAME_KEYS])}
+                aria-label={t("appearance.accent.presetAria", {
+                  name: t(PRESET_NAME_KEYS[preset.id as keyof typeof PRESET_NAME_KEYS]),
+                })}
                 aria-pressed={props.accent === preset.hex}
                 onClick={() => props.onAccentChange(preset.hex)}
               >
@@ -125,7 +139,7 @@ export function AppearanceSection(props: Props) {
         {/* Custom hex */}
         <div class="flex items-center gap-2 mt-3">
           <span class="text-xs w-14 shrink-0" style={{ color: "var(--text-secondary)" }}>
-            Custom
+            {t("appearance.accent.custom")}
           </span>
           {/* Live preview chip of the typed color (dashed until valid) */}
           <div
@@ -140,7 +154,7 @@ export function AppearanceSection(props: Props) {
           <input
             type="text"
             value={customHex()}
-            placeholder="#RRGGBB"
+            placeholder={t("appearance.accent.hexPlaceholder")}
             spellcheck={false}
             class="flex-1 min-w-0 px-2 py-1.5 rounded-lg border text-xs font-mono"
             style={{
@@ -149,7 +163,7 @@ export function AppearanceSection(props: Props) {
               color: "var(--text-primary)",
               outline: "none",
             }}
-            aria-label="Custom accent color (hex)"
+            aria-label={t("appearance.accent.customLabel")}
             aria-invalid={showHexError()}
             onInput={(e) => {
               setTouched(true);
@@ -176,12 +190,12 @@ export function AppearanceSection(props: Props) {
             disabled={!customValid()}
             onClick={commitCustom}
           >
-            Apply
+            {t("appearance.accent.apply")}
           </button>
         </div>
         <Show when={showHexError()}>
           <p class="text-xs mt-1.5 pl-16" style={{ color: "var(--error)" }}>
-            Enter a hex color like #e94560 or #f53
+            {t("appearance.accent.invalidHex")}
           </p>
         </Show>
       </div>

@@ -1,5 +1,6 @@
 // Word remapping editor — manage find/replace rules and word removals
 import { createSignal, For, Show } from "solid-js";
+import { t } from "../i18n";
 
 interface Remapping {
   from: string;
@@ -82,7 +83,7 @@ export function WordRemapping(props: Props) {
           }}
           onClick={() => setTab("remap")}
         >
-          Find → Replace
+          {t("remap.tab.findReplace")}
         </button>
         <button
           class="flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-colors"
@@ -93,7 +94,7 @@ export function WordRemapping(props: Props) {
           }}
           onClick={() => setTab("remove")}
         >
-          Remove Words
+          {t("remap.tab.removeWords")}
         </button>
       </div>
 
@@ -126,7 +127,7 @@ export function WordRemapping(props: Props) {
         <div class="flex items-center gap-2">
           <input
             type="text"
-            placeholder="Find"
+            placeholder={t("remap.field.find")}
             value={newFrom()}
             onInput={(e) => setNewFrom(e.currentTarget.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAddRemapping()}
@@ -135,7 +136,7 @@ export function WordRemapping(props: Props) {
           <span style={{ color: "var(--text-secondary)", "font-size": "13px" }}>→</span>
           <input
             type="text"
-            placeholder="Replace"
+            placeholder={t("remap.field.replace")}
             value={newTo()}
             onInput={(e) => setNewTo(e.currentTarget.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAddRemapping()}
@@ -181,7 +182,7 @@ export function WordRemapping(props: Props) {
         <div class="flex items-center gap-2">
           <input
             type="text"
-            placeholder="Word to remove"
+            placeholder={t("remap.field.wordToRemove")}
             value={newRemoval()}
             onInput={(e) => setNewRemoval(e.currentTarget.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAddRemoval()}

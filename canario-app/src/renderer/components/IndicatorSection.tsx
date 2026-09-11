@@ -4,23 +4,24 @@
 // signal. Pure presentation: AppPage owns the state and the
 // persistence.
 import { For, Show } from "solid-js";
+import { t, type MessageKey } from "../i18n";
 import {
   OVERLAY_PRESENCE_MODES,
   type OverlayPresence,
 } from "../primitives/overlayPresence";
 
-const MODE_META: Record<OverlayPresence, { name: string; desc: string }> = {
+const MODE_META_KEYS: Record<OverlayPresence, { name: MessageKey; desc: MessageKey }> = {
   full: {
-    name: "Full overlay",
-    desc: "Recording pill with timer, live captions, and transcribing phases",
+    name: "indicator.full.name",
+    desc: "indicator.full.desc",
   },
   dot: {
-    name: "Dot",
-    desc: "A minimal pulsing dot while recording — nothing else on screen",
+    name: "indicator.dot.name",
+    desc: "indicator.dot.desc",
   },
   tray: {
-    name: "Tray only",
-    desc: "No on-screen indicator; the tray icon shows the recording state",
+    name: "indicator.tray.name",
+    desc: "indicator.tray.desc",
   },
 };
 
@@ -44,9 +45,9 @@ export function IndicatorSection(props: Props) {
             onClick={() => props.onChange(m)}
           >
             <div class="text-left">
-              <p class="text-sm font-medium">{MODE_META[m].name}</p>
+              <p class="text-sm font-medium">{t(MODE_META_KEYS[m].name)}</p>
               <p class="text-xs mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                {MODE_META[m].desc}
+                {t(MODE_META_KEYS[m].desc)}
               </p>
             </div>
             <div
@@ -62,9 +63,7 @@ export function IndicatorSection(props: Props) {
         )}
       </For>
       <p class="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
-        The dot and the full overlay share one per-monitor position — drag the full overlay to
-        place both. Switching modes mid-recording applies immediately; leaving “Tray only”
-        shows the indicator again on the next recording.
+        {t("indicator.note")}
       </p>
     </div>
   );

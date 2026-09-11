@@ -20,6 +20,7 @@
   "dependencies": {
     "@jitsi/robotjs": "^0.6.22",
     "@motionone/dom": "^10.18.0",
+    "@solid-primitives/i18n": "^2.2.1",
     "@tanstack/solid-virtual": "^3.13.38",
     "electron-updater": "^6.8.3"
   },

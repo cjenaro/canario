@@ -2,6 +2,7 @@
 // Connects the Electron preload API to the state machine
 
 import { onCleanup, onMount } from "solid-js";
+import { t } from "../i18n";
 import type { AppMachine } from "../state/machine";
 import { micDevicesFromResponse, type MicDevice } from "./micDevice";
 import { transcriptionTransformFailed } from "./transform";
@@ -151,7 +152,9 @@ export function translateSidecarEvent(event: Record<string, unknown>, deps: Side
       // the overlay, and surface the failure — lastError triggers the
       // AppPage error toast automatically.
       deps.updateContext({
-        lastError: `Speech backend exited unexpectedly (code ${event.code ?? "unknown"}) — please restart Canario`,
+        lastError: t("errors.sidecarCrashed", {
+          code: String(event.code ?? "unknown"),
+        }),
       });
       deps.send({ type: "SIDECAR_CRASHED" });
       deps.api.hideOverlay();
@@ -272,7 +275,7 @@ export function createCanario(machine: AppMachine) {
       // event path: record the reason, then re-derive readiness (the
       // rejection may belong to a variant other than the one selected).
       updateContext({
-        lastError: (res?.error as string) || "Model download could not be started",
+        lastError: (res?.error as string) || t("model.downloadCouldNotStart"),
       });
       send({ type: "DOWNLOAD_FAILED" });
       await checkModel();
