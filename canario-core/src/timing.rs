@@ -29,7 +29,7 @@
 //! | `stop_observed` | `recording` | capture loop noticed the stop flag (after its 50 ms poll sleep) |
 //! | `audio_cloned` | `recording` | whole-buffer clone taken on stop |
 //! | `mic_released` | `recording` | capture stream dropped |
-//! | `beep_stop_start` / `beep_stop_done` | `recording` | stop beep (runs on the transcribing thread) |
+//! | `beep_stop_start` / `beep_stop_done` | `recording` | stop beep handoff (µs — the sequence runs on its own detached thread, canario-9mw) |
 //! | `resample_start` / `resample_done` | `recording` | resample to 16 kHz |
 //! | `recognizer_load_start` / `recognizer_load_done` | `recording` | model load on cache miss (cold dictation) |
 //! | `decode_start` / `decode_end` | `recording` | final whole-buffer decode |

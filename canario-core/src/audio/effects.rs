@@ -7,17 +7,85 @@
 /// `AppConfig::sound_effects_volume`); out-of-range values are clamped
 /// by [`clamp_volume`], which is also the default amplitude.
 use std::io::Cursor;
+use std::time::Duration;
 
 /// A single-beep tone at ~800 Hz, 120 ms — played when recording starts.
 pub fn beep_start(volume: f32) {
     play_tone(800.0, 0.12, volume);
 }
 
+/// One step of a multi-tone beep sequence: play a tone, or rest.
+///
+/// Sequences are data (see [`stop_beep_steps`]) so their ordering and
+/// timing are unit-testable without audio hardware.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BeepStep {
+    /// Play a tone (volume is applied by the player, not the step).
+    Tone { freq_hz: f32, duration_secs: f32 },
+    /// Silence between tones.
+    Gap(Duration),
+}
+
+/// The stop double-beep: ~600 Hz, 80 ms × 2 with a 60 ms inter-tone gap.
+///
+/// The gap is tone-start to tone-start — the player enqueues each tone
+/// asynchronously, exactly as the old inline `beep_stop` scheduled its
+/// two `play_tone` calls — so the audible timing is unchanged.
+fn stop_beep_steps() -> [BeepStep; 3] {
+    [
+        BeepStep::Tone {
+            freq_hz: 600.0,
+            duration_secs: 0.08,
+        },
+        BeepStep::Gap(Duration::from_millis(60)),
+        BeepStep::Tone {
+            freq_hz: 600.0,
+            duration_secs: 0.08,
+        },
+    ]
+}
+
+/// Run a beep sequence to completion: tones are enqueued on their own
+/// playback threads (as [`play_tone`] always did) and gaps sleep the
+/// calling thread. Called on the sequence's own thread, never a
+/// pipeline thread — the gaps here once cost the transcribing path
+/// 60 ms per dictation.
+fn run_beep_sequence(steps: &[BeepStep], volume: f32) {
+    for step in steps {
+        match *step {
+            BeepStep::Tone {
+                freq_hz,
+                duration_secs,
+            } => play_tone(freq_hz, duration_secs, volume),
+            BeepStep::Gap(gap) => std::thread::sleep(gap),
+        }
+    }
+}
+
 /// A double-beep tone at ~600 Hz, 80 ms × 2 — played when recording stops.
+///
+/// Non-blocking by design (bead canario-9mw): the whole sequence — both
+/// tones plus the 60 ms inter-tone sleep — runs on its own detached
+/// thread, because that sleep used to sit on the transcribing thread and
+/// added ~60 ms to every release-to-transcript. Callers get control back
+/// as soon as the thread is spawned; playback failures are logged by the
+/// thread, like every other tone.
+///
+/// Overlap policy: each call owns its sequence thread, so a stop that
+/// arrives while the previous double-beep is still playing overlaps its
+/// tail rather than queueing. Stops are at least a capture cycle apart
+/// (a sub-0.2 s recording is already degenerate), so tails rarely meet,
+/// and overlap is preferred over a serializing playback worker because
+/// it keeps the audible scheduling byte-identical to the inline version.
 pub fn beep_stop(volume: f32) {
-    play_tone(600.0, 0.08, volume);
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    play_tone(600.0, 0.08, volume);
+    let spawned = std::thread::Builder::new()
+        .name("beep-stop".to_string())
+        .spawn(move || run_beep_sequence(&stop_beep_steps(), volume));
+    if let Err(e) = spawned {
+        // Unspawnable thread means no beep at all — say so instead of
+        // silently dropping the effect.
+        tracing::debug!("Sound effect playback failed: {}", e);
+    }
 }
 
 /// A confirmation chime at ~1000 Hz, 150 ms — played after transcription is pasted.
@@ -131,5 +199,57 @@ mod tests {
         assert_eq!(clamp_volume(1.5), 1.0);
         assert_eq!(clamp_volume(-0.2), 0.0);
         assert_eq!(clamp_volume(f32::INFINITY), 1.0);
+    }
+
+    /// The stop beep is exactly two 600 Hz / 80 ms tones with a 60 ms
+    /// gap between them (bead canario-9mw). That gap is what used to
+    /// sleep on the transcribing thread; asserting the sequence pins
+    /// the sequencing contract — order and timing — without touching
+    /// audio hardware.
+    #[test]
+    fn stop_beep_sequence_is_two_tones_with_60ms_gap() {
+        let steps = stop_beep_steps();
+
+        let (freq_a, dur_a) = match steps[0] {
+            BeepStep::Tone {
+                freq_hz,
+                duration_secs,
+            } => (freq_hz, duration_secs),
+            other => panic!("first step must be a tone, got {:?}", other),
+        };
+        let gap = match steps[1] {
+            BeepStep::Gap(gap) => gap,
+            other => panic!("second step must be a gap, got {:?}", other),
+        };
+        let (freq_b, dur_b) = match steps[2] {
+            BeepStep::Tone {
+                freq_hz,
+                duration_secs,
+            } => (freq_hz, duration_secs),
+            other => panic!("third step must be a tone, got {:?}", other),
+        };
+
+        assert_eq!((freq_a, dur_a), (600.0, 0.08));
+        assert_eq!(gap, Duration::from_millis(60));
+        assert_eq!((freq_b, dur_b), (600.0, 0.08));
+    }
+
+    /// `beep_stop` must return without waiting out the inter-tone gap:
+    /// the sequence (60 ms of sleeping, minimum) belongs to its own
+    /// thread, never the transcribing path (bead canario-9mw). Volume 0
+    /// keeps the spawned playback silent; the assertion is purely about
+    /// the caller's wall time.
+    #[test]
+    fn beep_stop_returns_before_the_inter_tone_gap_elapses() {
+        let started = std::time::Instant::now();
+
+        beep_stop(0.0);
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(60),
+            "beep_stop blocked the caller for {:?} — the gap belongs on the sequence thread",
+            elapsed
+        );
     }
 }

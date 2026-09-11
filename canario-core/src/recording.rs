@@ -249,7 +249,10 @@ fn recording_loop(
     drop(stream);
     timing::mark("mic_released");
 
-    // Play stop beep (double-beep) before transcription begins
+    // Kick off the stop double-beep. Non-blocking (bead canario-9mw):
+    // the whole sequence — tones + inter-tone gap — runs on its own
+    // detached thread, so resample + decode below start immediately.
+    // The marks now measure only the (microsecond) handoff.
     if sound_effects {
         timing::mark("beep_stop_start");
         crate::audio::effects::beep_stop(sound_volume);
