@@ -10,10 +10,33 @@ permissions:
 
 jobs:
   # ── Build Rust sidecar for all platforms ─────────────────────────────
+  # Each target maps 1:1 to a sherpa-onnx prebuilt archive (sherpa-onnx-sys
+  # build.rs picks it from CARGO_CFG_TARGET_OS/ARCH; version pinned by
+  # Cargo.lock): linux-x64, osx-x64, osx-arm64, win-x64 — static link mode
+  # (default when no sherpa feature is enabled) so the sidecar is
+  # self-contained and needs no runtime .so/.dylib/.dll staging.
   build-sidecar:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Native builds; their artifacts are consumed by build-electron
+          # via the `sidecar-${{ matrix.os }}` name — do not rename.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            upload: true
+          - os: macos-latest        # arm64 host
+            target: aarch64-apple-darwin
+            upload: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            upload: true
+          # Compile coverage for osx-x64 (the remaining prebuilt archive
+          # target): cross-compiled on the arm64 runner with the x86_64
+          # sherpa static libs. Not packaged today, so it is not uploaded —
+          # keeping the artifact contract for downstream jobs unchanged.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            upload: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +47,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # Installs the target std (no-op for host triples; enables the
+          # x86_64-apple-darwin cross-build on the arm64 macOS runner).
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -31,30 +58,32 @@ jobs:
       - name: Cache sherpa-onnx prebuilt libs
         uses: actions/cache@v4
         with:
-          # sherpa-onnx-sys build.rs auto-downloads the matching prebuilt
-          # archive into target/sherpa-onnx-prebuilt/ on first build.
+          # sherpa-onnx-sys build.rs auto-downloads the archive matching
+          # matrix.target into target/sherpa-onnx-prebuilt/<archive-stem>/
+          # on first build, so the cache is keyed per target.
           path: target/sherpa-onnx-prebuilt
-          key: sherpa-onnx-prebuilt-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          key: sherpa-onnx-prebuilt-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build sidecar
-        run: cargo build --release --bin canario-electron
+        run: cargo build --release --bin canario-electron --target ${{ matrix.target }}
 
       - name: Prepare sidecar directory (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: matrix.upload && runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p canario-app/sidecar
-          cp -f target/release/canario-electron canario-app/sidecar/
+          cp -f target/${{ matrix.target }}/release/canario-electron canario-app/sidecar/
           chmod +x canario-app/sidecar/canario-electron
 
       - name: Prepare sidecar directory (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.upload && runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path canario-app/sidecar | Out-Null
-          Copy-Item -Force -Path target/release/canario-electron.exe -Destination canario-app/sidecar/
+          Copy-Item -Force -Path target/${{ matrix.target }}/release/canario-electron.exe -Destination canario-app/sidecar/
 
       - name: Upload sidecar artifact
+        if: matrix.upload
         uses: actions/upload-artifact@v4
         with:
           name: sidecar-${{ matrix.os }}
