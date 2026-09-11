@@ -81,13 +81,11 @@ the repository root (requires the GTK development packages listed above).
 
 ### Build a local Linux AppImage
 
-To run a packaged app without the development server, build and stage the
-release sidecar, then package the frontend (from the repository root):
+To run a packaged app without the development server, build the release
+sidecar, then package the frontend (from the repository root):
 
 ```bash
 cargo build --release --bin canario-electron
-mkdir -p canario-app/sidecar
-cp -f target/release/canario-electron canario-app/sidecar/
 cd canario-app
 npm ci
 npm run build
@@ -95,6 +93,11 @@ npm run package:linux
 chmod +x dist/Canario-*.AppImage
 ./dist/Canario-*.AppImage
 ```
+
+`package:linux` automatically stages the release sidecar before packaging.
+It stops with a rebuild instruction if the binary is missing or older than
+its Rust sources, manifests, or lockfile. To stage it separately, run
+`npm run stage:sidecar` from `canario-app`.
 
 The AppImage runs directly; no system installation is needed. If your system
 does not have FUSE support, launch it with `--appimage-extract-and-run`.
@@ -119,11 +122,11 @@ Notes:
 - The repacked AppImage carries no embedded blockmap (differential-update
   data); auto-update falls back to full downloads.
 
-Build both installers in one invocation — electron-builder removes artifacts
-of targets not named on the command line:
+`package:linux` builds both installers in one invocation — electron-builder
+removes artifacts of targets not named on the command line:
 
 ```bash
-npx electron-builder --linux AppImage deb --publish never
+npm run package:linux
 ```
 
 
