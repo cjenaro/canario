@@ -1252,6 +1252,9 @@ Full list of commands the sidecar accepts, with their parameters and responses:
 | `stop_hotkey` | — | — | Stops listener |
 | `restart_hotkey` | — | — | Reloads config + restarts |
 | `hotkey_status` | — | `HotkeyStatus` | Hotkey backend health; Linux evdev permission failures carry `fix_command` |
+| `set_transform_credential` | `key` (string or null) | `{ stored: bool }` | Stores (non-empty) or drops (null/blank) the transform provider API key in the sidecar's **memory only** — never config.json, never logs (canario-fgm.2; raw credential-bearing lines are withheld/redacted on every log path). The Electron main process persists the key via safeStorage and pushes it here at boot and on change |
+| `transform_status` | — | `{ enabled, provider: { base_url, model }, timeout_ms, credential_present }` | Sidecar truth about the transformation feature — the provider block from (reloaded) config plus whether the memory-only credential is held. The key itself never crosses the wire |
+| `transform_test` | — | `{ latency_ms }` or error | One minimal chat-completions round trip through the configured provider with the in-memory credential (the settings "Test connection" button). Fails fast with a descriptive error; payload is transcript+instruction only (fgm.1 D5) |
 | `set_autostart` | `enabled`, `exec` (optional) | `{ enabled: bool }` | Creates/removes the single login entry (`~/.config/autostart/com.canario.Canario.desktop`) and keeps `config.autostart` in sync; `exec` writes a standalone entry, omit it to symlink the menu entry |
 | `ping` | — | `{ pong: true, version: "0.1.2", protocol: 1 }` | Health check + protocol handshake. `protocol` is the wire-compatibility version (`PROTOCOL_VERSION`, pinned in lockstep with canario-app/src/main/version.ts by the sidecar's protocol tests); a mismatching or missing number makes the app show a persistent version-mismatch warning (canario-dmp.4). Stays 1 — nothing has shipped since it was introduced, and the additive events plus the `delete_history` `entry_id` fix ride it |
 | `diagnostics` | — | `Diagnostics` JSON (see below) | Reads log tail, probes tools |
@@ -1291,9 +1294,11 @@ The same blob is available on the CLI via `canario-cli --diagnostics`
 |-------|--------|-----------|-------------|
 | `RecordingStarted` | — | Once per recording | Show overlay, start dot animation |
 | `RecordingStopped` | — | Once per recording | Hide overlay or change to "Transcribing…" |
+| `RecordingCancelled` | — | On Escape-cancel | Audio was discarded — hide recording UI, no paste, no history |
 | `TranscriptionStarted` | — | Once per recording | Emitted when the finished capture begins transcribing (before decode starts) — show the "Transcribing…" state; deriving the state from a successful `stop_recording` response is equally valid, both paths are canonical (canario-dmp.9) |
-| `TranscriptionReady` | `text`, `duration_secs` | Once per recording | Display text, auto-paste, add to history |
+| `TranscriptionReady` | `text`, `duration_secs`; optional `raw_text`, `transform_failed` | Once per recording | Display text, auto-paste, add to history. `text` is canonical — the transformed transcript when `transform.enabled` ran a pass (fgm.3 D3: the pipeline completes before this event). `raw_text` (pre-transform transcript) rides along only when a transformation changed the text; `transform_failed` is true when a pass was attempted and failed/timed out and the raw text flowed on (D5d) — frontends surface the fallback affordance. Both fields are wire-skipped when unset, so pre-fgm.3 frontends see the exact old shape |
 | `AudioLevel` | `level` (0.0–1.0) | ~20Hz during recording | Update level bar |
+| `PartialTranscript` | `text` | Periodic during long recordings (after the live-captions threshold) | Live preview only — never paste or store; the authoritative text arrives via `TranscriptionReady` |
 | `Error` | `message` | On failure | Show toast notification |
 | `ModelDownloadProgress` | `progress` (0.0–1.0) | ~1Hz during download | Update progress bar |
 | `ModelDownloadComplete` | — | Once | Update model status, enable recording |
