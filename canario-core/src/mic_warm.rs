@@ -24,6 +24,15 @@
 //!   Either way the recording's `start_offset` is the ring's write
 //!   position at that moment, and the loop drains `[offset, written)`
 //!   into its own buffer every tick.
+//! * Device selection (canario-1hq.2): a process-wide preferred
+//!   input name ([`set_preferred_device`], fed from
+//!   `AppConfig.input_device` by the backend whenever the config
+//!   loads or changes — the recording pipeline itself never changes).
+//!   [`begin_recording`] opens it when set, else the system default,
+//!   falling back to the default (with a warning) when the preferred
+//!   device is missing at open time. A parked stream opened for a
+//!   different selection than now wanted is released, not reused —
+//!   mirroring the park-time default-identity check below.
 //! * The capture period is pinned small ([`PREFERRED_PERIOD_FRAMES`]):
 //!   a warm press waits out the *remaining* period before its first
 //!   block arrives, and the host default (~2048 frames ≈ 43 ms here)
@@ -56,10 +65,13 @@
 //!   same ring (offsets stay valid across the swap), at the cost of a
 //!   short audio gap. One reopen per recording; a second failure
 //!   aborts and transcribes the partial audio.
-//! * At park time the default input device is re-queried: if it no
-//!   longer matches the captured device (default-source switch while
-//!   parked), the stream is released instead, so a stale device is
-//!   captured for at most one dictation.
+//! * At park time the wanted device is re-checked: with a preferred
+//!   device set, the parked stream must have been capturing from that
+//!   same device; in system-default mode the default input device is
+//!   re-queried, and if it no longer matches the captured device
+//!   (default-source switch while parked) the stream is released
+//!   instead — so a stale device is captured for at most one
+//!   dictation.
 //!
 //! # Timing marks
 //!
@@ -247,6 +259,98 @@ impl DeviceIdentity {
     }
 }
 
+// ── Input device enumeration (canario-1hq.2) ─────────────────────────
+
+/// An enumerated audio input device, identified by its host name —
+/// the settings picker's whole vocabulary. Names are what device
+/// selection matches on everywhere in this module.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MicDevice {
+    pub name: String,
+}
+
+/// Enumerate the host's input devices, deduplicated by name (first
+/// occurrence wins — hosts can expose one physical device more than
+/// once). An enumeration failure degrades to an empty list: callers
+/// surface "no devices" instead of an error, so a missing audio
+/// subsystem never breaks the picker.
+pub fn list_input_devices() -> Vec<MicDevice> {
+    enumerate_input_devices(&cpal::default_host())
+}
+
+fn enumerate_input_devices(host: &cpal::Host) -> Vec<MicDevice> {
+    match host.input_devices() {
+        Ok(devices) => deduped_devices(devices.filter_map(|d| d.name().ok())),
+        Err(e) => {
+            tracing::warn!("Could not enumerate input devices: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Deduplicate device names, first occurrence winning, dropping
+/// empty names (a device whose name cannot be read or is blank
+/// cannot be selected by name anyway).
+fn deduped_devices(names: impl Iterator<Item = String>) -> Vec<MicDevice> {
+    let mut seen = std::collections::BTreeSet::new();
+    names
+        .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+        .map(|name| MicDevice { name })
+        .collect()
+}
+
+// ── Process-wide preferred device (canario-1hq.2) ────────────────────
+
+/// The preferred input device name, process-wide. `Canario` pushes
+/// `AppConfig.input_device` here whenever the config loads or changes
+/// (see `Canario::new` / `update_config` / `refresh_config`), so a
+/// settings change takes effect on the next recording without a
+/// restart — [`begin_recording`] reads it here, which is why the
+/// recording pipeline needs no changes of its own. `None`/blank means
+/// the system default (the pre-picker behavior). Same shape as
+/// `transform`'s process-wide credential store (fgm.3).
+static PREFERRED_DEVICE: std::sync::OnceLock<parking_lot::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Serialize every test that touches the process-wide store — Rust
+/// runs unit tests on parallel threads, and a store is exactly the
+/// kind of state they would clobber (mirrors the sidecar's
+/// CREDENTIAL_TEST_LOCK).
+#[cfg(test)]
+pub(crate) static PREFERRED_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Store (`Some` non-blank) or clear (`None`/blank) the preferred
+/// input device. The value is trimmed: a whitespace-only config value
+/// means "system default", not a name to match.
+pub fn set_preferred_device(name: Option<String>) {
+    let lock = PREFERRED_DEVICE.get_or_init(|| parking_lot::Mutex::new(None));
+    *lock.lock() = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+}
+
+/// Clone of the preferred device name, if one is set.
+pub fn preferred_device() -> Option<String> {
+    PREFERRED_DEVICE.get().and_then(|lock| lock.lock().clone())
+}
+
+/// Which input device a recording wants: the process-wide preferred
+/// device, or the system default.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum DeviceSelection {
+    /// The named preferred device (from `AppConfig.input_device`).
+    Preferred(String),
+    /// The system default input device (the pre-picker behavior).
+    SystemDefault,
+}
+
+/// The selection the next recording wants, mapped from the
+/// process-wide preference (empty/absent = system default).
+fn current_selection() -> DeviceSelection {
+    match preferred_device() {
+        Some(name) => DeviceSelection::Preferred(name),
+        None => DeviceSelection::SystemDefault,
+    }
+}
+
 /// Identity of the current default input device, if one exists.
 fn default_input_identity() -> Option<DeviceIdentity> {
     let device = cpal::default_host().default_input_device()?;
@@ -263,6 +367,11 @@ struct WarmState {
     ring: RingBuffer,
     stream: Option<cpal::Stream>,
     stream_identity: Option<DeviceIdentity>,
+    /// Which device selection the live stream was opened for — the
+    /// press-time reuse check (a stream parked for another selection
+    /// than now wanted must be released, not reused) and the
+    /// preferred-mode park check both read it (canario-1hq.2).
+    stream_selection: Option<DeviceSelection>,
     phase: Phase,
     /// Cumulative error-callback count for the live stream (reset when
     /// a stream is stored).
@@ -283,6 +392,7 @@ impl WarmState {
             },
             stream: None,
             stream_identity: None,
+            stream_selection: None,
             phase: Phase::Released,
             error_count: 0,
             first_audio_at: DISARMED,
@@ -344,12 +454,20 @@ pub(crate) fn begin_recording() -> anyhow::Result<MicSession> {
 
 impl WarmMic {
     fn begin_recording(&self) -> anyhow::Result<MicSession> {
-        // Fast path — a healthy parked stream: arm and go (µs). The
-        // arm runs under the state lock so a concurrent data block
-        // cannot slip between the threshold store and the flag reset.
+        // Fast path — a healthy parked stream opened for the device now
+        // wanted: arm and go (µs). The arm runs under the state lock so a
+        // concurrent data block cannot slip between the threshold store
+        // and the flag reset.
+        let wanted = current_selection();
         let reused = {
             let mut st = self.shared.state.lock();
-            if st.stream.is_some() && st.error_count == 0 {
+            if begin_verdict(
+                st.stream.is_some(),
+                st.error_count > 0,
+                st.stream_selection.as_ref(),
+                &wanted,
+            ) == BeginVerdict::Reuse
+            {
                 let offset = st.ring.written();
                 st.first_audio_marked = false;
                 st.first_audio_at = offset;
@@ -377,17 +495,28 @@ impl WarmMic {
             });
         }
 
-        // An errored parked stream must not be reused. Drop it OUTSIDE
-        // the lock first (cpal joins its audio thread on drop).
-        let failed = {
+        // A parked stream we must not reuse (errored, or opened for a
+        // different device than the one now wanted — e.g. the
+        // preference changed while parked) is released here. Drop it
+        // OUTSIDE the lock first (cpal joins its audio thread on drop).
+        let (failed, wrong_device) = {
             let mut st = self.shared.state.lock();
+            let wrong_device = st.stream.is_some()
+                && st.error_count == 0
+                && st.stream_selection.as_ref() != Some(&wanted);
             st.stream_identity = None;
+            st.stream_selection = None;
             if st.stream.is_some() {
                 st.phase = Phase::Released;
             }
-            st.stream.take()
+            (st.stream.take(), wrong_device)
         };
-        if failed.is_some() {
+        if wrong_device {
+            tracing::info!(
+                "Parked mic stream was opened for a different device — \
+                 releasing it and opening the wanted one"
+            );
+        } else if failed.is_some() {
             tracing::info!("Parked mic stream was unhealthy — reopening input device");
         }
         drop(failed);
@@ -398,8 +527,8 @@ impl WarmMic {
         // releases the lock while waiting).
         let mut st = self.shared.state.lock();
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
+        let plan = resolve_device_plan(&wanted, &enumerate_input_devices(&host));
+        let device = open_input_device(&host, &plan)
             .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
         let supported = device.default_input_config()?;
         let identity = DeviceIdentity::of(&device, &supported);
@@ -417,6 +546,7 @@ impl WarmMic {
         st.first_audio_at = offset;
         st.error_count = 0;
         st.stream_identity = Some(identity);
+        st.stream_selection = Some(selection_of_plan(&plan));
         st.phase = Phase::Recording;
         st.stream = Some(stream);
         let played = st.stream.as_ref().expect("stored above").play();
@@ -500,8 +630,9 @@ impl MicSession {
 
         let mut st = self.shared.state.lock();
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
+        let wanted = current_selection();
+        let plan = resolve_device_plan(&wanted, &enumerate_input_devices(&host));
+        let device = open_input_device(&host, &plan)
             .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
         let supported = device.default_input_config()?;
         let identity = DeviceIdentity::of(&device, &supported);
@@ -509,6 +640,7 @@ impl MicSession {
         st.ring
             .ensure_capacity_for(identity.sample_rate, self.shared.ring_secs);
         st.stream_identity = Some(identity);
+        st.stream_selection = Some(selection_of_plan(&plan));
         st.error_count = 0;
         st.stream = Some(stream);
         let played = st.stream.as_ref().expect("stored above").play();
@@ -523,7 +655,9 @@ impl MicSession {
 
     /// End of recording: disarm `first_audio`, then either park for
     /// the idle window (arming the reaper) or release now when the
-    /// default device no longer matches the captured one.
+    /// wanted device no longer matches the captured one (with a
+    /// preferred device: it must be that device; in system-default
+    /// mode: the default input device must still match).
     pub(crate) fn finish(&mut self) {
         if self.finished {
             return;
@@ -537,6 +671,7 @@ impl MicSession {
             let keep = st.stream.is_some()
                 && park_decision(
                     st.stream_identity.as_ref(),
+                    &current_selection(),
                     default_input_identity().as_ref(),
                 );
             if keep {
@@ -545,6 +680,7 @@ impl MicSession {
                 };
             } else {
                 st.stream_identity = None;
+                st.stream_selection = None;
                 st.phase = Phase::Released;
                 released = st.stream.take();
             }
@@ -559,6 +695,7 @@ impl MicSession {
             let failed = {
                 let mut st = self.shared.state.lock();
                 st.stream_identity = None;
+                st.stream_selection = None;
                 st.phase = Phase::Released;
                 st.stream.take()
             };
@@ -575,16 +712,114 @@ impl Drop for MicSession {
 
 // ── Decisions (pure — unit-testable seams) ────────────────────────────
 
-/// Should the stream stay parked after a recording? Only when the
-/// default input device still matches the captured one — a hotplug or
-/// default-source switch must not capture from a stale device forever.
+/// Should the stream stay parked after a recording? With a preferred
+/// device set, only while the parked stream captures from that exact
+/// device (the system default is irrelevant — a default-source switch
+/// must not release a stream the user explicitly chose). In
+/// system-default mode, only while the default input device still
+/// matches the captured one — a hotplug or default-source switch must
+/// not capture from a stale device forever.
 fn park_decision(
     parked: Option<&DeviceIdentity>,
+    wanted: &DeviceSelection,
     current_default: Option<&DeviceIdentity>,
 ) -> bool {
-    match (parked, current_default) {
-        (Some(p), Some(c)) => p == c,
-        _ => false,
+    let Some(parked) = parked else { return false };
+    match wanted {
+        DeviceSelection::Preferred(name) => parked.name == *name,
+        DeviceSelection::SystemDefault => current_default == Some(parked),
+    }
+}
+
+/// What to do with a parked stream at press time: reuse it (µs) or
+/// release it and open the wanted device fresh. "Healthy" means a
+/// stream exists and has never errored; a stream opened for a
+/// DIFFERENT selection than now wanted (the preference changed while
+/// parked) must not be reused — the recording would capture from the
+/// wrong device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeginVerdict {
+    /// Reuse the parked stream.
+    Reuse,
+    /// Release it (if any) and open the wanted device inline.
+    Release,
+}
+
+fn begin_verdict(
+    parked: bool,
+    errored: bool,
+    opened_for: Option<&DeviceSelection>,
+    wanted: &DeviceSelection,
+) -> BeginVerdict {
+    if parked && !errored && opened_for == Some(wanted) {
+        BeginVerdict::Reuse
+    } else {
+        BeginVerdict::Release
+    }
+}
+
+/// Which concrete device to open for `wanted`, given the available
+/// (enumerated) devices — the pure half of the cold open. A preferred
+/// device that is missing at open time falls back to the system
+/// default (`because_missing` drives the warning log): correctness
+/// over strictness, dictation must never fail because a USB mic was
+/// unplugged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DevicePlan {
+    /// Open the system default input device. `because_missing` names
+    /// the preferred device this falls back FROM, if any.
+    Default { because_missing: Option<String> },
+    /// Open the named device.
+    Named(String),
+}
+
+fn resolve_device_plan(wanted: &DeviceSelection, available: &[MicDevice]) -> DevicePlan {
+    match wanted {
+        DeviceSelection::SystemDefault => DevicePlan::Default {
+            because_missing: None,
+        },
+        DeviceSelection::Preferred(name) => {
+            if available.iter().any(|d| d.name == *name) {
+                DevicePlan::Named(name.clone())
+            } else {
+                DevicePlan::Default {
+                    because_missing: Some(name.clone()),
+                }
+            }
+        }
+    }
+}
+
+/// The selection a stream opened under `plan` actually captures from.
+/// A fallback counts as [`DeviceSelection::SystemDefault`], so the
+/// next press re-resolves the (possibly re-attached) preferred device
+/// instead of latching onto the fallback stream forever.
+fn selection_of_plan(plan: &DevicePlan) -> DeviceSelection {
+    match plan {
+        DevicePlan::Default { .. } => DeviceSelection::SystemDefault,
+        DevicePlan::Named(name) => DeviceSelection::Preferred(name.clone()),
+    }
+}
+
+/// Open the input device a recording wants (the impure half of
+/// [`resolve_device_plan`]): the named preferred device when the plan
+/// says so, else the system default — with a warning when that is a
+/// fallback from a preferred device missing at open time.
+fn open_input_device(host: &cpal::Host, plan: &DevicePlan) -> Option<cpal::Device> {
+    match plan {
+        DevicePlan::Default { because_missing } => {
+            if let Some(missing) = because_missing {
+                tracing::warn!(
+                    "Preferred input device {:?} not found — falling back \
+                     to the system default",
+                    missing
+                );
+            }
+            host.default_input_device()
+        }
+        DevicePlan::Named(name) => host.input_devices().ok().and_then(|mut devices| {
+            devices.find(|d| d.name().ok().as_deref() == Some(name.as_str()))
+        }),
     }
 }
 
@@ -660,6 +895,7 @@ fn reaper_loop(shared: Arc<SharedMic>) {
                 if remaining.is_zero() {
                     let stream = st.stream.take();
                     st.stream_identity = None;
+                    st.stream_selection = None;
                     st.phase = Phase::Released;
                     st.reaper_alive = false;
                     drop(st); // release the lock before joining the audio thread
@@ -962,10 +1198,12 @@ mod tests {
 
     // ── decisions ─────────────────────────────────────────────────────
 
-    /// Park only while the default device still matches; any mismatch
-    /// or a missing default releases.
+    /// Park only while the wanted device still matches the captured
+    /// one. System-default mode: the default must match (any mismatch
+    /// or a missing default releases). Preferred mode: the parked
+    /// stream must BE that device — the default is irrelevant.
     #[test]
-    fn park_decision_requires_matching_default_device() {
+    fn park_decision_requires_matching_wanted_device() {
         let a = DeviceIdentity {
             name: "Mic A".into(),
             sample_rate: 48_000,
@@ -984,12 +1222,223 @@ mod tests {
             sample_rate: 44_100,
             channels: 2,
         };
+        let prefer_a = DeviceSelection::Preferred("Mic A".into());
 
-        assert!(park_decision(Some(&a), Some(&a2)));
-        assert!(!park_decision(Some(&a), Some(&b)));
-        assert!(!park_decision(Some(&a), Some(&a_other_rate)));
-        assert!(!park_decision(Some(&a), None), "no default → release");
-        assert!(!park_decision(None, Some(&a2)), "no identity → release");
+        // System-default mode: unchanged semantics.
+        assert!(park_decision(
+            Some(&a),
+            &DeviceSelection::SystemDefault,
+            Some(&a2)
+        ));
+        assert!(!park_decision(
+            Some(&a),
+            &DeviceSelection::SystemDefault,
+            Some(&b)
+        ));
+        assert!(!park_decision(
+            Some(&a),
+            &DeviceSelection::SystemDefault,
+            Some(&a_other_rate)
+        ));
+        assert!(
+            !park_decision(Some(&a), &DeviceSelection::SystemDefault, None),
+            "no default → release"
+        );
+        assert!(
+            !park_decision(None, &DeviceSelection::SystemDefault, Some(&a2)),
+            "no identity → release"
+        );
+
+        // Preferred mode: the parked stream must capture from the
+        // preferred device; a default switch (even to a different
+        // device, or no default at all) must NOT release it.
+        assert!(park_decision(Some(&a), &prefer_a, Some(&b)));
+        assert!(park_decision(Some(&a), &prefer_a, None));
+        assert!(!park_decision(
+            Some(&a),
+            &DeviceSelection::Preferred("Mic B".into()),
+            Some(&a2)
+        ));
+    }
+
+    // ── preferred device (canario-1hq.2) ─────────────────────────────
+
+    /// The process-wide store: Some(non-blank) stores (trimmed),
+    /// None/blank clears — same posture as the sidecar's credential
+    /// store tests.
+    #[test]
+    fn preferred_device_store_round_trip_and_clearing() {
+        let _guard = PREFERRED_TEST_LOCK.lock();
+        set_preferred_device(None);
+        assert!(preferred_device().is_none());
+
+        set_preferred_device(Some("USB Mic".into()));
+        assert_eq!(preferred_device().as_deref(), Some("USB Mic"));
+
+        // Blank counts as absent (system default), not a stored name.
+        set_preferred_device(Some("   ".into()));
+        assert!(preferred_device().is_none());
+
+        // Whitespace is trimmed, not stored verbatim.
+        set_preferred_device(Some("  Trimmed  ".into()));
+        assert_eq!(preferred_device().as_deref(), Some("Trimmed"));
+
+        set_preferred_device(None);
+        assert!(preferred_device().is_none());
+    }
+
+    /// The preference maps onto the recording's wanted selection:
+    /// absent/blank → system default, a name → that device.
+    #[test]
+    fn current_selection_maps_preference_to_selection() {
+        let _guard = PREFERRED_TEST_LOCK.lock();
+        set_preferred_device(None);
+        assert_eq!(current_selection(), DeviceSelection::SystemDefault);
+
+        set_preferred_device(Some("Mic B".into()));
+        assert_eq!(
+            current_selection(),
+            DeviceSelection::Preferred("Mic B".into())
+        );
+
+        set_preferred_device(None);
+    }
+
+    /// A healthy parked stream is reused ONLY when it was opened for
+    /// the selection now wanted: an errored stream — or one opened for
+    /// a different device (the preference changed while parked, in
+    /// either direction) — is released and the wanted device opened
+    /// fresh.
+    #[test]
+    fn begin_verdict_requires_health_and_matching_selection() {
+        let a = DeviceSelection::Preferred("Mic A".into());
+        let a2 = a.clone();
+        let b = DeviceSelection::Preferred("Mic B".into());
+        let sys = DeviceSelection::SystemDefault;
+
+        // Healthy + matching → reuse.
+        assert_eq!(
+            begin_verdict(true, false, Some(&a), &a2),
+            BeginVerdict::Reuse
+        );
+        assert_eq!(
+            begin_verdict(true, false, Some(&sys), &sys),
+            BeginVerdict::Reuse
+        );
+        // Errored, or no stream, or no recorded selection → release.
+        assert_eq!(
+            begin_verdict(true, true, Some(&a), &a2),
+            BeginVerdict::Release
+        );
+        assert_eq!(
+            begin_verdict(false, false, Some(&a), &a2),
+            BeginVerdict::Release
+        );
+        assert_eq!(begin_verdict(true, false, None, &a2), BeginVerdict::Release);
+        // Selection mismatch in every direction → release.
+        assert_eq!(
+            begin_verdict(true, false, Some(&a), &b),
+            BeginVerdict::Release
+        );
+        assert_eq!(
+            begin_verdict(true, false, Some(&a), &sys),
+            BeginVerdict::Release
+        );
+        assert_eq!(
+            begin_verdict(true, false, Some(&sys), &a),
+            BeginVerdict::Release
+        );
+    }
+
+    /// The preferred device is opened by name when the enumeration
+    /// lists it; a preferred device missing at open time falls back
+    /// to the system default, flagged so the caller can warn.
+    #[test]
+    fn resolve_device_plan_prefers_named_device_with_default_fallback() {
+        let devices = vec![
+            MicDevice {
+                name: "Mic A".into(),
+            },
+            MicDevice {
+                name: "Mic B".into(),
+            },
+        ];
+
+        // System default wanted → the default, no fallback flag.
+        assert_eq!(
+            resolve_device_plan(&DeviceSelection::SystemDefault, &devices),
+            DevicePlan::Default {
+                because_missing: None
+            }
+        );
+        // Preferred + enumerated → open it by name.
+        assert_eq!(
+            resolve_device_plan(&DeviceSelection::Preferred("Mic B".into()), &devices),
+            DevicePlan::Named("Mic B".into())
+        );
+        // Preferred + missing (unplugged, typo, empty host) → fall
+        // back to the default, flagged for the warning.
+        assert_eq!(
+            resolve_device_plan(&DeviceSelection::Preferred("Gone".into()), &devices),
+            DevicePlan::Default {
+                because_missing: Some("Gone".into())
+            }
+        );
+        assert_eq!(
+            resolve_device_plan(&DeviceSelection::Preferred("Gone".into()), &[]),
+            DevicePlan::Default {
+                because_missing: Some("Gone".into())
+            }
+        );
+    }
+
+    /// A fallback open counts as SystemDefault for reuse purposes, so
+    /// the next press retries the (possibly re-attached) preferred
+    /// device instead of latching onto the fallback stream.
+    #[test]
+    fn selection_of_plan_records_fallback_as_system_default() {
+        assert_eq!(
+            selection_of_plan(&DevicePlan::Default {
+                because_missing: None
+            }),
+            DeviceSelection::SystemDefault
+        );
+        assert_eq!(
+            selection_of_plan(&DevicePlan::Default {
+                because_missing: Some("Gone".into())
+            }),
+            DeviceSelection::SystemDefault
+        );
+        assert_eq!(
+            selection_of_plan(&DevicePlan::Named("Mic B".into())),
+            DeviceSelection::Preferred("Mic B".into())
+        );
+    }
+
+    /// Enumeration dedupes by name (first occurrence wins) and drops
+    /// unreadable/blank names — the picker's list is clean whatever
+    /// the host reports.
+    #[test]
+    fn deduped_devices_keeps_first_occurrence_and_drops_unusable_names() {
+        let names = vec![
+            "Mic A".to_string(),
+            String::new(),
+            "Mic B".to_string(),
+            "Mic A".to_string(),
+            "Mic B".to_string(),
+        ];
+        assert_eq!(
+            deduped_devices(names.into_iter()),
+            vec![
+                MicDevice {
+                    name: "Mic A".into()
+                },
+                MicDevice {
+                    name: "Mic B".into()
+                },
+            ]
+        );
+        assert!(deduped_devices(std::iter::empty()).is_empty());
     }
 
     /// Error alone (recoverable xrun) and stall alone (no error to

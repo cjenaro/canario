@@ -73,6 +73,16 @@ fn recognizer_cache_key(config: &AppConfig) -> (Option<ModelPaths>, u32) {
     (config.model_paths().ok(), config.num_threads)
 }
 
+/// Push `config.input_device` into mic_warm's process-wide preferred
+/// device (canario-1hq.2), so recordings use it without a restart.
+/// Called wherever the in-memory config snapshot is (re)written:
+/// construction, updates, reloads — the recording pipeline reads the
+/// preference through `mic_warm::begin_recording`, which is why
+/// recording.rs needs no changes.
+fn sync_mic_preference(config: &AppConfig) {
+    crate::mic_warm::set_preferred_device(Some(config.input_device.clone()));
+}
+
 struct Inner {
     config: Mutex<AppConfig>,
     history: Mutex<History>,
@@ -113,6 +123,16 @@ impl Canario {
         let config = AppConfig::load()?;
         let history = History::load();
         let (tx, rx) = std::sync::mpsc::channel();
+
+        // canario-1hq.2: the configured input device becomes this
+        // process's warm-mic preference. Gated to non-test builds —
+        // unit tests construct `Canario` against the developer's real
+        // config, and the store is process-wide (one test's
+        // construction would clobber another's assertion; the store's
+        // semantics are covered by mic_warm's own tests under a shared
+        // lock).
+        #[cfg(not(test))]
+        sync_mic_preference(&config);
 
         // Pre-warm the recognizer cache in the background (when the
         // selected model is already on disk) so even the first
@@ -337,6 +357,10 @@ impl Canario {
         // event) — failing to compare must not fabricate a change.
         let changed = serde_json::to_value(&*config).ok() != serde_json::to_value(&loaded).ok();
         *config = loaded.clone();
+        // External edits (another frontend, the CLI, a manual edit) may
+        // have changed the input device — keep the warm-mic preference
+        // in sync (canario-1hq.2).
+        sync_mic_preference(&loaded);
         drop(config);
 
         if cache_key_after != cache_key_before {
@@ -368,6 +392,11 @@ impl Canario {
         let cache_key_before = recognizer_cache_key(&config);
         f(&mut config);
         config.save()?;
+        // canario-1hq.2: a device switch takes effect on the next
+        // recording — push it into the warm-mic preference now (a
+        // parked stream on another device is re-evaluated at press
+        // time, released, and the wanted device opened fresh).
+        sync_mic_preference(&config);
         let cache_key_after = recognizer_cache_key(&config);
         drop(config);
 
@@ -387,6 +416,16 @@ impl Canario {
         // (e.g. call get_config) without deadlocking.
         let _ = self.inner.event_tx.send(Event::ConfigChanged);
         Ok(())
+    }
+
+    // ── Audio input devices (canario-1hq.2) ──────────────────────────
+
+    /// Enumerate the available audio input devices (deduplicated by
+    /// name) for the settings device picker. An enumeration failure
+    /// degrades to an empty list — never an error — so the picker
+    /// renders "System default" only instead of failing.
+    pub fn list_input_devices(&self) -> Vec<crate::mic_warm::MicDevice> {
+        crate::mic_warm::list_input_devices()
     }
 
     // ── Model management ─────────────────────────────────────────────
@@ -789,5 +828,39 @@ mod tests {
         custom.custom_decoder_path = Some("/tmp/dec.onnx".into());
         custom.custom_tokens_path = Some("/tmp/tokens.txt".into());
         assert!(recognizer_cache_key(&custom).0.is_some());
+    }
+
+    /// canario-1hq.2: config → warm-mic preference sync (the helper
+    /// update_config / refresh_config / non-test construction call).
+    /// Tested in memory — update_config itself persists to the real
+    /// config.json, which unit tests must not write. Serialized
+    /// against mic_warm's own store tests by the shared lock: the
+    /// store is process-wide and tests run in parallel.
+    #[test]
+    fn mic_preference_follows_the_configured_input_device() {
+        let _guard = crate::mic_warm::PREFERRED_TEST_LOCK.lock();
+        // Default config (and old configs without the key) → the
+        // system default.
+        sync_mic_preference(&AppConfig::default());
+        assert_eq!(crate::mic_warm::preferred_device(), None);
+        // Blank/whitespace counts as the system default too.
+        sync_mic_preference(&AppConfig {
+            input_device: "   ".into(),
+            ..AppConfig::default()
+        });
+        assert_eq!(crate::mic_warm::preferred_device(), None);
+        // A named device becomes the preference (trimmed).
+        let named = |name: &str| AppConfig {
+            input_device: name.into(),
+            ..AppConfig::default()
+        };
+        sync_mic_preference(&named("  Yeti SB  "));
+        assert_eq!(
+            crate::mic_warm::preferred_device().as_deref(),
+            Some("Yeti SB")
+        );
+        // Clearing back to "" returns to the system default.
+        sync_mic_preference(&named(""));
+        assert_eq!(crate::mic_warm::preferred_device(), None);
     }
 }

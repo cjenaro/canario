@@ -3,6 +3,7 @@
 
 import { onCleanup, onMount } from "solid-js";
 import type { AppMachine } from "../state/machine";
+import { micDevicesFromResponse, type MicDevice } from "./micDevice";
 import { transcriptionTransformFailed } from "./transform";
 
 // Type for the preload-exposed API
@@ -38,6 +39,7 @@ interface CanarioAPI {
   transformStatus: () => Promise<Record<string, unknown> | null>;
   transformTest: () => Promise<Record<string, unknown> | null>;
   setTransformKey: (key: string) => Promise<{ ok: boolean; stored: boolean; error?: string } | null>;
+  listAudioDevices: () => Promise<Record<string, unknown> | null>;
 }
 
 declare global {
@@ -462,6 +464,15 @@ export function createCanario(machine: AppMachine) {
     return (await api?.setTransformKey(key)) ?? null;
   }
 
+  // ── Microphone device picker (canario-1hq.2) ──────────────────────
+  // Enumerate input devices for the settings dropdown. ok + an array
+  // of {name} — an empty list (no devices, enumeration failed, no
+  // Electron bridge) is a valid answer, never an error: the picker
+  // just offers "System default" only.
+  async function listAudioDevices(): Promise<MicDevice[]> {
+    return micDevicesFromResponse(await api?.listAudioDevices());
+  }
+
   // Tray "History" item navigation
   function onNavigateHistory(callback: () => void): () => void {
     return api?.onNavigateHistory(callback) ?? (() => {});
@@ -610,6 +621,7 @@ export function createCanario(machine: AppMachine) {
       transformStatus,
       transformTest,
       setTransformKey,
+      listAudioDevices,
     };
 }
 

@@ -128,6 +128,8 @@ enum Command {
     TransformStatus { id: String },
     #[serde(rename = "transform_test")]
     TransformTest { id: String },
+    #[serde(rename = "list_audio_devices")]
+    ListAudioDevices { id: String },
     #[serde(rename = "set_autostart")]
     SetAutostart {
         id: String,
@@ -522,6 +524,16 @@ fn handle_command(
                 // only ever travels inside the Authorization header.
                 Err(e) => write_json(&err(&id, e.to_string())),
             }
+        }
+        // Audio input device enumeration for the settings device
+        // picker (canario-1hq.2). Never errors the response: a
+        // missing/failed audio subsystem yields an empty list (the
+        // picker then offers only "System default"), and nothing in
+        // the enumeration→serialization path can fail — `err` stays
+        // reserved for IO-class trouble.
+        Command::ListAudioDevices { id } => {
+            let devices = canario.list_input_devices();
+            write_json(&ok_data(&id, serde_json::to_value(&devices).unwrap()));
         }
         // One shared login-entry implementation for every frontend
         // (canario-dmp.17): the entry and config.autostart move

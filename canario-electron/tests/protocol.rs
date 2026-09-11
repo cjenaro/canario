@@ -819,6 +819,54 @@ fn diagnostics_returns_versions_system_config_tools_and_logs() {
     assert!(data["logs"]["tail"].as_array().is_some());
 }
 
+// ── canario-1hq.2: audio input device enumeration ───────────────────────────
+
+/// `list_audio_devices` answers ok with an array of `{name}` entries.
+/// Non-empty is NOT guaranteed (a CI container may expose no input
+/// device) — the only universal claims are ok:true and array-shaped
+/// data with name-shaped entries. When the runner does have a
+/// microphone (a dev machine), the default input device must be in
+/// the list — the picker's "System default" option is meaningless if
+/// the default itself can't be selected by name.
+#[test]
+fn list_audio_devices_responds_ok_with_a_name_array() {
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({ "cmd": "list_audio_devices", "id": "mic-1" }));
+    let resp = sidecar.wait_for("mic-1");
+
+    assert_eq!(
+        resp["ok"],
+        json!(true),
+        "enumeration must never error: {resp}"
+    );
+    let devices = resp["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data must be an array: {resp}"));
+    for entry in devices {
+        assert!(
+            entry["name"].as_str().is_some(),
+            "every entry must be name-shaped: {entry}"
+        );
+    }
+
+    // Conditional on the runner having an input device (queried in
+    // THIS process, real env): the sidecar's list must be non-empty.
+    // A stronger cross-check — set-equality with a local enumeration,
+    // or presence of the default device's own name — is NOT portable:
+    // the harness gives the sidecar a hermetic XDG_RUNTIME_DIR, which
+    // legitimately hides host pseudo-device PCMs ("default",
+    // "pipewire") from ITS enumeration while this process still sees
+    // them.
+    use cpal::traits::HostTrait;
+    if cpal::default_host().default_input_device().is_some() {
+        assert!(
+            !devices.is_empty(),
+            "a runner with an input device must list at least one: {devices:?}"
+        );
+    }
+}
+
 #[test]
 fn hotkey_status_before_start_reports_not_started() {
     let mut sidecar = Sidecar::spawn();

@@ -115,6 +115,18 @@ const api = {
   // Store (non-empty) or clear (empty) the provider API key.
   setTransformKey: (key: string) => ipcRenderer.invoke("transform:setKey", key),
 
+  // ── Microphone device picker (canario-1hq.2) ────────────────────────
+  // Enumerate audio input devices through the generic sidecar channel
+  // with a unique id (concurrent invokes can't collide). The response
+  // is ok + an array of {name}; an empty list (no devices, or
+  // enumeration failed) is a valid answer — the sidecar never errors
+  // this command.
+  listAudioDevices: () =>
+    ipcRenderer.invoke("sidecar:command", {
+      id: nextPreloadId("list-audio-devices"),
+      cmd: "list_audio_devices",
+    }),
+
   // Autostart on login
   setAutostart: (enabled: boolean) => ipcRenderer.invoke("app:setAutostart", enabled),
 

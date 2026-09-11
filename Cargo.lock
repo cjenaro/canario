@@ -360,6 +360,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "canario-core",
+ "cpal 0.16.0",
  "serde",
  "serde_json",
  "tempfile",

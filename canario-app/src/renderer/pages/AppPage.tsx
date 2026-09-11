@@ -12,6 +12,7 @@ import { ToastContainer, showToast } from "../components/Toast";
 import { AppearanceSection } from "../components/AppearanceSection";
 import { MotionSection } from "../components/MotionSection";
 import { TransformSection } from "../components/TransformSection";
+import { MicSection } from "../components/MicSection";
 import { applyAppearance, cacheAppearanceForNextBoot, readCachedAppearance } from "../theme";
 import {
   applyAnimations,
@@ -50,6 +51,11 @@ import {
   type TransformSettings,
   type TransformTestState,
 } from "../primitives/transform";
+import {
+  inputDeviceConfigPayload,
+  inputDeviceFromConfig,
+  type MicDevice,
+} from "../primitives/micDevice";
 import { isTransformedHistoryEntry } from "../primitives/historyEntry";
 
 const MODELS = [
@@ -112,6 +118,11 @@ export function AppPage() {
   const [autostart, setAutostart] = createSignal(false);
   const [showTrayIcon, setShowTrayIcon] = createSignal(true);
   const [audioBehavior, setAudioBehavior] = createSignal<string>("DoNothing");
+  // Microphone selection (canario-1hq.2): AppConfig.input_device (""
+  // = system default); the device list is enumerated from the sidecar
+  // (refreshed whenever the Microphone section opens).
+  const [micDevices, setMicDevices] = createSignal<MicDevice[]>([]);
+  const [inputDevice, setInputDevice] = createSignal("");
   const [customPaths, setCustomPaths] = createSignal<CustomModelPaths>({ encoder: "", decoder: "", tokens: "" });
   const [remappings, setRemappings] = createSignal<{ from: string; to: string }[]>([]);
   const [removals, setRemovals] = createSignal<{ word: string }[]>([]);
@@ -271,6 +282,7 @@ export function AppPage() {
         setAutostart((config.autostart as boolean) ?? false);
         setShowTrayIcon((config.show_tray_icon as boolean) ?? true);
         setAudioBehavior((config.recording_audio_behavior as string) || "DoNothing");
+        setInputDevice(inputDeviceFromConfig(config));
         setCustomPaths({
           encoder: (config.custom_encoder_path as string) || "",
           decoder: (config.custom_decoder_path as string) || "",
@@ -514,6 +526,30 @@ export function AppPage() {
   async function handleAudioBehaviorChange(behavior: string) {
     setAudioBehavior(behavior);
     await canario.updateConfig({ recording_audio_behavior: behavior });
+  }
+
+  // ── Microphone picker (canario-1hq.2) ─────────────────────────────
+
+  // Enumerate input devices for the dropdown. Called when the
+  // Microphone section opens (hotplug changes the list between
+  // settings visits).
+  async function refreshMicDevices() {
+    setMicDevices(await canario.listAudioDevices());
+  }
+
+  // Persist a device choice as its own top-level AppConfig key: the
+  // sidecar pushes it into the warm-mic preference, so the change
+  // applies to the next recording without a restart (a parked stream
+  // on another device is released and the wanted one opened fresh).
+  async function handleMicDeviceChange(device: string) {
+    const previous = inputDevice();
+    setInputDevice(device);
+    const ok = await canario.updateConfig(inputDeviceConfigPayload(device));
+    if (!ok) {
+      // Truthful ack (canario-dmp.7): keep showing what's persisted.
+      setInputDevice(previous);
+      showToast("Could not save microphone selection.", "warning");
+    }
   }
 
   // Sound effects volume (0.0–1.0). Clamped client-side; the core clamps
@@ -1230,6 +1266,17 @@ export function AppPage() {
                 </p>
               </Show>
             </div>
+          </section>
+
+          {/* ── Microphone ────────────────────────────────────────── */}
+          <section class="rounded-xl border p-5" style={sectionStyle}>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>Microphone</h2>
+            <MicSection
+              devices={micDevices()}
+              selected={inputDevice()}
+              onDeviceChange={handleMicDeviceChange}
+              onRefresh={refreshMicDevices}
+            />
           </section>
 
           {/* ── Word Remapping ────────────────────────────────────── */}

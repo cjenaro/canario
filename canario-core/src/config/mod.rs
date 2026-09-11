@@ -50,6 +50,16 @@ pub struct AppConfig {
     /// Audio behavior during recording
     pub recording_audio_behavior: AudioBehavior,
 
+    /// Preferred audio input device for dictation, by name
+    /// (canario-1hq.2). Empty (the default) = the system default
+    /// device — the pre-picker behavior, so old configs keep loading
+    /// unchanged. A name that no longer matches an enumerated device
+    /// falls back to the default (with a warning) at open time. The
+    /// backend pushes this into the warm-mic preference whenever the
+    /// config loads or changes, so a switch applies to the next
+    /// recording without a restart.
+    pub input_device: String,
+
     /// Auto-paste transcription result
     pub auto_paste: bool,
 
@@ -336,6 +346,7 @@ impl Default for AppConfig {
             double_tap_only: false,
             modifier_threshold_ms: 300,
             recording_audio_behavior: AudioBehavior::DoNothing,
+            input_device: String::new(),
             auto_paste: true,
             show_tray_icon: true,
             custom_encoder_path: None,
@@ -591,6 +602,8 @@ mod tests {
         assert_eq!(config.double_tap_timeout_ms, 300);
         assert_eq!(config.modifier_threshold_ms, 300);
         assert_eq!(config.recording_audio_behavior, AudioBehavior::DoNothing);
+        // No input_device key → the system default (canario-1hq.2)
+        assert_eq!(config.input_device, "");
         assert!(config.show_tray_icon);
         assert_eq!(config.num_threads, 4);
         assert!(!config.autostart);
@@ -710,6 +723,7 @@ mod tests {
         assert_eq!(loaded.animations, config.animations);
         assert_eq!(loaded.onboarding_completed, config.onboarding_completed);
         assert_eq!(loaded.transform, config.transform);
+        assert_eq!(loaded.input_device, config.input_device);
     }
 
     #[test]
@@ -1246,12 +1260,42 @@ mod tests {
     }
 
     #[test]
+    fn input_device_defaults_to_system_default_and_round_trips() {
+        // canario-1hq.2: old configs (and `{}`) have no input_device
+        // key — the system default stays selected, byte-identical to
+        // the pre-picker behavior.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.input_device, "");
+        // Explicit values parse…
+        let config: AppConfig = serde_json::from_str(r#"{ "input_device": "Yeti SB" }"#).unwrap();
+        assert_eq!(config.input_device, "Yeti SB");
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+        // …survive a save/load round trip…
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""input_device":"Yeti SB""#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.input_device, "Yeti SB");
+        // …and clearing back to the default round-trips too.
+        let mut cleared = loaded;
+        cleared.input_device = String::new();
+        let json = serde_json::to_string(&cleared).unwrap();
+        assert!(json.contains(r#""input_device":""#));
+        let reloaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.input_device, "");
+    }
+
+    #[test]
     fn empty_json_uses_all_defaults() {
         let config: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.config_version, CONFIG_VERSION);
         assert_eq!(config.model, ModelVariant::ParakeetV3);
-        assert_eq!(config.hotkey, vec!["Super", "Alt", "Space"]);
+        assert_eq!(
+            config.hotkey,
+            vec!["Super".to_string(), "Alt".to_string(), "Space".to_string()]
+        );
         assert_eq!(config.transform, TransformSettings::default());
+        assert_eq!(config.input_device, "");
     }
 
     #[test]
