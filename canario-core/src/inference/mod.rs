@@ -1,5 +1,6 @@
 pub mod postprocess;
 pub mod resample;
+pub(crate) mod validate;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -60,6 +61,16 @@ impl TranscriptionEngine {
             "Loading ASR model (encoder: {:?})",
             self.model_paths.encoder
         );
+
+        // Validate BEFORE any sherpa FFI call: sherpa's C++ ReadTokens
+        // exits the whole process on unparseable tokens, so corrupt
+        // files must fail here as a regular error instead.
+        validate::validate_model_files(&self.model_paths).map_err(|e| {
+            anyhow::anyhow!(
+                "ASR model files are corrupt or unreadable: {}. Re-download the model from Settings.",
+                e
+            )
+        })?;
 
         let mut config = OfflineRecognizerConfig::default();
         config.model_config.transducer.encoder =
@@ -167,15 +178,19 @@ pub fn read_wav(path: &std::path::Path) -> Result<(Vec<f32>, u32)> {
 
     let samples: Vec<f32> = match bits_per_sample {
         16 => data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| {
-                let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                let s = i16::from_le_bytes(*chunk);
                 s as f32 / 32768.0
             })
             .collect(),
         32 => data
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect(),
         _ => anyhow::bail!("Unsupported bits per sample: {}", bits_per_sample),
     };
@@ -893,6 +908,59 @@ mod tests {
 
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    /// Regression (canario-2cc): the CLI file-transcription engine used
+    /// to hand corrupt tokens straight to sherpa's `ReadTokens`, which
+    /// exits the whole process. `load_model` must now fail validation
+    /// first, as a plain `Err`. (If this test binary survives, the
+    /// guard held; before the fix it would die here.)
+    #[test]
+    fn load_model_rejects_corrupt_tokens_instead_of_exiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = validate::test_support::model_paths_in(dir.path());
+        validate::test_support::write_model_files(&paths, b"\xff\xfe\x00definitely not text");
+
+        let mut engine = TranscriptionEngine::from_paths(paths, 2);
+        let err = engine.load_model().unwrap_err();
+        assert!(err.to_string().contains("tokens.txt"), "error: {}", err);
+    }
+
+    /// Same guarantee when the tokens are fine but an ONNX file is
+    /// corrupt: the error names the offending file, before any FFI.
+    #[test]
+    fn load_model_rejects_corrupt_onnx_instead_of_exiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = validate::test_support::model_paths_in(dir.path());
+        validate::test_support::write_garbage_onnx_model(&paths);
+
+        let mut engine = TranscriptionEngine::from_paths(paths, 2);
+        let err = engine.load_model().unwrap_err();
+        assert!(err.to_string().contains("encoder"), "error: {}", err);
+    }
+
+    /// Missing files keep the pre-existing "not found" error — the
+    /// validation guard must not change that path.
+    #[test]
+    fn load_model_missing_files_still_reports_not_found() {
+        let mut engine = TranscriptionEngine::new(
+            std::path::Path::new("/nonexistent-canario-test-model").to_path_buf(),
+            2,
+        );
+        let err = engine.load_model().unwrap_err();
+        assert!(err.to_string().contains("not found"), "error: {}", err);
+    }
+
+    /// Smoke test against a real downloaded model: compatible tokens
+    /// and ONNX files must pass validation and load in sherpa.
+    #[test]
+    #[ignore = "requires CANARIO_TEST_MODEL_DIR pointing to a downloaded model"]
+    fn load_model_accepts_downloaded_model() {
+        let dir = std::env::var_os("CANARIO_TEST_MODEL_DIR").expect("set CANARIO_TEST_MODEL_DIR");
+        let mut engine = TranscriptionEngine::new(std::path::Path::new(&dir).to_path_buf(), 2);
+        engine
+            .load_model()
+            .expect("valid downloaded model should pass validation and load");
     }
 
     #[test]
