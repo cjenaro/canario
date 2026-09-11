@@ -79,7 +79,7 @@ fn converts_stereo_wav_to_mono() {
     let mono = sine_sweep_i16(16000, 440.0, 440.0);
     // Interleave L/R with identical samples.
     let mut stereo = Vec::with_capacity(mono.len() * 2);
-    for frame in mono.chunks_exact(2) {
+    for frame in mono.as_chunks::<2>().0 {
         stereo.extend_from_slice(frame);
         stereo.extend_from_slice(frame);
     }
