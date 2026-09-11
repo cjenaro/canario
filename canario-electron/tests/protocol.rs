@@ -484,6 +484,37 @@ fn model_inventory_query_preserves_selected_model_and_saved_config() {
 }
 
 #[test]
+fn status_and_lifecycle_commands_round_trip_when_idle() {
+    // canario-dmp.5: the lifecycle must be queryable and cancellable
+    // over the protocol. Idle-state round trip; the recording/download
+    // halves are exercised by core's own tests (cancel semantics,
+    // .part resume) since driving real audio/network from the protocol
+    // harness is not feasible.
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({ "cmd": "status", "id": "s1" }));
+    let resp = sidecar.wait_for("s1");
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(
+        resp["data"],
+        json!({ "recording": false, "transcribing": false, "downloading": false })
+    );
+
+    sidecar.send(json!({ "cmd": "is_downloading", "id": "d1" }));
+    assert_eq!(sidecar.wait_for("d1")["data"], json!(false));
+
+    // Cancels are safe no-ops when idle.
+    sidecar.send(json!({ "cmd": "cancel_recording", "id": "c1" }));
+    assert_eq!(sidecar.wait_for("c1")["ok"], json!(true));
+    sidecar.send(json!({ "cmd": "cancel_download", "id": "c2" }));
+    assert_eq!(sidecar.wait_for("c2")["ok"], json!(true));
+
+    // Status is unchanged after the idle no-op cancels.
+    sidecar.send(json!({ "cmd": "status", "id": "s2" }));
+    assert_eq!(sidecar.wait_for("s2")["data"], resp["data"]);
+}
+
+#[test]
 fn corrupted_config_is_quarantined_and_sidecar_boots_with_defaults() {
     // canario-dmp.16: a corrupt config used to abort Canario::new(),
     // exit the sidecar, and surface as a generic "sidecar not running"

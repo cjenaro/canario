@@ -128,6 +128,36 @@ export function createCanario(machine: AppMachine) {
     updateContext({ modelReady: false });
   }
 
+  // Cancel the in-flight recording: audio is discarded, no
+  // transcription, no paste, no history entry. RecordingCancelled
+  // arrives as an event and drives the machine back to idle
+  // (canario-dmp.5).
+  async function cancelRecording() {
+    return command("cancel_recording");
+  }
+
+  // Cancel the in-flight model download. ModelDownloadFailed arrives
+  // as an event (drives DOWNLOAD_FAILED); .part files are kept so a
+  // later download resumes where this one stopped.
+  async function cancelDownload() {
+    return command("cancel_download");
+  }
+
+  // Authoritative "is a download running" — events alone can't answer
+  // this after a reload.
+  async function isDownloading(): Promise<boolean | null> {
+    const res = await command("is_downloading");
+    return res?.ok ? (res.data === true) : null;
+  }
+
+  // Lifecycle snapshot for reconciliation.
+  async function getStatus() {
+    const res = await command("status");
+    return res?.ok
+      ? (res.data as { recording: boolean; transcribing: boolean; downloading: boolean })
+      : null;
+  }
+
   // Get config
   async function getConfig() {
     const res = await command("get_config");
@@ -279,6 +309,25 @@ export function createCanario(machine: AppMachine) {
   onMount(() => {
     if (!api) return;
 
+    // Reconcile with core truth (canario-dmp.5): a settings-window
+    // reload resets this machine while core may be mid-recording or
+    // mid-download — events fired before mount are gone forever, so
+    // ask for status and sync the machine to it.
+    command("status").then((res) => {
+      if (res?.ok && res.data) {
+        const d = res.data as {
+          recording: boolean;
+          transcribing: boolean;
+          downloading: boolean;
+        };
+        send({ type: "STATUS_SYNC", ...d });
+        if (d.recording) {
+          // Core is mid-recording: restore the overlay the reload hid.
+          api.showOverlay();
+        }
+      }
+    });
+
     // Listen for sidecar events
     const unsub = api.onEvent((event) => {
       const eventName = event.event as string;
@@ -381,7 +430,11 @@ export function createCanario(machine: AppMachine) {
       startRecording,
       stopRecording,
       toggleRecording,
+      cancelRecording,
       downloadModel,
+      cancelDownload,
+      isDownloading,
+      getStatus,
       deleteModel,
       getConfig,
       updateConfig,

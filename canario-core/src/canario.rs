@@ -13,6 +13,7 @@ use crate::history::History;
 use crate::hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener, HotkeyStatus};
 use crate::recording::RecordingHandle;
 use crate::timing;
+use serde::Serialize;
 
 /// Lock a mutex, recovering from poisoning instead of panicking.
 /// A poisoned mutex just means a thread panicked while holding it;
@@ -39,6 +40,21 @@ fn restore_audio_mute(inner: &Inner) {
     if let Some(guard) = lock(&inner.mute_guard).take() {
         guard.restore();
     }
+}
+
+/// Snapshot of the recording/download lifecycle (the `status` command).
+///
+/// Lets a (re)mounting frontend reconcile its state machine with core
+/// truth instead of guessing from events it may have missed — e.g. a
+/// settings-window reload while core is mid-recording (canario-dmp.5).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct LifecycleStatus {
+    /// Mic is currently capturing.
+    pub recording: bool,
+    /// A recording thread is still transcribing a finished capture.
+    pub transcribing: bool,
+    /// A model download is in flight.
+    pub downloading: bool,
 }
 
 /// Shared tokio runtime for background downloads (built once, reused).
@@ -267,6 +283,21 @@ impl Canario {
     /// Is the mic currently recording?
     pub fn is_recording(&self) -> bool {
         self.inner.is_recording.load(Ordering::SeqCst)
+    }
+
+    /// Snapshot of the recording/download lifecycle for the `status`
+    /// command: the authoritative truth a (re)mounting frontend
+    /// reconciles its state machine against (canario-dmp.5).
+    pub fn lifecycle_status(&self) -> LifecycleStatus {
+        let transcribing = lock(&self.inner.recording_handle)
+            .as_ref()
+            .map(|handle| handle.is_busy())
+            .unwrap_or(false);
+        LifecycleStatus {
+            recording: self.is_recording(),
+            transcribing,
+            downloading: self.is_downloading(),
+        }
     }
 
     // ── Config ───────────────────────────────────────────────────────

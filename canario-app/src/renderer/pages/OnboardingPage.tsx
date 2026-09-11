@@ -377,6 +377,22 @@ export function OnboardingPage() {
                     <span class="text-sm tabular-nums w-12 text-right" style={{ color: "var(--text-secondary)" }}>
                       {Math.round((dlProgress() ?? 0) * 100)}%
                     </span>
+                    <button
+                      class="px-2.5 py-1 rounded-md text-xs border transition-colors hover:opacity-80 shrink-0"
+                      style={{
+                        "background-color": "var(--bg)",
+                        "border-color": "var(--border)",
+                        color: "var(--text-secondary)",
+                        cursor: "pointer",
+                      }}
+                      title="Stop the download — progress is kept and resumed next time"
+                      onClick={() => {
+                        void window.canario?.sendCommand({ id: `cancel-dl-${Date.now()}`, cmd: "cancel_download" });
+                        showToast("Download cancelled — it will resume next time", "info", 3000);
+                      }}
+                    >
+                      Cancel
+                    </button>
                   </div>
                   <p class="text-xs text-center tabular-nums" style={{ color: "var(--text-secondary)" }}>
                     {dlStats()}

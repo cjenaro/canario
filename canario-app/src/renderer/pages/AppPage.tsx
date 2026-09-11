@@ -786,6 +786,22 @@ export function AppPage() {
                     <span class="text-sm tabular-nums w-12 text-right" style={{ color: "var(--text-secondary)" }}>
                       {(((state() as any).progress || 0) * 100).toFixed(0)}%
                     </span>
+                    <button
+                      class="px-2.5 py-1 rounded-md text-xs border transition-colors hover:opacity-80 shrink-0"
+                      style={{
+                        "background-color": "var(--bg)",
+                        "border-color": "var(--border)",
+                        color: "var(--text-secondary)",
+                        cursor: "pointer",
+                      }}
+                      title="Stop the download — progress is kept and resumed next time"
+                      onClick={() => {
+                        canario.cancelDownload();
+                        showToast("Download cancelled — it will resume next time", "info", 3000);
+                      }}
+                    >
+                      Cancel
+                    </button>
                   </div>
                   <p class="text-xs mt-2 text-center" style={{ color: "var(--text-secondary)" }}>
                     Downloading model... this may take a few minutes.
@@ -826,18 +842,38 @@ export function AppPage() {
                 <Show
                   when={state().status !== "recording"}
                   fallback={
-                    <button
-                      class="w-16 h-16 rounded-full flex items-center justify-center text-2xl transition-all"
-                      style={{
-                        "background-color": "var(--error)",
-                        color: "white",
-                        "box-shadow": "0 0 0 5px rgba(239, 68, 68, 0.2)",
-                        cursor: "pointer",
-                      }}
-                      onClick={handleToggle}
-                    >
-                      ⏹
-                    </button>
+                    <div class="flex items-center gap-4">
+                      <button
+                        class="w-16 h-16 rounded-full flex items-center justify-center text-2xl transition-all"
+                        style={{
+                          "background-color": "var(--error)",
+                          color: "white",
+                          "box-shadow": "0 0 0 5px rgba(239, 68, 68, 0.2)",
+                          cursor: "pointer",
+                        }}
+                        title="Stop and transcribe"
+                        onClick={handleToggle}
+                      >
+                        ⏹
+                      </button>
+                      <button
+                        class="w-10 h-10 rounded-full flex items-center justify-center text-base transition-colors hover:opacity-80"
+                        style={{
+                          "background-color": "var(--bg)",
+                          "border-color": "var(--border)",
+                          border: "1px solid var(--border)",
+                          color: "var(--text-secondary)",
+                          cursor: "pointer",
+                        }}
+                        title="Cancel (discard audio, no transcription)"
+                        onClick={() => {
+                          canario.cancelRecording();
+                          showToast("Recording cancelled", "info", 2500);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
                   }
                 >
                   <button

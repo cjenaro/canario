@@ -65,8 +65,16 @@ enum Command {
     StopRecording { id: String },
     #[serde(rename = "toggle_recording")]
     ToggleRecording { id: String },
+    #[serde(rename = "cancel_recording")]
+    CancelRecording { id: String },
     #[serde(rename = "download_model")]
     DownloadModel { id: String },
+    #[serde(rename = "cancel_download")]
+    CancelDownload { id: String },
+    #[serde(rename = "is_downloading")]
+    IsDownloading { id: String },
+    #[serde(rename = "status")]
+    Status { id: String },
     #[serde(rename = "delete_model")]
     DeleteModel { id: String },
     #[serde(rename = "is_model_downloaded")]
@@ -333,6 +341,26 @@ fn handle_command(
         Command::ToggleRecording { id } => {
             let recording = canario.toggle_recording();
             write_json(&ok_data(&id, serde_json::json!({ "recording": recording })));
+        }
+        Command::CancelRecording { id } => {
+            // Discard the in-flight recording without transcribing.
+            // Safe no-op when idle — core owns that guarantee.
+            canario.cancel_recording();
+            write_json(&ok(&id));
+        }
+        Command::CancelDownload { id } => {
+            // Requests cancellation; ModelDownloadFailed arrives as an
+            // event once the download loop observes it (.part files are
+            // kept for resume). Safe no-op when nothing is running.
+            canario.cancel_download();
+            write_json(&ok(&id));
+        }
+        Command::IsDownloading { id } => {
+            write_json(&ok_data(&id, serde_json::json!(canario.is_downloading())));
+        }
+        Command::Status { id } => {
+            let status = canario.lifecycle_status();
+            write_json(&ok_data(&id, serde_json::to_value(status).unwrap()));
         }
         Command::DownloadModel { id } => match canario.download_model() {
             Ok(()) => write_json(&ok(&id)),

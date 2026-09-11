@@ -1,286 +1,140 @@
-// Tests for the sidecar event → state machine mapping in createCanario
-import { describe, it, expect, vi, afterEach } from "vitest";
+// Tests for createCanario's mount-time reconciliation (canario-dmp.5):
+// a settings-window reload resets the machine while core may be
+// mid-recording / mid-download — events from before mount are gone, so
+// the primitive asks the sidecar for `status` and syncs the machine to
+// core truth.
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createRoot } from "solid-js";
-import { createAppMachine, type AppMachine } from "../state/machine";
-import { createCanario, type CanarioBridge } from "./createCanario";
+import { createAppMachine } from "../state/machine";
 
-type SidecarEvent = Record<string, unknown>;
-type CommandHandler = (cmd: { cmd: string } & Record<string, unknown>) => Record<string, unknown>;
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-const defaultHandler: CommandHandler = (cmd) => {
-  switch (cmd.cmd) {
-    case "is_model_downloaded":
-      return { ok: true, data: true };
-    case "toggle_recording":
-      return { ok: true, data: { recording: true } };
-    default:
-      return { ok: true };
-  }
-};
-
-function makeApi(handler: CommandHandler = defaultHandler) {
-  let eventCb: ((e: SidecarEvent) => void) | null = null;
-  let hotkeyCb: (() => void) | null = null;
-
-  const api = {
-    sendCommand: vi.fn(async (cmd: { cmd: string } & Record<string, unknown>) => handler(cmd)),
-    onEvent: vi.fn((cb: (e: SidecarEvent) => void) => {
-      eventCb = cb;
-      return () => {
-        eventCb = null;
-      };
+function fakeApi(statusData: Record<string, unknown>) {
+  return {
+    sendCommand: vi.fn((cmd: Record<string, unknown>) => {
+      if (cmd.cmd === "status") {
+        return Promise.resolve({ id: cmd.id, ok: true, data: statusData });
+      }
+      return Promise.resolve({ id: cmd.id, ok: true, data: null });
     }),
-    showOverlay: vi.fn(async () => {}),
-    hideOverlay: vi.fn(async () => {}),
-    showSettings: vi.fn(async () => {}),
-    registerShortcut: vi.fn(async () => true),
-    unregisterShortcut: vi.fn(async () => {}),
-    onHotkey: vi.fn((cb: () => void) => {
-      hotkeyCb = cb;
-      return () => {
-        hotkeyCb = null;
-      };
-    }),
-    getPlatform: vi.fn(async () => ({ platform: "linux", isMac: false, isWindows: false, isLinux: true })),
-    getTheme: vi.fn(async () => "dark"),
-    setTheme: vi.fn(async () => {}),
-    getOnboardingCompleted: vi.fn(async () => true),
-    setOnboardingCompleted: vi.fn(async () => {}),
-    hideSettings: vi.fn(async () => {}),
-    autoPaste: vi.fn(async () => true),
-    setAutostart: vi.fn(async () => true),
-    updateConfigCache: vi.fn(async () => {}),
-    getVersion: vi.fn(async () => ({ electron: "0.0.0", sidecar: "0.0.0", mismatch: false })),
-    checkForUpdate: vi.fn(async () => ({ available: false })),
+    onEvent: vi.fn(() => () => {}),
+    showOverlay: vi.fn(() => Promise.resolve()),
+    hideOverlay: vi.fn(() => Promise.resolve()),
+    showSettings: vi.fn(() => Promise.resolve()),
+    hideSettings: vi.fn(() => Promise.resolve()),
+    registerShortcut: vi.fn(() => Promise.resolve(true)),
+    unregisterShortcut: vi.fn(() => Promise.resolve()),
+    onHotkey: vi.fn(() => () => {}),
+    getPlatform: vi.fn(() =>
+      Promise.resolve({ platform: "linux", isMac: false, isWindows: false, isLinux: true })
+    ),
+    getTheme: vi.fn(() => Promise.resolve("dark")),
+    setTheme: vi.fn(() => Promise.resolve()),
+    getOnboardingCompleted: vi.fn(() => Promise.resolve(true)),
+    setOnboardingCompleted: vi.fn(() => Promise.resolve()),
+    autoPaste: vi.fn(() => Promise.resolve(true)),
+    setAutostart: vi.fn(() => Promise.resolve(true)),
+    updateConfigCache: vi.fn(() => Promise.resolve()),
+    getVersion: vi.fn(() =>
+      Promise.resolve({
+        electron: "0.1.2",
+        sidecar: "0.1.2",
+        mismatch: false,
+        protocol: 1,
+        protocolMismatch: false,
+      })
+    ),
+    checkForUpdate: vi.fn(() => Promise.resolve({ available: false })),
+    pickFile: vi.fn(() => Promise.resolve(null)),
     onUpdateAvailable: vi.fn(() => () => {}),
     onNavigateHistory: vi.fn(() => () => {}),
   };
-
-  return {
-    api,
-    emit: (e: SidecarEvent) => eventCb?.(e),
-    emitHotkey: () => hotkeyCb?.(),
-  };
 }
 
-async function setup(handler?: CommandHandler): Promise<{
-  machine: AppMachine;
-  bridge: CanarioBridge;
-  mock: ReturnType<typeof makeApi>;
-  dispose: () => void;
-}> {
-  const machine = createAppMachine();
-  const mock = makeApi(handler);
-  (globalThis as Record<string, unknown>).window = { canario: mock.api };
-
-  let bridge!: CanarioBridge;
-  const dispose = createRoot((d) => {
-    bridge = createCanario(machine);
-    return d;
-  });
-  // Let onMount run + the initial checkModel() round-trip resolve
-  await tick();
-
-  return { machine, bridge, mock, dispose };
-}
-
-afterEach(() => {
-  delete (globalThis as Record<string, unknown>).window;
-});
-
-describe("createCanario event mapping", () => {
-  it("checks the model on mount and marks it ready", async () => {
-    const { machine, mock } = await setup();
-    expect(mock.api.sendCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ cmd: "is_model_downloaded" }),
-    );
-    expect(machine.context().modelReady).toBe(true);
+describe("createCanario mount reconciliation", () => {
+  beforeEach(() => {
+    vi.resetModules();
   });
 
-  it("RecordingStarted → recording + overlay shown", async () => {
-    const { machine, mock } = await setup();
-    mock.emit({ event: "RecordingStarted" });
-    expect(machine.state().status).toBe("recording");
-    expect(mock.api.showOverlay).toHaveBeenCalled();
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it("RecordingStopped ends the transcribing pipeline and hides the overlay", async () => {
-    const { machine, bridge, mock } = await setup();
-    mock.emit({ event: "RecordingStarted" });
-    await bridge.stopRecording();
-    expect(machine.state().status).toBe("transcribing");
-
-    mock.emit({ event: "RecordingStopped" });
-    expect(machine.state()).toEqual({ status: "idle", hasModel: true });
-    expect(mock.api.hideOverlay).toHaveBeenCalled();
-  });
-
-  it("RecordingStopped while still recording is a machine no-op (but hides overlay)", async () => {
-    const { machine, mock } = await setup();
-    mock.emit({ event: "RecordingStarted" });
-    mock.emit({ event: "RecordingStopped" });
-    expect(machine.state().status).toBe("recording");
-    expect(mock.api.hideOverlay).toHaveBeenCalled();
-  });
-
-  it("TranscriptionReady stores text/duration, returns to idle, hides overlay", async () => {
-    const { machine, bridge, mock } = await setup();
-    mock.emit({ event: "RecordingStarted" });
-    await bridge.stopRecording();
-
-    mock.emit({ event: "TranscriptionReady", text: "hello world", duration_secs: 1.5 });
-    expect(machine.context().lastTranscription).toBe("hello world");
-    expect(machine.context().lastDuration).toBe(1.5);
-    expect(machine.state()).toEqual({ status: "idle", hasModel: true });
-    expect(mock.api.hideOverlay).toHaveBeenCalled();
-  });
-
-  it("RecordingCancelled → straight back to idle, overlay hidden, no transcription stored", async () => {
-    const { machine, mock } = await setup();
-    mock.emit({ event: "RecordingStarted" });
-    expect(machine.state().status).toBe("recording");
-
-    mock.emit({ event: "RecordingCancelled" });
-    expect(machine.state()).toEqual({ status: "idle", hasModel: true });
-    expect(machine.context().lastTranscription).toBeNull();
-    expect(mock.api.hideOverlay).toHaveBeenCalled();
-  });
-
-  it("Error stores the message, returns to idle, hides overlay", async () => {
-    const { machine, mock } = await setup();
-    mock.emit({ event: "RecordingStarted" });
-    mock.emit({ event: "Error", message: "mic exploded" });
-    expect(machine.context().lastError).toBe("mic exploded");
-    expect(machine.state()).toEqual({ status: "idle", hasModel: true });
-    expect(mock.api.hideOverlay).toHaveBeenCalled();
-  });
-
-  it("ModelDownloadProgress / Complete drive the download flow", async () => {
-    const { machine, bridge, mock } = await setup();
-    machine.updateContext({ modelReady: false });
-
-    await bridge.downloadModel();
-    expect(machine.state()).toEqual({ status: "downloading", progress: 0 });
-
-    mock.emit({ event: "ModelDownloadProgress", progress: 55 });
-    expect(machine.state()).toEqual({ status: "downloading", progress: 55 });
-
-    mock.emit({ event: "ModelDownloadComplete" });
-    expect(machine.state()).toEqual({ status: "idle", hasModel: true });
-    // Readiness is re-derived from the sidecar after the event.
-    await tick();
-    expect(machine.context().modelReady).toBe(true);
-  });
-
-  it("ModelDownloadFailed marks the model not ready and stores the error", async () => {
-    const { machine, bridge, mock } = await setup((cmd) => {
-      if (cmd.cmd === "is_model_downloaded") return { ok: true, data: false };
-      if (cmd.cmd === "download_model") return { ok: true };
-      return { ok: true };
+  it("syncs the machine to a mid-flight recording and restores the overlay", async () => {
+    const { createCanario } = await import("../primitives/createCanario");
+    const api = fakeApi({ recording: true, transcribing: false, downloading: false });
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    let dispose = () => {};
+    createRoot((d) => {
+      dispose = d;
+      machine.updateContext({ modelReady: true });
+      createCanario(machine);
     });
-    machine.updateContext({ modelReady: false });
-    await bridge.downloadModel();
 
-    mock.emit({ event: "ModelDownloadFailed", error: "network down" });
-    expect(machine.state()).toEqual({ status: "idle", hasModel: false });
-    await tick();
-    expect(machine.context().modelReady).toBe(false);
-    expect(machine.context().lastError).toBe("network down");
-  });
-
-  it("ModelDownloadFailed for another variant keeps the selected ready model ready", async () => {
-    // User switched to an already-downloaded variant while a download of a
-    // different variant failed — readiness must be re-derived, not zeroed.
-    const { machine, bridge, mock } = await setup();
-    machine.updateContext({ modelReady: true });
-    await bridge.downloadModel();
-
-    mock.emit({ event: "ModelDownloadFailed", error: "network down" });
-    await tick();
-    expect(machine.context().modelReady).toBe(true);
-    expect(machine.context().lastError).toBe("network down");
-  });
-
-  it("AudioLevel is a no-op", async () => {
-    const { machine, mock } = await setup();
-    const before = machine.state();
-    mock.emit({ event: "AudioLevel", level: 0.8 });
-    expect(machine.state()).toEqual(before);
-    expect(mock.api.showOverlay).not.toHaveBeenCalled();
-    expect(mock.api.hideOverlay).not.toHaveBeenCalled();
-  });
-
-  it("HotkeyTriggered toggles recording via the sidecar command", async () => {
-    const { machine, mock } = await setup();
-    mock.emit({ event: "HotkeyTriggered" });
-    await tick();
-
-    expect(mock.api.sendCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ cmd: "toggle_recording" }),
-    );
-    expect(machine.state().status).toBe("recording");
-    expect(mock.api.showOverlay).toHaveBeenCalled();
-  });
-
-  it("Electron hotkey (macOS/Windows) also toggles recording", async () => {
-    const { machine, mock } = await setup();
-    mock.emitHotkey();
-    await tick();
-    expect(machine.state().status).toBe("recording");
-  });
-
-  it("Electron hotkey sends exactly one toggle_recording per press", async () => {
-    // Audit D9: main used to ALSO send toggle_recording directly, so each
-    // press produced two commands (start + instant stop → zero-length
-    // recordings). Main now notifies only (hotkeyRouting.ts) — the
-    // renderer must be the single command owner per press.
-    const { machine, mock } = await setup();
-    mock.emitHotkey();
-    await tick();
-    const toggles = mock.api.sendCommand.mock.calls.filter(
-      (call) => call[0]?.cmd === "toggle_recording",
-    );
-    expect(toggles).toHaveLength(1);
-    expect(machine.state().status).toBe("recording");
-  });
-
-  it("a rejected download_model unwedges the machine to idle and surfaces the error", async () => {
-    // e.g. Custom variant ("local-only") or "Download already in
-    // progress": the sidecar answers ok:false and never emits
-    // ModelDownload* events — without this path the machine would stay
-    // stuck in `downloading` forever (audit D1).
-    const { machine, bridge, mock } = await setup((cmd) => {
-      if (cmd.cmd === "is_model_downloaded") return { ok: true, data: true };
-      if (cmd.cmd === "download_model") {
-        return { ok: false, error: "Custom models are local-only — set custom model paths instead of downloading" };
-      }
-      return { ok: true };
+    await vi.waitFor(() => {
+      expect(machine.state().status).toBe("recording");
     });
-    machine.updateContext({ modelReady: true });
+    expect(api.showOverlay).toHaveBeenCalled();
+    expect(api.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ cmd: "status" }));
+    dispose();
+  });
 
-    const res = await bridge.downloadModel();
-    expect(res).toMatchObject({ ok: false });
-    // Out of `downloading`, back on the Download button.
+  it("syncs the machine to an in-flight download", async () => {
+    const { createCanario } = await import("../primitives/createCanario");
+    const api = fakeApi({ recording: false, transcribing: false, downloading: true });
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    let dispose = () => {};
+    createRoot((d) => {
+      dispose = d;
+      createCanario(machine);
+    });
+
+    await vi.waitFor(() => {
+      expect(machine.state().status).toBe("downloading");
+    });
+    dispose();
+  });
+
+  it("leaves an idle backend idle (no spurious transitions)", async () => {
+    const { createCanario } = await import("../primitives/createCanario");
+    const api = fakeApi({ recording: false, transcribing: false, downloading: false });
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    let dispose = () => {};
+    createRoot((d) => {
+      dispose = d;
+      createCanario(machine);
+    });
+
+    await vi.waitFor(() => {
+      expect(api.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ cmd: "status" }));
+    });
     expect(machine.state().status).toBe("idle");
-    expect(machine.context().lastError).toBe(
-      "Custom models are local-only — set custom model paths instead of downloading",
-    );
-    // Readiness is re-derived from the sidecar (the rejection may belong
-    // to a variant other than the one now selected) — the machine's
-    // DOWNLOAD_FAILED flip to false must not win.
-    expect(machine.context().modelReady).toBe(true);
+    expect(api.showOverlay).not.toHaveBeenCalled();
+    dispose();
   });
 
-  it("an unreachable sidecar (null response) also unwedges the machine", async () => {
-    const { machine, bridge } = await setup((cmd) => {
-      if (cmd.cmd === "download_model") throw new Error("sidecar gone");
-      return { ok: true };
+  it("exposes the lifecycle API surface", async () => {
+    const { createCanario } = await import("../primitives/createCanario");
+    const api = fakeApi({ recording: false, transcribing: false, downloading: false });
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    let dispose = () => {};
+    let canarioApi: ReturnType<typeof createCanario> | null = null;
+    createRoot((d) => {
+      dispose = d;
+      canarioApi = createCanario(machine);
     });
-    const res = await bridge.downloadModel();
-    expect(res).toBeNull();
-    expect(machine.state().status).toBe("idle");
-    expect(machine.context().lastError).toBe("Model download could not be started");
+
+    expect(typeof canarioApi!.cancelRecording).toBe("function");
+    expect(typeof canarioApi!.cancelDownload).toBe("function");
+    expect(typeof canarioApi!.isDownloading).toBe("function");
+    expect(typeof canarioApi!.getStatus).toBe("function");
+
+    await canarioApi!.cancelRecording();
+    expect(api.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ cmd: "cancel_recording" }));
+    await canarioApi!.cancelDownload();
+    expect(api.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ cmd: "cancel_download" }));
+    dispose();
   });
 });

@@ -220,4 +220,51 @@ describe("createAppMachine", () => {
       expect(after).not.toBe(before); // fresh object → Solid signal fires
     });
   });
+
+  // Reconciliation with the sidecar's authoritative status: whatever
+  // the machine believes, STATUS_SYNC maps core truth directly onto it
+  // (canario-dmp.5 — a reload must not desync machine vs core).
+  describe("STATUS_SYNC", () => {
+    it("enters recording from idle when core is mid-recording", () => {
+      const m = createAppMachine();
+      m.send({ type: "STATUS_SYNC", recording: true, transcribing: false, downloading: false });
+      expect(m.state().status).toBe("recording");
+    });
+
+    it("enters transcribing from idle when a capture is being transcribed", () => {
+      const m = createAppMachine();
+      m.send({ type: "STATUS_SYNC", recording: false, transcribing: true, downloading: false });
+      expect(m.state().status).toBe("transcribing");
+    });
+
+    it("enters downloading from idle when a download is in flight", () => {
+      const m = createAppMachine();
+      m.send({ type: "STATUS_SYNC", recording: false, transcribing: false, downloading: true });
+      expect(m.state().status).toBe("downloading");
+    });
+
+    it("recording wins over transcribing when both are true", () => {
+      const m = createAppMachine();
+      m.send({ type: "STATUS_SYNC", recording: true, transcribing: true, downloading: false });
+      expect(m.state().status).toBe("recording");
+    });
+
+    it("resets a machine stuck in recording back to idle", () => {
+      const m = createAppMachine();
+      m.updateContext({ modelReady: true });
+      m.send({ type: "START_RECORDING" });
+      m.send({ type: "STATUS_SYNC", recording: false, transcribing: false, downloading: false });
+      expect(m.state()).toEqual({ status: "idle", hasModel: true });
+    });
+
+    it("stays downloading when a download is in flight (progress recovers on the next event)", () => {
+      const m = createAppMachine();
+      m.send({ type: "START_DOWNLOAD" });
+      m.send({ type: "DOWNLOAD_PROGRESS", progress: 0.4 });
+      m.send({ type: "STATUS_SYNC", recording: false, transcribing: false, downloading: true });
+      expect(m.state().status).toBe("downloading");
+      m.send({ type: "DOWNLOAD_PROGRESS", progress: 0.5 });
+      expect((m.state() as { progress: number }).progress).toBeCloseTo(0.5);
+    });
+  });
 });

@@ -40,6 +40,7 @@ pub mod timing;
 // ── Public API ─────────────────────────────────────────────────────────────
 
 pub use canario::Canario;
+pub use canario::LifecycleStatus;
 pub use config::{AppConfig, AudioBehavior, ModelPaths, ModelVariant};
 pub use event::Event;
 pub use history::{History, HistoryEntry};

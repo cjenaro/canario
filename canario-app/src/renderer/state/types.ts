@@ -22,6 +22,7 @@ export type AppEvent =
   | { type: "RECORDING_STOPPED" }
   | { type: "RECORDING_CANCELLED" }
   | { type: "SIDECAR_CRASHED" }
+  | { type: "STATUS_SYNC"; recording: boolean; transcribing: boolean; downloading: boolean }
   | { type: "ERROR" };
 
 export type AppContext = {
@@ -46,6 +47,18 @@ type TransitionFn = (ctx: AppContext, event: AppEvent) => AppState | undefined;
 
 type TransitionMap = Record<AppState["status"], Partial<Record<AppEvent["type"], TransitionFn>>>;
 
+// Reconciliation from the sidecar's authoritative `status` command
+// (canario-dmp.5): map core truth directly onto the machine, whatever
+// the machine currently believes — it may have missed events across a
+// reload. Download progress restarts at 0 and recovers on the next
+// ModelDownloadProgress event.
+function syncFromStatus(ctx: AppContext, event: AppEvent): AppState | undefined {
+  if (event.type !== "STATUS_SYNC") return undefined;
+  if (event.recording) return { status: "recording", startedAt: Date.now() };
+  if (event.transcribing) return { status: "transcribing", startedAt: Date.now() };
+  if (event.downloading) return { status: "downloading", progress: 0 };
+  return { status: "idle", hasModel: ctx.modelReady };
+}
 export const transitions: TransitionMap = {
   onboarding: {
     // Absolute step navigation (1-3) — the component computes the target
@@ -67,6 +80,7 @@ export const transitions: TransitionMap = {
     // Backend death is a state change even from idle: a fresh object
     // makes the signal notify watchers (e.g. the offline banner).
     SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
   },
   recording: {
     STOP_RECORDING: () => ({ status: "transcribing", startedAt: Date.now() }),
@@ -75,12 +89,14 @@ export const transitions: TransitionMap = {
     // No terminal core event can arrive anymore — force idle
     // (canario-dmp.6: no zombie recording state).
     SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
     ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   transcribing: {
     TRANSCRIPTION_READY: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
     RECORDING_STOPPED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
     SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
     ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   downloading: {
@@ -93,5 +109,6 @@ export const transitions: TransitionMap = {
     // The download died with the process; readiness must be re-derived
     // after restart, so land on idle with the last known truth.
     SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
   },
 };

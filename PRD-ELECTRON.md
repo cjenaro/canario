@@ -1095,6 +1095,10 @@ Full list of commands the sidecar accepts, with their parameters and responses:
 | `start_recording` | — | — | Emits `RecordingStarted`, `AudioLevel` stream, then `TranscriptionReady` + `RecordingStopped` |
 | `stop_recording` | — | — | Triggers transcription |
 | `toggle_recording` | — | `{ recording: bool }` | Start or stop |
+| `cancel_recording` | — | — | Discards the in-flight recording: no transcription, no paste, no history entry; emits `RecordingCancelled`. Safe no-op when idle (canario-dmp.5) |
+| `cancel_download` | — | — | Requests download cancellation; `ModelDownloadFailed` follows and `.part` files are kept for resume. Safe no-op when idle |
+| `is_downloading` | — | `bool` | Authoritative "download in flight" — events alone can't answer after a reload |
+| `status` | — | `{ recording: bool, transcribing: bool, downloading: bool }` | Lifecycle truth for machine reconciliation on (re)mount |
 | `download_model` | — | — | Emits `ModelDownloadProgress`, then `Complete` or `Failed` |
 | `delete_model` | — | — | Removes model files |
 | `is_model_downloaded` | — | `bool` | — |
