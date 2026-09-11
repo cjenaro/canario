@@ -1,7 +1,10 @@
 /// Recording engine — captures audio, transcribes, emits events.
 ///
-/// Simple approach: record raw audio while active, transcribe on stop.
-/// Communicates results via the `Sender<Event>` channel.
+/// Capture runs through the warm-mic machinery (canario-vew, see
+/// [`crate::mic_warm`]): one parked capture stream feeds a ring
+/// buffer, a press marks the start offset, and this loop drains the
+/// ring into the recording buffer until stop. Results are
+/// communicated via the `Sender<Event>` channel.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +15,7 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 use crate::config::ModelPaths;
 use crate::event::Event;
 use crate::inference::postprocess::PostProcessor;
+use crate::mic_warm::{self, MicSession, MicVerdict};
 use crate::timing;
 
 // ── Stop signalling ───────────────────────────────────────────────────
@@ -199,81 +203,23 @@ fn recording_loop(
     sound_volume: f32,
     num_threads: i32,
 ) -> anyhow::Result<()> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
     timing::mark("recording_thread_start");
 
-    // ── Open mic ────────────────────────────────────────────────────
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
-    let supported = device.default_input_config()?;
-    let mic_sr = supported.sample_rate().0;
-    let channels = supported.channels() as usize;
-    timing::mark("mic_device_opened");
+    // ── Acquire the mic (canario-vew) ───────────────────────────────
+    // Warm path: the parked stream is already running into the ring,
+    // so this is a µs offset-mark (mic_warm_reused). Cold path: the
+    // device open + stream play happen inline here, exactly like the
+    // pre-vew code (mic_device_opened / mic_stream_started), and the
+    // stream then parks after the recording for the next press.
+    let mut session: MicSession = mic_warm::begin_recording()?;
+    let mic_sr = session.sample_rate();
 
-    tracing::info!(
-        "Recording from '{}' at {}Hz",
-        device.name().unwrap_or_default(),
-        mic_sr
-    );
-
+    // The recording's own buffer, drained from the ring every tick
+    // below (plus once more at stop, so no tail audio is lost to the
+    // tick cadence). Live captions and the stop path read this, same
+    // as when the mic callback appended to it directly.
     let audio_buf: Arc<parking_lot::Mutex<Vec<f32>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
-
-    // Set by the first mic callback — the moment audio actually starts
-    // flowing (press-to-record's true endpoint, later than `stream.play`).
-    let first_audio = Arc::new(AtomicBool::new(false));
-
-    let audio_buf_clone = audio_buf.clone();
-    let first_audio_f32 = first_audio.clone();
-    let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &supported.into(),
-            move |data: &[f32], _| {
-                if !first_audio_f32.swap(true, Ordering::SeqCst) {
-                    timing::mark("first_audio");
-                }
-                let mono: Vec<f32> = data
-                    .chunks(channels)
-                    .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-                    .collect();
-                audio_buf_clone.lock().extend_from_slice(&mono);
-            },
-            |err| tracing::error!("Audio error: {}", err),
-            None,
-        )?,
-        cpal::SampleFormat::I16 => {
-            let buf = audio_buf.clone();
-            let first_audio_i16 = first_audio.clone();
-            device.build_input_stream(
-                &supported.into(),
-                move |data: &[i16], _| {
-                    if !first_audio_i16.swap(true, Ordering::SeqCst) {
-                        timing::mark("first_audio");
-                    }
-                    let mono: Vec<f32> = data
-                        .chunks(channels)
-                        .map(|frame| {
-                            frame
-                                .iter()
-                                .map(|&s| s as f32 / i16::MAX as f32)
-                                .sum::<f32>()
-                                / channels as f32
-                        })
-                        .collect();
-                    buf.lock().extend_from_slice(&mono);
-                },
-                |err| tracing::error!("Audio error: {}", err),
-                None,
-            )?
-        }
-        _ => anyhow::bail!("Unsupported sample format"),
-    };
-
-    stream.play()?;
-    timing::mark("mic_stream_started");
 
     // ── Live captions for long sessions ─────────────────────────────
     // Detached worker: decodes a sliding window of the buffer and emits
@@ -299,8 +245,22 @@ fn recording_loop(
     // only paces `Event::AudioLevel`, which stays on its original
     // 50 ms cadence: each timeout is one level tick, exactly like the
     // old loop body before its sleep.
+    let mut taken = session.start_offset();
+    let mut prev_written = session.written();
+    let mut last_progress = Instant::now();
+    let mut reopens_done = 0u32;
+    let mut abort_reason: Option<String> = None;
     let mut log_timer = Instant::now();
     loop {
+        // Drain the warm ring into this recording's buffer. `taken`
+        // walks forward from the press offset; overrun means the loop
+        // stalled past the ring depth (early audio lost — logged).
+        let (chunk, overran) = session.drain_new(&mut taken);
+        if overran {
+            tracing::warn!("Warm-mic ring overran the drain cursor — early audio lost");
+        }
+        audio_buf.lock().extend_from_slice(&chunk);
+
         let buf_snapshot = audio_buf.lock();
         let buf_len = buf_snapshot.len();
         let recent_start = buf_len.saturating_sub(4000);
@@ -325,6 +285,37 @@ fn recording_loop(
             log_timer = Instant::now();
         }
 
+        // ── Device-failure fallback (canario-vew) ───────────────────
+        // An error callback plus a silent stream means the device is
+        // gone (hotplug). Correctness over warmth: reopen once and
+        // keep capturing into the same recording; give up after that
+        // and transcribe the partial audio.
+        let written_now = session.written();
+        if written_now != prev_written {
+            prev_written = written_now;
+            last_progress = Instant::now();
+        }
+        let stalled_ms = last_progress.elapsed().as_millis() as u64;
+        if mic_warm::mid_recording_verdict(session.error_delta() > 0, stalled_ms)
+            == MicVerdict::Reopen
+        {
+            if reopens_done >= mic_warm::MAX_REOPENS_PER_RECORDING {
+                abort_reason =
+                    Some("microphone stream failed twice; audio may be incomplete".into());
+                break;
+            }
+            match session.reopen_after_error() {
+                Ok(()) => {
+                    reopens_done += 1;
+                    last_progress = Instant::now();
+                }
+                Err(e) => {
+                    abort_reason = Some(format!("microphone reopen failed: {}", e));
+                    break;
+                }
+            }
+        }
+
         if signal.wait_for_stop(Duration::from_millis(AUDIO_LEVEL_INTERVAL_MS)) {
             break;
         }
@@ -332,11 +323,29 @@ fn recording_loop(
 
     timing::mark("stop_observed");
 
-    // ── Stop: grab audio, release mic ───────────────────────────────
-    // Cancel path: release the mic and discard the buffer — skip the
-    // stop beep, resample, and transcription entirely.
+    // Final drain: the mic callback no longer appends to `audio_buf`
+    // directly (it feeds the ring), so pull whatever arrived since the
+    // last tick before cloning for transcription.
+    let (tail, _) = session.drain_new(&mut taken);
+    audio_buf.lock().extend_from_slice(&tail);
+
+    if let Some(reason) = &abort_reason {
+        tracing::error!("Aborting recording: {}", reason);
+        // Also ends the live-captions worker, which waits on `stop`.
+        signal.signal_stop();
+        let _ = tx.send(Event::Error {
+            message: format!("Recording interrupted: {}", reason),
+        });
+    }
+
+    // ── Stop: park the mic, transcribe from the offset ──────────────
+    // The stream is not released here — it parks for the warm window
+    // (or releases now if the default device changed); see mic_warm.
+    // Cancel path: discard the buffer — skip the stop beep, resample,
+    // and transcription entirely.
+    session.finish();
+
     if signal.is_cancelled() {
-        drop(stream);
         audio_buf.lock().clear();
         tracing::info!("Recording cancelled — discarding captured audio");
         timing::mark("recording_cancelled");
@@ -346,8 +355,6 @@ fn recording_loop(
 
     let raw_audio = audio_buf.lock().clone();
     timing::mark("audio_cloned");
-    drop(stream);
-    timing::mark("mic_released");
 
     // Kick off the stop double-beep. Non-blocking (bead canario-9mw):
     // the whole sequence — tones + inter-tone gap — runs on its own

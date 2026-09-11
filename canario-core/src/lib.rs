@@ -33,6 +33,7 @@ mod event;
 mod history;
 mod hotkey;
 mod inference;
+mod mic_warm;
 mod paste;
 mod recording;
 pub mod timing;
