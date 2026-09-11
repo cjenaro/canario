@@ -39,11 +39,20 @@ jobs:
       - name: Build sidecar
         run: cargo build --release --bin canario-electron
 
-      - name: Prepare sidecar directory
+      - name: Prepare sidecar directory (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           mkdir -p canario-app/sidecar
-          cp target/release/canario-electron canario-app/sidecar/
+          cp -f target/release/canario-electron canario-app/sidecar/
           chmod +x canario-app/sidecar/canario-electron
+
+      - name: Prepare sidecar directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path canario-app/sidecar | Out-Null
+          Copy-Item -Force -Path target/release/canario-electron.exe -Destination canario-app/sidecar/
 
       - name: Upload sidecar artifact
         uses: actions/upload-artifact@v4
