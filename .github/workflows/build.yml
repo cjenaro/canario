@@ -136,7 +136,7 @@ jobs:
       # canario "Retire @jitsi/robotjs" bead — removes this step too.
       - name: Install X11 headers (Linux robotjs build)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev libxkbfile-dev
+        run: sudo apt-get install -y libx11-dev libxtst-dev libxinerama-dev libxkbfile-dev libpng-dev
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
