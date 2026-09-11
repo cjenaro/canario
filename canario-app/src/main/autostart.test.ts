@@ -66,7 +66,7 @@ describe("setAutostart on Linux", () => {
 
     expect(sendCommand).toHaveBeenCalledOnce();
     expect(sendCommandMock.mock.calls[0][0]).toEqual({
-      id: expect.stringMatching(/^autostart-\d+$/),
+      // No id: sendCommand stamps its own (canario-dmp.10).
       cmd: "set_autostart",
       enabled: true,
       exec: process.execPath,
@@ -116,15 +116,20 @@ describe("setAutostart on Linux", () => {
     await expect(setAutostart(false)).resolves.toBe(false);
   });
 
-  it("issues distinct ids per command while responses may be pending", async () => {
+  it("no longer hand-writes command ids (sendCommand owns them now, canario-dmp.10)", async () => {
     stubPlatform("linux");
     sendCommandMock.mockResolvedValue(ok());
 
     await setAutostart(true);
     await setAutostart(false);
 
-    const ids = sendCommandMock.mock.calls.map(([cmd]) => (cmd as { id: string }).id);
-    expect(new Set(ids).size).toBe(ids.length);
+    // Uniqueness lives in sidecar.ts's generator (covered in
+    // sidecar.test.ts); here we pin that callers don't collide-prone
+    // hand-write ids anymore.
+    expect(sendCommand).toHaveBeenCalledTimes(2);
+    for (const [cmd] of sendCommandMock.mock.calls) {
+      expect(cmd).not.toHaveProperty("id");
+    }
   });
 });
 
@@ -139,7 +144,7 @@ describe("setAutostart on macOS/Windows", () => {
     expect(setLoginItemSettingsMock).toHaveBeenCalledWith({ openAtLogin: true });
     expect(sendCommand).toHaveBeenCalledOnce();
     expect(sendCommandMock.mock.calls[0][0]).toEqual({
-      id: expect.stringMatching(/^autostart-\d+$/),
+      // No id: sendCommand stamps its own (canario-dmp.10).
       cmd: "update_config",
       config: { autostart: true },
     });

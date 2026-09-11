@@ -124,7 +124,7 @@ The Electron frontend is a peer to the existing GTK and CLI frontends. It shares
 // History
 {"id":"9","cmd":"get_history","limit":50}
 {"id":"10","cmd":"search_history","query":"hello"}
-{"id":"11","cmd":"delete_history","id":"uuid-here"}
+{"id":"11","cmd":"delete_history","entry_id":"uuid-here"}
 {"id":"12","cmd":"clear_history"}
 
 // Hotkey
@@ -143,6 +143,7 @@ The Electron frontend is a peer to the existing GTK and CLI frontends. It shares
 // Async events (no id — pushed by sidecar at any time)
 {"event":"RecordingStarted"}
 {"event":"RecordingStopped"}
+{"event":"TranscriptionStarted"}
 {"event":"TranscriptionReady","text":"hello world","duration_secs":3.2}
 {"event":"AudioLevel","level":0.65}
 {"event":"Error","message":"No microphone found"}
@@ -150,6 +151,7 @@ The Electron frontend is a peer to the existing GTK and CLI frontends. It shares
 {"event":"ModelDownloadComplete"}
 {"event":"ModelDownloadFailed","error":"Network timeout"}
 {"event":"HotkeyTriggered"}
+{"event":"ConfigChanged"}
 
 // Command responses (include the request id)
 {"id":"1","ok":true}                           // success
@@ -166,6 +168,8 @@ The Electron frontend is a peer to the existing GTK and CLI frontends. It shares
 - **No binary framing** — JSON is fast enough at 20Hz event rate. If we ever need to stream raw audio, we'd add a separate binary channel.
 
 ### 3.4 Global State Machine
+
+> **Source of truth (canario-dmp.14):** `canario-app/src/renderer/state/types.ts` (`AppState`, `AppEvent`, `AppContext`, `transitions`) is the authoritative definition of this machine, and `canario-app/src/renderer/state/machine.ts` is its runtime. This section is maintained to match that code exactly — when they disagree, the code wins and this section must be updated.
 
 The Electron renderer uses a **custom state machine** for all global app state. This is the single source of truth that coordinates every component — tray, overlay, settings, history, onboarding.
 
@@ -184,47 +188,36 @@ This also makes the app **impossible to break**: no race condition between hotke
 
 #### States
 
-```
-                    ┌─────────────┐
-          ┌────────▶│  Onboarding │──── (wizard complete) ───┐
-          │         └─────────────┘                          │
-          │                                                  ▼
-    (first launch)                                   ┌──────────┐
-          │                                          │  Idle    │◀──────────────────┐
-          │                                          └────┬─────┘                   │
-          │                                               │                         │
-          │                                    (hotkey / tray "start")            │
-          │                                               │                         │
-          │                                               ▼                         │
-          │                                        ┌──────────┐                   │
-          │                                        │Recording │──── (error) ────▶│
-          │                                        └────┬─────┘                   │
-          │                                             │                         │
-          │                                  (hotkey / tray "stop")              │
-          │                                             │                         │
-          │                                             ▼                         │
-          │                                        ┌──────────────┐              │
-          │                                        │Transcribing  │              │
-          │                                        └────┬─────────┘              │
-          │                                             │                         │
-          │                              (TranscriptionReady / RecordingStopped)  │
-          │                                             │                         │
-          │                                             └─────────────────────────┘
-          │                                                                       │
-          │                                        ┌──────────────┐              │
-          │                                        │  Downloading  │─────────────┘
-          │                                        └──────┬───────┘   (complete/
-          │                                               │            failed)
-          │                                    (user triggers download          │
-          │                                     from settings)                  │
-          │                                               │                   │
-          │                              ◀── (can enter from Idle only) ───────┘
-          │
-          └── (model exists? skip to Idle)
+```text
+ START_ONBOARDING (App.tsx on first launch; AppPage Settings → About re-run)
+   idle ─────────────────────▶ onboarding (step 1..3)
+    ▲                              │     ▲
+    │      WIZARD_COMPLETE         │     │ WIZARD_GOTO (guard: step 1..3) — self-loop
+    │      (hasModel =             │     └────────────────────────────────┘
+    │       ctx.modelReady)        │
+    └──────────────────────────────┘     (WIZARD_COMPLETE is the only exit)
+
+      START_RECORDING (guard: ctx.modelReady)      STOP_RECORDING
+ idle ─────────────────────────▶ recording ─────────────────────▶ transcribing
+  ▲                                  │                                 │
+  │   RECORDING_CANCELLED / ERROR    │      TRANSCRIPTION_READY /      │
+  │   (hasModel = ctx.modelReady)    │      RECORDING_STOPPED / ERROR  │
+  └──────────────────────────────────┴─────────────────────────────────┘
+
+      START_DOWNLOAD                      DOWNLOAD_COMPLETE (hasModel: true)
+ idle ─────────────────▶ downloading ─────────────────────────────────▶ idle
+                            │
+                            ├──── DOWNLOAD_FAILED (hasModel: false) ──▶ idle
+                            └──── DOWNLOAD_PROGRESS (self-loop, progress updated)
+
+ From EVERY non-onboarding status (idle, recording, transcribing, downloading):
+   SIDECAR_CRASHED ──▶ idle (hasModel = ctx.modelReady)   — force-idle, no zombie
+   STATUS_SYNC     ──▶ core truth                          — reconciliation, see below
 ```
 
 ```typescript
-type AppState =
+// canario-app/src/renderer/state/types.ts — verbatim
+export type AppState =
   | { status: "onboarding"; step: number }
   | { status: "idle"; hasModel: boolean }
   | { status: "recording"; startedAt: number }
@@ -232,66 +225,170 @@ type AppState =
   | { status: "downloading"; progress: number };
 ```
 
-#### Transitions
-
-The transition map defines which events are valid in each state. Anything not in this map is silently ignored.
+#### Events
 
 ```typescript
-const transitions = {
+// canario-app/src/renderer/state/types.ts — verbatim
+export type AppEvent =
+  | { type: "START_ONBOARDING" }
+  | { type: "WIZARD_GOTO"; step: number }
+  | { type: "WIZARD_COMPLETE" }
+  | { type: "START_RECORDING" }
+  | { type: "STOP_RECORDING" }
+  | { type: "START_DOWNLOAD" }
+  | { type: "DOWNLOAD_PROGRESS"; progress: number }
+  | { type: "DOWNLOAD_COMPLETE" }
+  | { type: "DOWNLOAD_FAILED" }
+  | { type: "TRANSCRIPTION_READY" }
+  | { type: "RECORDING_STOPPED" }
+  | { type: "RECORDING_CANCELLED" }
+  | { type: "SIDECAR_CRASHED" }
+  | { type: "STATUS_SYNC"; recording: boolean; transcribing: boolean; downloading: boolean }
+  | { type: "ERROR" };
+```
+
+Who sends what (all through `createCanario.ts`, the IPC bridge):
+
+| Event | Origin |
+|-------|--------|
+| `START_ONBOARDING` | `App.tsx` first-launch check (`getOnboardingCompleted() === false`); `AppPage` Settings → About re-run |
+| `WIZARD_GOTO` / `WIZARD_COMPLETE` | `OnboardingPage` |
+| `START_RECORDING` | sidecar `RecordingStarted` event, or an `ok` response from `start_recording` / the start leg of `toggle_recording` |
+| `STOP_RECORDING` | an `ok` response from `stop_recording` / the stop leg of `toggle_recording` (see "Entry paths into `transcribing`" below) |
+| `START_DOWNLOAD` | `canario.downloadModel()` (main settings page) |
+| `DOWNLOAD_PROGRESS` / `DOWNLOAD_COMPLETE` / `DOWNLOAD_FAILED` | sidecar `ModelDownload*` events; `DOWNLOAD_FAILED` is also sent synthetically when the `download_model` command itself is rejected (no event will ever arrive) |
+| `TRANSCRIPTION_READY` / `RECORDING_STOPPED` | sidecar `TranscriptionReady` / `RecordingStopped` events |
+| `RECORDING_CANCELLED` | sidecar `RecordingCancelled` event (Escape-cancel) |
+| `SIDECAR_CRASHED` | `SidecarCrashed` event synthesized by the Electron main process's sidecar manager when the process exits — not a core event |
+| `STATUS_SYNC` | response to the sidecar's authoritative `status` command, sent on (re)mount |
+| `ERROR` | sidecar `Error` event |
+
+#### Transitions
+
+The transition map defines which events are valid in each state. Anything not in this map is silently ignored — and a handler may also return `undefined` to reject the event while staying in the same state (that is how guards work).
+
+```typescript
+// canario-app/src/renderer/state/types.ts — verbatim (syncFromStatus included)
+
+// Reconciliation from the sidecar's authoritative `status` command
+// (canario-dmp.5): map core truth directly onto the machine, whatever
+// the machine currently believes — it may have missed events across a
+// reload. Download progress restarts at 0 and recovers on the next
+// ModelDownloadProgress event.
+function syncFromStatus(ctx: AppContext, event: AppEvent): AppState | undefined {
+  if (event.type !== "STATUS_SYNC") return undefined;
+  if (event.recording) return { status: "recording", startedAt: Date.now() };
+  if (event.transcribing) return { status: "transcribing", startedAt: Date.now() };
+  if (event.downloading) return { status: "downloading", progress: 0 };
+  return { status: "idle", hasModel: ctx.modelReady };
+}
+
+export const transitions: TransitionMap = {
   onboarding: {
+    // Absolute step navigation (1-3) — the component computes the target
+    // step from the current state, keeping transition fns stateless.
+    WIZARD_GOTO: (_ctx, event) => {
+      if (event.type !== "WIZARD_GOTO") return undefined;
+      if (event.step < 1 || event.step > 3) return undefined;
+      return { status: "onboarding", step: event.step };
+    },
     WIZARD_COMPLETE: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   idle: {
+    START_ONBOARDING: () => ({ status: "onboarding", step: 1 }),
     START_RECORDING: (ctx) => {
-      if (!ctx.hasModel) return undefined; // reject — no model
+      if (!ctx.modelReady) return undefined;
       return { status: "recording", startedAt: Date.now() };
     },
-    START_DOWNLOAD:  () => ({ status: "downloading", progress: 0 }),
+    START_DOWNLOAD: () => ({ status: "downloading", progress: 0 }),
+    // Backend death is a state change even from idle: a fresh object
+    // makes the signal notify watchers (e.g. the offline banner).
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
   },
   recording: {
-    STOP_RECORDING: (ctx) => ({ status: "transcribing", startedAt: Date.now() }),
-    ERROR:          () => ({ status: "idle", hasModel: true }),
+    STOP_RECORDING: () => ({ status: "transcribing", startedAt: Date.now() }),
+    // Escape-cancel from the core: audio discarded, no transcription/paste
+    RECORDING_CANCELLED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    // No terminal core event can arrive anymore — force idle
+    // (canario-dmp.6: no zombie recording state).
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
+    ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   transcribing: {
-    TRANSCRIPTION_READY: (ctx) => ({ status: "idle", hasModel: true }),
-    RECORDING_STOPPED:   (ctx) => ({ status: "idle", hasModel: true }), // empty / error
-    ERROR:               () => ({ status: "idle", hasModel: true }),
+    TRANSCRIPTION_READY: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    RECORDING_STOPPED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
+    ERROR: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
   },
   downloading: {
-    DOWNLOAD_PROGRESS: (ctx, event) => ({ ...ctx, progress: event.progress }),
+    DOWNLOAD_PROGRESS: (_ctx, event) => {
+      const progress = event.type === "DOWNLOAD_PROGRESS" ? event.progress : 0;
+      return { status: "downloading", progress };
+    },
     DOWNLOAD_COMPLETE: () => ({ status: "idle", hasModel: true }),
-    DOWNLOAD_FAILED:   () => ({ status: "idle", hasModel: false }),
+    DOWNLOAD_FAILED: () => ({ status: "idle", hasModel: false }),
+    // The download died with the process; readiness must be re-derived
+    // after restart, so land on idle with the last known truth.
+    SIDECAR_CRASHED: (ctx) => ({ status: "idle", hasModel: ctx.modelReady }),
+    STATUS_SYNC: syncFromStatus,
   },
 };
 ```
+
+**Guards.** A handler returning `undefined` rejects the event without leaving the state. Two guards exist:
+
+- `idle + START_RECORDING` requires `ctx.modelReady` — you can't record without a model.
+- `onboarding + WIZARD_GOTO` requires `step` 1..3 — the wizard can't navigate outside its three steps (the component computes the target step, keeping the transition stateless).
+
+**Reconciliation: `STATUS_SYNC` (canario-dmp.5).** On (re)mount the IPC bridge asks the sidecar's authoritative `status` command (`{ recording, transcribing, downloading }`) and sends `STATUS_SYNC` — a settings-window reload resets this machine while core may be mid-recording or mid-download, and events fired before mount are gone forever. `STATUS_SYNC` is valid from **every non-onboarding status** and maps core truth directly onto the machine, whatever the machine currently believes. Precedence: `recording` → `transcribing` → `downloading` → `idle` (`hasModel: ctx.modelReady`); a reconciled download restarts at `progress: 0` and recovers on the next `ModelDownloadProgress` event. It is deliberately **not** valid from `onboarding` — the wizard owns its own flow (§5.1, "Onboarding download path").
+
+**Crash safety: `SIDECAR_CRASHED` (canario-dmp.6).** When the backend process dies, no terminal core event will ever arrive — `recording`/`transcribing` would be zombies and `downloading` would spin forever. So `SIDECAR_CRASHED` forces any active status back to `idle` with `hasModel: ctx.modelReady`. It is also valid from `idle`, where it emits a fresh state object so the Solid signal notifies watchers (the offline banner).
+
+**Escape-cancel: `RECORDING_CANCELLED`.** The core's Escape-cancel discards the audio — no transcription, no paste, no history — so `recording` returns straight to `idle`; no `TranscriptionReady` follows.
+
+**Entry paths into `transcribing` — there are three:**
+
+1. **Successful stop-response sniff.** `createCanario.stopRecording()` sends `STOP_RECORDING` only when the `stop_recording` command response is `ok`; `toggleRecording()` sends it when the `toggle_recording` response reports `recording: false`. The command response — not an event — is the confirmation that core accepted the stop and is about to transcribe.
+2. **The `TranscriptionStarted` event.** Core emits it when the finished capture actually begins transcribing (`canario-core/src/event.rs`); the renderer treats it as an idempotent belt-and-braces `STOP_RECORDING`, and the Electron main process uses it to push the overlay's "transcribing" state (canario-dmp.9).
+3. **`STATUS_SYNC` with `transcribing: true`.** Reconciliation on (re)mount maps core truth directly into `transcribing` (e.g. after a reload that ate the stop events).
+
+The response sniff usually wins the race (the response is written before the recording thread starts transcribing), which is why both paths are documented as canonical — the event is the robust one for consumers that issue no stop command themselves.
 
 #### Context (extended state)
 
 The machine carries a context object alongside the state. This is data that persists across transitions but doesn't define the state itself:
 
 ```typescript
-type AppContext = {
-  modelReady: boolean;     // is the ASR model downloaded?
+// canario-app/src/renderer/state/types.ts — verbatim
+export type AppContext = {
+  modelReady: boolean;                     // is the ASR model downloaded?
   lastTranscription: string | null;
   lastError: string | null;
-  config: AppConfig;       // snapshot of sidecar config
+  lastDuration: number | null;             // length (secs) of the last transcription
+  config: Record<string, unknown> | null;  // snapshot of sidecar config
 };
 ```
 
-Context is updated by transitions and read by components. It's not a separate store — it lives inside the machine.
+Context is updated in two places, never by components directly: `send()` applies `modelReady: true`/`false` on `DOWNLOAD_COMPLETE`/`DOWNLOAD_FAILED`, and the IPC bridge (`createCanario.ts`) writes everything else — `lastTranscription` + `lastDuration` on `TranscriptionReady`, `lastError` on `Error`/`ModelDownloadFailed`/`SidecarCrashed`, refreshed `modelReady` from `checkModel()` (`is_model_downloaded`), and the `config` snapshot — via `machine.updateContext()`. (`TRANSCRIPTION_READY` and `ERROR` intentionally update context *outside* `send()`.) Context is read by components through the same Solid context as the state. It's not a separate store — it lives inside the machine.
 
-#### Implementation: custom, ~80 lines, no library
+#### Implementation: custom, no library
+
+Two files, ~170 lines total: `types.ts` (states, events, context, transition map — the spec) and `machine.ts` (the runtime):
 
 ```typescript
-// src/state/machine.ts
-import { createSignal, createEffect, onCleanup } from "solid-js";
+// src/renderer/state/machine.ts — verbatim
+import { createSignal } from "solid-js";
 import type { AppState, AppEvent, AppContext } from "./types";
-import { transitions } from "./types";
+import { transitions, defaultContext } from "./types";
 
 export function createAppMachine() {
-  const [state, setState] = createSignal<AppState>(
-    { status: "idle", hasModel: false }
-  );
+  const [state, setState] = createSignal<AppState>({
+    status: "idle",
+    hasModel: false,
+  });
   const [context, setContext] = createSignal<AppContext>(defaultContext);
 
   function send(event: AppEvent) {
@@ -299,7 +396,6 @@ export function createAppMachine() {
     const status = current.status;
     const ctx = context();
 
-    // Is this event valid in the current state?
     const handler = transitions[status]?.[event.type];
     if (!handler) return; // ignore invalid transitions
 
@@ -307,22 +403,45 @@ export function createAppMachine() {
     if (!next) return; // guard rejected
 
     setState(next);
-    // Context can also be updated by the handler
-    if (event.contextUpdate) {
-      setContext({ ...ctx, ...event.contextUpdate });
-    }
+
+    // Update context based on event
+    setContext((prev) => {
+      const update = { ...prev };
+      switch (event.type) {
+        case "TRANSCRIPTION_READY":
+          // Updated externally by the IPC bridge
+          break;
+        case "DOWNLOAD_COMPLETE":
+          update.modelReady = true;
+          break;
+        case "DOWNLOAD_FAILED":
+          update.modelReady = false;
+          break;
+        case "ERROR":
+          // Error is set externally
+          break;
+      }
+      return update;
+    });
   }
 
-  return { state, context, send };
+  function updateContext(partial: Partial<AppContext>) {
+    setContext((prev) => ({ ...prev, ...partial }));
+  }
+
+  return { state, context, send, updateContext };
 }
 ```
 
-This is the entire machine. No external library. Solid signals make it reactive — any component that reads `state()` or `context()` automatically updates when the machine transitions.
+Note there is **no** `event.contextUpdate` payload and no effect machinery — the machine starts in `idle`, enters `onboarding` via `START_ONBOARDING` (App.tsx's first-launch check), and all other context writes go through `updateContext()` from the IPC bridge. Solid signals make it reactive — any component that reads `state()` or `context()` automatically updates when the machine transitions.
 
 #### How components use it
 
 ```tsx
-// RecordingOverlay.tsx
+// Illustrative — how a machine-driven component reads status. (The real
+// overlay deliberately does NOT do this: OverlayPage.tsx is self-contained
+// and listens to sidecar events directly, bypassing the modelReady guard —
+// see §5.3.)
 function RecordingOverlay() {
   const { state } = useAppState(); // Solid context
 
@@ -340,14 +459,14 @@ function RecordingOverlay() {
 ```
 
 ```tsx
-// Tray menu (in Electron main process, but reads same state via IPC)
-// Settings page
-function SettingsPage() {
-  const { state, send } = useAppState();
+// AppPage.tsx (settings) — model download goes through the bridge
+function ModelSection() {
+  const { state } = useAppState();
+  const canario = useCanario(); // createCanario(machine)
 
   return (
     <Show when={state().status === "downloading"} fallback={
-      <Button onClick={() => send({ type: "START_DOWNLOAD" })}>Download Model</Button>
+      <Button onClick={() => canario.downloadModel()}>Download Model</Button>
     }>
       <Progress value={state().progress} />
     </Show>
@@ -355,13 +474,22 @@ function SettingsPage() {
 }
 ```
 
+`canario.downloadModel()` sends `START_DOWNLOAD` and then issues the `download_model` command; if the command itself is rejected it sends a synthetic `DOWNLOAD_FAILED` so the machine can't wedge on a 0% bar (the real AppPage also keeps per-variant readiness via `onModelDownloadComplete`).
+
+```tsx
+// App.tsx — routing on machine status
+<Show when={machine.state().status === "onboarding"} fallback={<AppPage />}>
+  <OnboardingPage />
+</Show>
+```
+
 No component ever checks `if (isRecording && !isDownloading && modelReady)`. The machine already guarantees it. Components just match on `state().status` and render.
 
 #### Why not XState / Robot / another library?
 
-- Our state graph has **5 states** and **~10 transitions**. XState is designed for complex machines with hundreds of states, parallel regions, hierarchical composition. It would add ~15KB for a problem we solve in ~80 lines.
+- Our state graph has **5 states**, **15 event types**, and **22 transitions** (8 of which are the shared `SIDECAR_CRASHED`/`STATUS_SYNC` safety edges — four each). XState is designed for complex machines with hundreds of states, parallel regions, hierarchical composition. It would add ~15KB for a problem we solve in ~170 lines across two files.
 - `robot` is lighter but still an unnecessary dependency for this graph size.
-- A custom machine built on Solid signals is: zero dependencies, fully typed, reactive by default, auditable in a single file, and debuggable with a `console.log` in `send()`.
+- A custom machine built on Solid signals is: zero dependencies, fully typed, reactive by default, auditable in two small files (`types.ts` + `machine.ts`), and debuggable with a `console.log` in `send()`.
 - If the state graph grows significantly in future (unlikely — this is a voice-to-text app, not a workflow engine), we can migrate to XState then.
 
 ---
@@ -500,6 +628,18 @@ A 3-step setup that gets the user from "install" to "first transcription" in und
 - Auto-paste demo into a text field in the wizard itself
 - Checkbox: "Start on login"
 - Done → app minimizes to tray
+
+#### Onboarding download path (decided)
+
+**Decision (canario-dmp.15): the split between wizard-local download tracking and the machine's `downloading` status is deliberate, not drift.** During the wizard the state machine parks in `onboarding` (step 1–3), where none of its download transitions are defined — `START_DOWNLOAD`, `DOWNLOAD_PROGRESS`, `DOWNLOAD_COMPLETE`, `DOWNLOAD_FAILED` (and `STATUS_SYNC`) are all absent from the `onboarding` row of the transition map — so the machine-level event handler in `createCanario.ts` is intentionally inert for download events while onboarding. The wizard owns the download UX instead: `OnboardingPage` starts the download with a raw `download_model` **command** (deliberately not the `downloadModel()` wrapper, which is what sends `START_DOWNLOAD`) and tracks it in wizard-local state — `dlProgress` plus a speed/ETA estimator (`dlStats`) — fed by its **own** `api.onEvent` listener for `ModelDownloadProgress` / `ModelDownloadComplete` / `ModelDownloadFailed`. The machine's `downloading` status is only ever entered from `idle` (the main Settings → Model page) or by `STATUS_SYNC` reconciliation after a reload — never from `onboarding`. This isn't just preference: `App.tsx` routes on `status === "onboarding"`, so any download transition out of `onboarding` would unmount the wizard mid-download.
+
+Consequences of the decision (all visible in the code):
+
+- **The wizard must handle `ModelDownloadFailed` itself.** Its listener clears `dlProgress` (restoring the Download button); the error toast still comes via `context.lastError` — the machine-level listener records it (`updateContext` works from any status, only *transitions* are inert), and the wizard's `createEffect` on `lastError` shows the toast.
+- **A cancel mid-onboarding keeps `.part` files for resume.** The wizard's Cancel button sends `cancel_download` directly; the sidecar follows with `ModelDownloadFailed` (handled by the wizard listener as above), and partial files are kept so the next download resumes where this one stopped. The wizard shows its own "Download cancelled — it will resume next time" toast.
+- **After `WIZARD_COMPLETE`, readiness lands in `hasModel` via `ctx.modelReady`.** Context stays live even while transitions are inert: the machine-level listener calls `checkModel()` on `ModelDownloadComplete` / `ModelDownloadFailed`, and the wizard calls it on mount and on model selection — so `ctx.modelReady` is accurate when `WIZARD_COMPLETE` maps it into `{ status: "idle", hasModel: ctx.modelReady }`.
+
+The same parking applies to the step-1 mic test: the wizard issues `start_recording` / `stop_recording` commands directly and swallows the expected "no model" transcription error, while the machine stays in `onboarding` throughout.
 
 ### 5.2 System Tray (Idle State)
 
@@ -1106,14 +1246,14 @@ Full list of commands the sidecar accepts, with their parameters and responses:
 | `update_config` | `config` (partial) | — | Merges and saves |
 | `get_history` | `limit` | `[HistoryEntry]` | — |
 | `search_history` | `query` | `[HistoryEntry]` | — |
-| `delete_history` | `id` | — | Removes entry |
+| `delete_history` | `entry_id` (canonical; `target_id` accepted as an alias) | — | Removes entry. Neither present → `ok:false` error naming `entry_id` — the request `id` never doubles as the entry id (canario-dmp.8) |
 | `clear_history` | — | — | Removes all |
 | `start_hotkey` | — | — | Emits `HotkeyTriggered` on hotkey |
 | `stop_hotkey` | — | — | Stops listener |
 | `restart_hotkey` | — | — | Reloads config + restarts |
 | `hotkey_status` | — | `HotkeyStatus` | Hotkey backend health; Linux evdev permission failures carry `fix_command` |
 | `set_autostart` | `enabled`, `exec` (optional) | `{ enabled: bool }` | Creates/removes the single login entry (`~/.config/autostart/com.canario.Canario.desktop`) and keeps `config.autostart` in sync; `exec` writes a standalone entry, omit it to symlink the menu entry |
-| `ping` | — | `{ pong: true, version: "0.1.2", protocol: 1 }` | Health check + protocol handshake. `protocol` is the wire-compatibility version (`PROTOCOL_VERSION`, pinned in lockstep with canario-app/src/main/version.ts by the sidecar's protocol tests); a mismatching or missing number makes the app show a persistent version-mismatch warning (canario-dmp.4) |
+| `ping` | — | `{ pong: true, version: "0.1.2", protocol: 1 }` | Health check + protocol handshake. `protocol` is the wire-compatibility version (`PROTOCOL_VERSION`, pinned in lockstep with canario-app/src/main/version.ts by the sidecar's protocol tests); a mismatching or missing number makes the app show a persistent version-mismatch warning (canario-dmp.4). Stays 1 — nothing has shipped since it was introduced, and the additive events plus the `delete_history` `entry_id` fix ride it |
 | `diagnostics` | — | `Diagnostics` JSON (see below) | Reads log tail, probes tools |
 | `shutdown` | — | — | Stops recording + hotkey, exits |
 
@@ -1151,6 +1291,7 @@ The same blob is available on the CLI via `canario-cli --diagnostics`
 |-------|--------|-----------|-------------|
 | `RecordingStarted` | — | Once per recording | Show overlay, start dot animation |
 | `RecordingStopped` | — | Once per recording | Hide overlay or change to "Transcribing…" |
+| `TranscriptionStarted` | — | Once per recording | Emitted when the finished capture begins transcribing (before decode starts) — show the "Transcribing…" state; deriving the state from a successful `stop_recording` response is equally valid, both paths are canonical (canario-dmp.9) |
 | `TranscriptionReady` | `text`, `duration_secs` | Once per recording | Display text, auto-paste, add to history |
 | `AudioLevel` | `level` (0.0–1.0) | ~20Hz during recording | Update level bar |
 | `Error` | `message` | On failure | Show toast notification |
@@ -1158,6 +1299,7 @@ The same blob is available on the CLI via `canario-cli --diagnostics`
 | `ModelDownloadComplete` | — | Once | Update model status, enable recording |
 | `ModelDownloadFailed` | `error` | Once | Show error with retry button |
 | `HotkeyTriggered` | — | On hotkey press | Call `toggle_recording` |
+| `ConfigChanged` | — | On any config change | Emitted after any config.json write by this instance, or when a reload detects an external change; payload-free — consumers pull `get_config` (canario-dmp.20) |
 
 ---
 

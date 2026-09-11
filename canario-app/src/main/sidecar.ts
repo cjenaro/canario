@@ -4,7 +4,17 @@ import { join } from "path";
 import { app } from "electron";
 
 let sidecar: ChildProcess | null = null;
+
+// ── stdout fan-out (canario-dmp.10) ──────────────────────────────────────
+// Two disjoint listener sets, routed per stdout line: a sidecar RESPONSE
+// always carries a string `id` (OkResponse/ErrResponse in
+// canario-electron/src/main.rs), while a core EVENT never does — the
+// `#[serde(tag = "event")]` enum in canario-core/src/event.rs has no id
+// field, and neither does the synthetic SidecarCrashed event emitted
+// below. Splitting the stream keeps responses away from event consumers
+// (and the renderer forward) and events away from response matching.
 let eventListeners: Set<(event: Record<string, unknown>) => void> = new Set();
+let responseListeners: Set<(response: Record<string, unknown>) => void> = new Set();
 let commandResponseListeners: Set<(cmd: Record<string, unknown>, res: Record<string, unknown>) => void> = new Set();
 let buffer = "";
 
@@ -43,14 +53,27 @@ function getSidecarPath(): string {
   return join(process.resourcesPath, "sidecar", binName);
 }
 
-function emitToListeners(event: Record<string, unknown>) {
-  for (const listener of eventListeners) {
+function fanOut(
+  listeners: Set<(item: Record<string, unknown>) => void>,
+  item: Record<string, unknown>,
+  errorLabel: string
+) {
+  for (const listener of listeners) {
     try {
-      listener(event);
+      listener(item);
     } catch (err) {
-      console.error("Sidecar event listener error:", err);
+      console.error(errorLabel, err);
     }
   }
+}
+
+/** A parsed stdout line is a command response iff it carries a string `id`. */
+function isCommandResponse(line: unknown): line is Record<string, unknown> {
+  return (
+    typeof line === "object" &&
+    line !== null &&
+    typeof (line as Record<string, unknown>).id === "string"
+  );
 }
 
 export async function startSidecar(): Promise<void> {
@@ -84,8 +107,12 @@ export async function startSidecar(): Promise<void> {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        const event = JSON.parse(trimmed);
-        emitToListeners(event);
+        const parsed: unknown = JSON.parse(trimmed);
+        if (isCommandResponse(parsed)) {
+          fanOut(responseListeners, parsed, "Sidecar response listener error:");
+        } else {
+          fanOut(eventListeners, parsed as Record<string, unknown>, "Sidecar event listener error:");
+        }
       } catch {
         console.error("Failed to parse sidecar event:", trimmed);
       }
@@ -124,40 +151,41 @@ export async function startSidecar(): Promise<void> {
       // Renderer-visible terminal event: without it the machine would
       // wait forever for a TranscriptionReady that can never arrive
       // (canario-dmp.6 zombie-app fix).
-      emitToListeners({ event: "SidecarCrashed", code });
+      fanOut(eventListeners, { event: "SidecarCrashed", code }, "Sidecar event listener error:");
     }
   });
 
-  // Wait for sidecar to be ready (ping/pong)
+  // Wait for sidecar to be ready (ping/pong). The ping goes through
+  // sendCommand like every other command (canario-dmp.10: it generates
+  // and correlates its own id — no hand-written "init" literal).
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      eventListeners.delete(onPong);
       startupFailure = null;
       reject(new Error("Sidecar ping timeout"));
     }, 5000);
 
     startupFailure = (err) => {
       clearTimeout(timeout);
-      eventListeners.delete(onPong);
       reject(err);
     };
 
-    function onPong(event: Record<string, unknown>) {
-      if (event.id === "init" && event.ok) {
-        clearTimeout(timeout);
-        eventListeners.delete(onPong);
-        startupFailure = null;
-        status = "running";
-        resolve();
+    sendCommand({ cmd: "ping" }).then(
+      (res) => {
+        if (res.ok) {
+          clearTimeout(timeout);
+          startupFailure = null;
+          status = "running";
+          resolve();
+        }
+        // ok:false pong: nothing else resolves the handshake, so the
+        // 5s timeout above rejects startup (no retry loop).
+      },
+      () => {
+        // Spawn failure / early exit / write failure: startupFailure or
+        // the timeout already rejected the outer promise — without this
+        // handler the rejection would be unhandled.
       }
-    }
-
-    eventListeners.add(onPong);
-    // Fire-and-forget by design: the outer promise owns error reporting
-    // (startupFailure + timeout below). Without this .catch, a spawn
-    // failure makes failPendingCommands reject the ping promise with no
-    // handler attached — an unhandled rejection (fails CI's vitest run).
-    sendCommand({ id: "init", cmd: "ping" }).catch(() => {});
+    );
   });
 }
 
@@ -191,6 +219,14 @@ export function stopSidecar(): void {
   }, 500);
 }
 
+// Command ids must be unique while a response is pending, and only
+// sendCommand can guarantee that (canario-dmp.10): callers used to
+// hand-write literal ids ("init", "version-check", "autostart-N", …)
+// that could collide when two commands were in flight at once and
+// resolve each other's responses. sendCommand ignores any caller-
+// provided id and stamps its own.
+let commandSeq = 0;
+
 export function sendCommand(cmd: Record<string, unknown>): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     // Fail fast with the process state instead of a generic message —
@@ -205,10 +241,12 @@ export function sendCommand(cmd: Record<string, unknown>): Promise<Record<string
       return;
     }
 
-    const id = cmd.id as string;
+    commandSeq += 1;
+    const id = `cmd-${commandSeq}`;
+    const wire: Record<string, unknown> = { ...cmd, id };
 
     const timeout = setTimeout(() => {
-      eventListeners.delete(onResponse);
+      responseListeners.delete(onResponse);
       pendingCommands.delete(id);
       reject(new Error(`Command timeout: ${cmd.cmd}`));
     }, 10000);
@@ -219,30 +257,33 @@ export function sendCommand(cmd: Record<string, unknown>): Promise<Record<string
       reject,
     });
 
-    function onResponse(event: Record<string, unknown>) {
-      if (event.id === id) {
+    function onResponse(response: Record<string, unknown>) {
+      if (response.id === id) {
         clearTimeout(timeout);
-        eventListeners.delete(onResponse);
+        responseListeners.delete(onResponse);
         pendingCommands.delete(id);
         for (const listener of commandResponseListeners) {
           try {
-            listener(cmd, event);
+            // `wire` is the command as actually sent (generated id
+            // included) — what the sidecar saw, not what the caller
+            // passed in.
+            listener(wire, response);
           } catch (err) {
             console.error("Command response listener error:", err);
           }
         }
-        resolve(event);
+        resolve(response);
       }
     }
 
-    eventListeners.add(onResponse);
-    const json = JSON.stringify(cmd) + "\n";
+    responseListeners.add(onResponse);
+    const json = JSON.stringify(wire) + "\n";
     try {
       sidecar.stdin!.write(json);
     } catch (err) {
       // Sync write failure on a just-died stream (races the exit event).
       clearTimeout(timeout);
-      eventListeners.delete(onResponse);
+      responseListeners.delete(onResponse);
       pendingCommands.delete(id);
       reject(err instanceof Error ? err : new Error(String(err)));
     }

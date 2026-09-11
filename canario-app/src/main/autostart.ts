@@ -8,22 +8,11 @@
 import { app } from "electron";
 import { sendCommand } from "./sidecar.js";
 
-// Ids only need uniqueness while a response is pending (the sidecar
-// matches responses by id) — a module counter suffices, same pattern as
-// createCanario.ts nextId().
-let autostartSeq = 0;
-
-function nextAutostartId(): string {
-  autostartSeq += 1;
-  return `autostart-${autostartSeq}`;
-}
-
 /** Enable or disable autostart on login. Returns false on failure. */
 export async function setAutostart(enabled: boolean): Promise<boolean> {
   if (process.platform === "linux") {
     try {
       const resp = await sendCommand({
-        id: nextAutostartId(),
         cmd: "set_autostart",
         enabled,
         // exec makes the sidecar write a standalone entry pointing at
@@ -62,7 +51,6 @@ export async function setAutostart(enabled: boolean): Promise<boolean> {
   // the flag write didn't; the renderer's toast/revert handles that.
   try {
     const resp = await sendCommand({
-      id: nextAutostartId(),
       cmd: "update_config",
       config: { autostart: enabled },
     });

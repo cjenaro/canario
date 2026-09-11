@@ -496,7 +496,14 @@ export function AppPage() {
       showToast(value ? "Canario will start on login" : "Autostart disabled", "info", 3000);
       return;
     }
-    await canario.updateConfig({ [field]: value });
+    const ok = await canario.updateConfig({ [field]: value });
+    if (!ok) {
+      // Truthful ack (canario-dmp.7): the write failed. The Toggle is
+      // controlled and its signal hasn't moved, so it simply stays where
+      // it was — no revert code needed.
+      showToast("Could not save setting.", "warning");
+      return;
+    }
     if (field === "auto_paste") setAutoPaste(value);
     if (field === "sound_effects") setSoundEffects(value);
     if (field === "live_captions") setLiveCaptions(value);
@@ -590,7 +597,12 @@ export function AppPage() {
     // Animate out first
     setDeletingIds(prev => new Set([...prev, id]));
     await new Promise(r => setTimeout(r, 200));
-    await canario.deleteHistory(id);
+    const ok = await canario.deleteHistory(id);
+    if (!ok) {
+      // Truthful ack (canario-dmp.7): the entry survived — loadHistory
+      // below restores it.
+      showToast("Could not delete entry.", "warning");
+    }
     await loadHistory();
     setDeletingIds(prev => {
       const next = new Set(prev);
@@ -900,7 +912,12 @@ export function AppPage() {
                   class="text-xs px-2 py-1 rounded-md hover:opacity-80 transition-opacity"
                   style={{ color: "var(--text-secondary)", cursor: "pointer" }}
                   onClick={async () => {
-                    await canario.deleteModel();
+                    const ok = await canario.deleteModel();
+                    if (!ok) {
+                      // Truthful ack (canario-dmp.7): the model survived.
+                      showToast("Could not delete model.", "warning");
+                      return;
+                    }
                     setDownloadedModels(prev => {
                       const next = new Set(prev);
                       next.delete(selectedModel());

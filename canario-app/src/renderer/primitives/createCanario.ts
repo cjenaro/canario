@@ -46,24 +46,20 @@ declare global {
   }
 }
 
-let commandId = 0;
-
-function nextId(): string {
-  return String(++commandId);
-}
-
 export function createCanario(machine: AppMachine) {
   const { send, updateContext, state } = machine;
   const api = window.canario;
 
-  // Send a command to the sidecar
+  // Send a command to the sidecar. No id is passed: the main process's
+  // sendCommand generates and correlates unique ids itself
+  // (canario-dmp.10) — any id here would be overridden.
   async function command(cmd: string, params?: Record<string, unknown>): Promise<Record<string, unknown> | null> {
     if (!api) {
       console.error("Canario API not available (not running in Electron)");
       return null;
     }
     try {
-      return await api.sendCommand({ id: nextId(), cmd, ...params });
+      return await api.sendCommand({ cmd, ...params });
     } catch (err) {
       console.error("Sidecar command error:", err);
       return null;
@@ -126,10 +122,13 @@ export function createCanario(machine: AppMachine) {
     return res;
   }
 
-  // Delete model
-  async function deleteModel() {
-    await command("delete_model");
+  // Delete model — true when the backend actually deleted it (truthful
+  // acks, canario-dmp.7); readiness only flips on success.
+  async function deleteModel(): Promise<boolean> {
+    const res = await command("delete_model");
+    if (!res?.ok) return false;
     updateContext({ modelReady: false });
+    return true;
   }
 
   // Cancel the in-flight recording: audio is discarded, no
@@ -171,11 +170,16 @@ export function createCanario(machine: AppMachine) {
     return res?.data;
   }
 
-  // Update config
-  async function updateConfig(config: Record<string, unknown>) {
-    await command("update_config", { config });
+  // Update config — true when the write was acknowledged (truthful
+  // acks, canario-dmp.7). The main-process cache only syncs for config
+  // that was actually saved, so auto-paste/tray decisions never act on
+  // a write that failed.
+  async function updateConfig(config: Record<string, unknown>): Promise<boolean> {
+    const res = await command("update_config", { config });
+    if (!res?.ok) return false;
     // Sync config cache with main process (so auto-paste flag stays current)
     api?.updateConfigCache(config);
+    return true;
   }
 
   // Check if model is downloaded
@@ -197,9 +201,12 @@ export function createCanario(machine: AppMachine) {
     return command("search_history", { query });
   }
 
-  // Delete a single history entry
-  async function deleteHistory(id: string) {
-    return command("delete_history", { target_id: id });
+  // Delete a single history entry — true when deleted (truthful acks,
+  // canario-dmp.7). entry_id is the canonical param (the sidecar still
+  // accepts the legacy target_id alias).
+  async function deleteHistory(id: string): Promise<boolean> {
+    const res = await command("delete_history", { entry_id: id });
+    return res?.ok === true;
   }
 
   // Clear all history
@@ -418,6 +425,22 @@ export function createCanario(machine: AppMachine) {
           // return straight to idle and hide the overlay.
           send({ type: "RECORDING_CANCELLED" });
           api.hideOverlay();
+          break;
+
+        case "TranscriptionStarted":
+          // Idempotent belt-and-braces (canario-dmp.9): the machine
+          // already enters `transcribing` via the stop-response path
+          // (stopRecording / toggleRecording on res.ok); from
+          // `transcribing` this event's STOP_RECORDING is ignored by
+          // the machine.
+          send({ type: "STOP_RECORDING" });
+          break;
+
+        case "ConfigChanged":
+          // config.json was written by this instance or an external
+          // change was detected (canario-dmp.20) — pull the fresh
+          // config into context (getConfig updates it) without awaiting.
+          void getConfig();
           break;
 
         case "SidecarCrashed":

@@ -177,7 +177,8 @@ impl Canario {
     ///
     /// Audio is captured in the background. Call `stop_recording()` to
     /// stop and transcribe. Events: `RecordingStarted`, `AudioLevel`,
-    /// `TranscriptionReady`, `RecordingStopped`, `Error`.
+    /// `TranscriptionStarted` (when the finished capture begins
+    /// transcribing), `TranscriptionReady`, `RecordingStopped`, `Error`.
     pub fn start_recording(&self) -> anyhow::Result<()> {
         timing::mark("start_recording_called");
         if self.is_recording() {
@@ -319,11 +320,22 @@ impl Canario {
     /// [`Self::update_config`]; a changed recognizer identity
     /// invalidates the recognizer cache exactly like
     /// [`Self::update_config`] does, regardless of who wrote the file.
+    ///
+    /// Emits [`Event::ConfigChanged`] only when the reloaded config
+    /// genuinely differs from the in-memory snapshot (canario-dmp.20)
+    /// — `get_config` polls this method, so an unchanged file must
+    /// not spam the event.
     pub fn refresh_config(&self) -> anyhow::Result<AppConfig> {
         let loaded = crate::config::AppConfig::load()?;
         let mut config = lock(&self.inner.config);
         let cache_key_before = recognizer_cache_key(&config);
         let cache_key_after = recognizer_cache_key(&loaded);
+        // Serialize both sides for comparison — `AppConfig` carries no
+        // `PartialEq`, and the JSON view is exactly the persistence
+        // format, so "differs on the wire" means "differs on disk".
+        // A serialization failure on both sides compares equal (no
+        // event) — failing to compare must not fabricate a change.
+        let changed = serde_json::to_value(&*config).ok() != serde_json::to_value(&loaded).ok();
         *config = loaded.clone();
         drop(config);
 
@@ -331,10 +343,20 @@ impl Canario {
             crate::recording::recognizer_config_changed();
             Self::prewarm_recognizer_if_ready(&self.config());
         }
+        // External change detected on reload (another frontend, the
+        // CLI, a manual edit): same lock ordering as update_config —
+        // the event leaves only after the config lock is dropped.
+        if changed {
+            let _ = self.inner.event_tx.send(Event::ConfigChanged);
+        }
         Ok(loaded)
     }
 
     /// Update config atomically. Saves to disk.
+    ///
+    /// Emits [`Event::ConfigChanged`] after a successful save
+    /// (canario-dmp.20) — payload-free; consumers pull
+    /// [`Self::refresh_config`] / `get_config` for the new state.
     ///
     /// ```no_run
     /// # use canario_core::Canario;
@@ -357,6 +379,13 @@ impl Canario {
             crate::recording::recognizer_config_changed();
             Self::prewarm_recognizer_if_ready(&self.config());
         }
+
+        // canario-dmp.20: broadcast the write. Unconditional on a
+        // successful save — the contract is "any config.json write by
+        // this instance" — and sent only after the config lock is
+        // dropped, so a receiver handling the event may re-enter
+        // (e.g. call get_config) without deadlocking.
+        let _ = self.inner.event_tx.send(Event::ConfigChanged);
         Ok(())
     }
 

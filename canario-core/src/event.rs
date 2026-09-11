@@ -18,6 +18,16 @@ pub enum Event {
     /// recording UI; do NOT paste or store in history.
     RecordingCancelled,
 
+    /// Transcription is starting on the finished capture
+    /// (canario-dmp.9): the stop was observed and the buffer is
+    /// committed to the decode pipeline. Emitted before the decode
+    /// work starts, after the too-short guard (a discarded-to-short
+    /// capture never transcribes and never emits this). Frontends may
+    /// flip their overlay to a "Transcribing…" state from this event
+    /// OR derive it from a successful stop response — both paths are
+    /// valid (PRD-ELECTRON.md Appendix B).
+    TranscriptionStarted,
+
     /// Transcription is ready (after post-processing, and after
     /// transformation when `transform.enabled` — fgm.3 D3: the pipeline
     /// runs BEFORE this event, so what arrives here is canonical).
@@ -69,6 +79,15 @@ pub enum Event {
     #[serde(rename = "ModelDownloadFailed")]
     ModelDownloadFailed { error: String },
 
+    // ── Configuration ───────────────────────────────────────────────
+    /// The persisted config changed (canario-dmp.20): this instance
+    /// wrote config.json (`Canario::update_config`), or a reload
+    /// (`Canario::refresh_config`) detected that another writer —
+    /// another frontend, the CLI, a manual edit — changed it.
+    /// Payload-free by design: consumers pull `get_config` for the
+    /// new state, so no snapshot can go stale on the wire.
+    ConfigChanged,
+
     // ── Hotkey ──────────────────────────────────────────────────────
     /// Global hotkey was triggered — frontend should toggle recording
     HotkeyTriggered,
@@ -91,6 +110,23 @@ mod tests {
             json,
             r#"{"event":"PartialTranscript","text":"live preview"}"#
         );
+    }
+
+    /// canario-dmp.9: the transcribing signal is payload-free — pin
+    /// the wire shape so a stray field can't ride along unnoticed.
+    #[test]
+    fn transcription_started_serializes_with_event_tag() {
+        let json = serde_json::to_string(&Event::TranscriptionStarted).unwrap();
+        assert_eq!(json, r#"{"event":"TranscriptionStarted"}"#);
+    }
+
+    /// canario-dmp.20: config-change notification is payload-free —
+    /// consumers pull get_config, so the line must carry nothing but
+    /// the event tag.
+    #[test]
+    fn config_changed_serializes_with_event_tag() {
+        let json = serde_json::to_string(&Event::ConfigChanged).unwrap();
+        assert_eq!(json, r#"{"event":"ConfigChanged"}"#);
     }
 
     /// fgm.3 D5a/D3: with no transformation (disabled, no rule, or a

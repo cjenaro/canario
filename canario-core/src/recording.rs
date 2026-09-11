@@ -383,6 +383,14 @@ fn recording_loop(
         return Ok(());
     }
 
+    // ── Transcription begins (canario-dmp.9) ───────────────────────
+    // The capture is now committed to the decode pipeline (resample →
+    // decode → transform). Signal it BEFORE the decode work starts so
+    // frontends can flip their overlay to a transcribing state;
+    // deriving that state from a successful stop response is equally
+    // valid — both paths are documented in PRD-ELECTRON.md Appendix B.
+    let _ = tx.send(Event::TranscriptionStarted);
+
     // ── Resample to 16kHz if needed ─────────────────────────────────
     let audio_16k = if mic_sr != 16000 {
         tracing::info!("Resampling {}Hz → 16000Hz...", mic_sr);

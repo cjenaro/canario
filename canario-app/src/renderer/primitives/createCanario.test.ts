@@ -49,6 +49,25 @@ function fakeApi(statusData: Record<string, unknown>) {
   };
 }
 
+// fakeApi, but with a per-command handler: return a response object, a
+// promise (for rejection tests), or undefined to fall back to ok:true.
+// The mount-time `status` command keeps the fakeApi behavior.
+function fakeApiHandling(
+  statusData: Record<string, unknown>,
+  handle: (cmd: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>> | undefined
+) {
+  return {
+    ...fakeApi(statusData),
+    sendCommand: vi.fn((cmd: Record<string, unknown>) => {
+      if (cmd.cmd === "status") {
+        return Promise.resolve({ ok: true, data: statusData });
+      }
+      const res = handle(cmd);
+      return res instanceof Promise ? res : Promise.resolve(res ?? { ok: true, data: null });
+    }),
+  };
+}
+
 describe("createCanario mount reconciliation", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -177,6 +196,175 @@ describe("createCanario mount reconciliation", () => {
     expect(machine.context().lastTranscription).toBe("words");
 
     unsub();
+    dispose();
+  });
+});
+
+describe("truthful acks (canario-dmp.7)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A mounted bridge over a fake api; `handle` may be re-pointed mid-test. */
+  async function mountedBridge(handle: (cmd: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>> | undefined) {
+    const { createCanario } = await import("../primitives/createCanario");
+    const api = fakeApiHandling(
+      { recording: false, transcribing: false, downloading: false },
+      handle
+    );
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    let dispose = () => {};
+    let bridge: ReturnType<typeof createCanario> | null = null;
+    createRoot((d) => {
+      dispose = d;
+      bridge = createCanario(machine);
+    });
+    return { api, machine, bridge: bridge!, dispose };
+  }
+
+  it("updateConfig returns true and syncs the main-process cache only on ok", async () => {
+    let ok = true;
+    const { api, bridge, dispose } = await mountedBridge(
+      (cmd) => (cmd.cmd === "update_config" ? { ok, data: null } : undefined)
+    );
+
+    await expect(bridge.updateConfig({ auto_paste: false })).resolves.toBe(true);
+    expect(api.updateConfigCache).toHaveBeenCalledWith({ auto_paste: false });
+
+    ok = false;
+    await expect(bridge.updateConfig({ auto_paste: true })).resolves.toBe(false);
+    // A failed write must not fake the cache into main-process decisions.
+    expect(api.updateConfigCache).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
+  it("updateConfig returns false when the command rejects (sidecar down)", async () => {
+    const { api, bridge, dispose } = await mountedBridge((cmd) =>
+      cmd.cmd === "update_config"
+        ? Promise.reject(new Error("Sidecar not running"))
+        : undefined
+    );
+
+    await expect(bridge.updateConfig({ theme: "light" })).resolves.toBe(false);
+    expect(api.updateConfigCache).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("deleteModel returns the ack and only drops readiness on success", async () => {
+    let behavior: "ok" | "rejected" | "failed" = "ok";
+    const { machine, bridge, dispose } = await mountedBridge((cmd) => {
+      if (cmd.cmd !== "delete_model") return undefined;
+      if (behavior === "rejected") return Promise.reject(new Error("crashed"));
+      return { ok: behavior === "ok", error: behavior === "failed" ? "in use" : undefined };
+    });
+
+    machine.updateContext({ modelReady: true });
+
+    await expect(bridge.deleteModel()).resolves.toBe(true);
+    expect(machine.context().modelReady).toBe(false);
+
+    behavior = "failed";
+    machine.updateContext({ modelReady: true });
+    await expect(bridge.deleteModel()).resolves.toBe(false);
+    expect(machine.context().modelReady).toBe(true); // model survived
+
+    behavior = "rejected";
+    await expect(bridge.deleteModel()).resolves.toBe(false);
+    expect(machine.context().modelReady).toBe(true);
+    dispose();
+  });
+
+  it("deleteHistory sends the canonical entry_id and returns the ack", async () => {
+    let behavior: "ok" | "rejected" | "failed" = "ok";
+    const { api, bridge, dispose } = await mountedBridge((cmd) => {
+      if (cmd.cmd !== "delete_history") return undefined;
+      if (behavior === "rejected") return Promise.reject(new Error("timeout"));
+      return { ok: behavior === "ok", error: behavior === "failed" ? "missing entry_id" : undefined };
+    });
+
+    await expect(bridge.deleteHistory("abc-123")).resolves.toBe(true);
+    expect(api.sendCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: "delete_history", entry_id: "abc-123" })
+    );
+
+    behavior = "failed";
+    await expect(bridge.deleteHistory("abc-123")).resolves.toBe(false);
+
+    behavior = "rejected";
+    await expect(bridge.deleteHistory("abc-123")).resolves.toBe(false);
+    dispose();
+  });
+});
+
+describe("new sidecar events (canario-dmp.9 TranscriptionStarted, canario-dmp.20 ConfigChanged)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A mounted bridge whose onEvent callback is captured for firing. */
+  async function mountedBridgeWithEvents(
+    handle: (cmd: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>> | undefined
+  ) {
+    const { createCanario } = await import("../primitives/createCanario");
+    let onEventCb: ((e: Record<string, unknown>) => void) | null = null;
+    const api = {
+      ...fakeApiHandling({ recording: false, transcribing: false, downloading: false }, handle),
+      onEvent: vi.fn((cb: (e: Record<string, unknown>) => void) => {
+        onEventCb = cb;
+        return () => {};
+      }),
+    };
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    let dispose = () => {};
+    let bridge: ReturnType<typeof createCanario> | null = null;
+    createRoot((d) => {
+      dispose = d;
+      bridge = createCanario(machine);
+    });
+    await vi.waitFor(() => expect(onEventCb).not.toBeNull());
+    return { api, machine, bridge: bridge!, dispose, fire: onEventCb! };
+  }
+
+  it("TranscriptionStarted moves a recording machine to transcribing — idempotent from transcribing", async () => {
+    const { machine, dispose, fire } = await mountedBridgeWithEvents(() => undefined);
+
+    machine.updateContext({ modelReady: true });
+    machine.send({ type: "START_RECORDING" });
+    expect(machine.state().status).toBe("recording");
+
+    fire({ event: "TranscriptionStarted" });
+    expect(machine.state().status).toBe("transcribing");
+
+    // Belt-and-braces only: the stop-response path already got us here,
+    // and the machine ignores STOP_RECORDING from `transcribing`.
+    fire({ event: "TranscriptionStarted" });
+    expect(machine.state().status).toBe("transcribing");
+    dispose();
+  });
+
+  it("ConfigChanged triggers a get_config pull into context.config", async () => {
+    const { api, machine, dispose, fire } = await mountedBridgeWithEvents((cmd) =>
+      cmd.cmd === "get_config" ? { ok: true, data: { auto_paste: true } } : undefined
+    );
+
+    fire({ event: "ConfigChanged" });
+
+    await vi.waitFor(() => {
+      expect(api.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ cmd: "get_config" }));
+    });
+    await vi.waitFor(() => {
+      expect(machine.context().config).toEqual({ auto_paste: true });
+    });
     dispose();
   });
 });

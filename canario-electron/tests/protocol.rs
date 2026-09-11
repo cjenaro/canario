@@ -24,6 +24,11 @@ struct Sidecar {
     child: Child,
     stdin: ChildStdin,
     lines: mpsc::Receiver<Value>,
+    /// Lines read while waiting for something else (e.g. an event that
+    /// raced ahead of its id-matched response), replayed FIFO before
+    /// fresh reads — no wire traffic is lost to a matcher that wasn't
+    /// looking for it at that instant.
+    skimmed: std::cell::RefCell<Vec<Value>>,
     // Keep the temp HOME alive for the lifetime of the child.
     _tmp: tempfile::TempDir,
 }
@@ -74,6 +79,7 @@ impl Sidecar {
             child,
             stdin,
             lines: rx,
+            skimmed: std::cell::RefCell::new(Vec::new()),
             _tmp: tmp,
         }
     }
@@ -91,27 +97,91 @@ impl Sidecar {
         self.stdin.flush().unwrap();
     }
 
-    /// Wait for a response with the given `id`, skipping any interleaved
-    /// events. Panics on timeout so a stuck sidecar fails fast instead of
-    /// hanging the test run.
+    /// Wait for a response with the given `id`, skipping (but keeping,
+    /// for later matchers) any interleaved events. Panics on timeout
+    /// so a stuck sidecar fails fast instead of hanging the test run.
     fn wait_for(&self, id: &str) -> Value {
+        self.wait_matching(
+            |msg| msg.get("id").and_then(Value::as_str) == Some(id),
+            || format!("response id={id:?}"),
+        )
+    }
+
+    /// Wait for a pushed event line (events carry no `id`) with the
+    /// given event tag, skipping id-matched responses. Panics on
+    /// timeout — mirroring [`Self::wait_for`] for the async half of
+    /// the wire.
+    fn wait_for_event(&self, event: &str) -> Value {
+        self.wait_matching(
+            |msg| msg.get("event").and_then(Value::as_str) == Some(event),
+            || format!("event {event:?}"),
+        )
+    }
+
+    /// Shared matcher loop: check the skim buffer first (removing the
+    /// match), then block on fresh lines, banking every non-match for
+    /// later matchers. A fresh read always happens when nothing
+    /// skimmed matches, so the same non-matching line can never be
+    /// re-inspected forever.
+    fn wait_matching(&self, matches: impl Fn(&Value) -> bool, what: impl Fn() -> String) -> Value {
         let deadline = Instant::now() + RESPONSE_TIMEOUT;
         loop {
+            if let Some(msg) = self.take_from_skim(&matches) {
+                return msg;
+            }
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("timed out waiting for response id={id:?}"));
+                .unwrap_or_else(|| panic!("timed out waiting for {}", what()));
             match self.lines.recv_timeout(remaining) {
                 Ok(msg) => {
-                    if msg.get("id").and_then(Value::as_str) == Some(id) {
+                    if matches(&msg) {
                         return msg;
                     }
-                    // Interleaved event or response to another id; keep waiting.
+                    // Interleaved line for another matcher; keep it.
+                    self.skimmed.borrow_mut().push(msg);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    panic!("timed out waiting for response id={id:?}")
+                    panic!("timed out waiting for {}", what())
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("sidecar stdout closed while waiting for id={id:?}")
+                    panic!("sidecar stdout closed while waiting for {}", what())
+                }
+            }
+        }
+    }
+
+    /// Remove and return the first skimmed line matching `matches`.
+    fn take_from_skim(&self, matches: impl Fn(&Value) -> bool) -> Option<Value> {
+        let mut skimmed = self.skimmed.borrow_mut();
+        let idx = skimmed.iter().position(matches)?;
+        Some(skimmed.remove(idx))
+    }
+
+    /// Assert that no event with the given tag arrives within `quiet`,
+    /// draining (and keeping, for later matchers) any other lines.
+    /// Both the skim buffer and everything still unread count — an
+    /// event pushed earlier but only skimmed by an id-matched wait is
+    /// just as much of a violation.
+    fn assert_no_event(&self, event: &str, quiet: Duration) {
+        if let Some(msg) =
+            self.take_from_skim(|m| m.get("event").and_then(Value::as_str) == Some(event))
+        {
+            panic!("unexpected {event} event: {msg}");
+        }
+        let deadline = Instant::now() + quiet;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match self.lines.recv_timeout(remaining) {
+                Ok(msg) => {
+                    assert_ne!(
+                        msg.get("event").and_then(Value::as_str),
+                        Some(event),
+                        "unexpected {event} event: {msg}"
+                    );
+                    self.skimmed.borrow_mut().push(msg);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => return,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("sidecar stdout closed while asserting absence of {event:?}")
                 }
             }
         }
@@ -290,7 +360,7 @@ fn seed_history(tmp: &tempfile::TempDir) {
                 "source_app": null
             },
             {
-                "id": "req-delete-fallback",
+                "id": "entry-2",
                 "timestamp": "2026-01-01T00:01:00Z",
                 "text": "second entry",
                 "duration_secs": 2.0,
@@ -366,6 +436,91 @@ fn update_config_applies_known_keys_and_ignores_unknown() {
     assert_eq!(sidecar.wait_for("cfg-3")["data"]["num_threads"], json!(2));
 }
 
+// ── canario-dmp.20: ConfigChanged propagation ────────────────────────────────
+//
+// The event is payload-free by contract: consumers pull get_config.
+// These tests pin the wire shape and both emission paths (own write,
+// external change detected on reload) — plus the quiet half: polling
+// an unchanged file must not spam the event.
+
+/// A successful update_config (a config.json write by this instance)
+/// pushes a payload-free ConfigChanged line on stdout.
+#[test]
+fn update_config_emits_a_payload_free_config_changed_event() {
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({
+        "cmd": "update_config",
+        "id": "cfg-emit",
+        "config": { "num_threads": 3 }
+    }));
+    assert_eq!(sidecar.wait_for("cfg-emit")["ok"], json!(true));
+
+    let event = sidecar.wait_for_event("ConfigChanged");
+    assert_eq!(
+        event,
+        json!({ "event": "ConfigChanged" }),
+        "ConfigChanged must be payload-free — consumers pull get_config"
+    );
+
+    // The follow-up reload observes the already-updated in-memory
+    // snapshot, so it stays quiet (no echo per poll).
+    sidecar.send(json!({ "cmd": "get_config", "id": "cfg-after" }));
+    assert_eq!(sidecar.wait_for("cfg-after")["ok"], json!(true));
+    sidecar.assert_no_event("ConfigChanged", Duration::from_millis(300));
+}
+
+/// get_config reloads config.json on every call (canario-dmp.18), so
+/// it is the polling path — an unchanged file must NOT emit
+/// ConfigChanged, or every auto-paste config re-fetch would spam the
+/// renderer with phantom changes.
+#[test]
+fn get_config_polling_an_unchanged_file_does_not_emit_config_changed() {
+    let mut sidecar = Sidecar::spawn();
+
+    // A burst of polls over the same, unchanged config.json. (Each
+    // poll reloads from disk; the boot snapshot equals the file.)
+    for i in 0..5 {
+        sidecar.send(json!({ "cmd": "get_config", "id": format!("poll-{i}") }));
+        assert_eq!(sidecar.wait_for(&format!("poll-{i}"))["ok"], json!(true));
+    }
+
+    sidecar.assert_no_event("ConfigChanged", Duration::from_millis(300));
+}
+
+/// An external config.json edit surfaces as exactly one ConfigChanged
+/// on the next reload (get_config here) — this is how a second
+/// frontend or window notices another writer without watching the
+/// file itself.
+#[test]
+fn external_config_edit_surfaces_config_changed_on_the_next_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config/canario/config.json");
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    // Boot read (also materializes the default file when missing).
+    sidecar.send(json!({ "cmd": "get_config", "id": "boot" }));
+    assert_eq!(sidecar.wait_for("boot")["ok"], json!(true));
+
+    // External edit while the sidecar runs.
+    let mut edited: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    edited["num_threads"] = json!(7);
+    std::fs::write(&config_path, serde_json::to_string(&edited).unwrap()).unwrap();
+
+    sidecar.send(json!({ "cmd": "get_config", "id": "reload" }));
+    let resp = sidecar.wait_for("reload");
+    assert_eq!(resp["data"]["num_threads"], json!(7));
+    let event = sidecar.wait_for_event("ConfigChanged");
+    assert_eq!(event, json!({ "event": "ConfigChanged" }));
+
+    // The external change is now absorbed into the in-memory snapshot:
+    // further polls of the same file stay quiet.
+    sidecar.send(json!({ "cmd": "get_config", "id": "settle" }));
+    assert_eq!(sidecar.wait_for("settle")["ok"], json!(true));
+    sidecar.assert_no_event("ConfigChanged", Duration::from_millis(300));
+}
+
 #[test]
 fn malformed_json_line_returns_id_matched_error() {
     let mut sidecar = Sidecar::spawn();
@@ -392,7 +547,7 @@ fn malformed_json_line_returns_id_matched_error() {
 }
 
 #[test]
-fn delete_history_accepts_target_id_and_id_fallback_spellings() {
+fn delete_history_requires_entry_id_and_accepts_both_spellings() {
     let tmp = tempfile::tempdir().unwrap();
     seed_history(&tmp);
     let mut sidecar = Sidecar::spawn_with_home(tmp);
@@ -404,23 +559,45 @@ fn delete_history_accepts_target_id_and_id_fallback_spellings() {
     let entries = resp["data"].as_array().unwrap();
     assert_eq!(entries.len(), 2, "seeded history should load: {entries:?}");
 
-    // Spelling 1: Electron frontend's `target_id` names the entry.
+    // canario-dmp.8: neither entry_id nor target_id present → an
+    // error naming entry_id, and nothing deleted. The request `id`
+    // no longer doubles as the entry id — that fallback turned a
+    // malformed command into a silent, potentially wrong deletion.
+    sidecar.send(json!({ "cmd": "delete_history", "id": "del-none" }));
+    let resp = sidecar.wait_for("del-none");
+    assert_eq!(resp["ok"], json!(false), "missing entry must error: {resp}");
+    let error = resp["error"].as_str().unwrap();
+    assert!(
+        error.contains("entry_id"),
+        "error should name entry_id: {error}"
+    );
+
+    sidecar.send(json!({ "cmd": "get_history", "id": "h-2" }));
+    let entries = sidecar.wait_for("h-2")["data"].as_array().unwrap().clone();
+    assert_eq!(
+        entries.len(),
+        2,
+        "the failed delete must not remove anything"
+    );
+    assert_eq!(entries[0]["id"], json!("entry-2"));
+    assert_eq!(entries[1]["id"], json!("entry-1"));
+
+    // Spelling 1: the Electron renderer's `target_id` alias.
     sidecar.send(json!({ "cmd": "delete_history", "id": "del-1", "target_id": "entry-1" }));
     assert_eq!(sidecar.wait_for("del-1")["ok"], json!(true));
 
-    sidecar.send(json!({ "cmd": "get_history", "id": "h-2" }));
-    let resp = sidecar.wait_for("h-2");
-    let entries = resp["data"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["id"], json!("req-delete-fallback"));
-
-    // Spelling 2: documented `id` doubles as request id AND entry id.
-    sidecar.send(json!({ "cmd": "delete_history", "id": "req-delete-fallback" }));
-    assert_eq!(sidecar.wait_for("req-delete-fallback")["ok"], json!(true));
-
     sidecar.send(json!({ "cmd": "get_history", "id": "h-3" }));
     let resp = sidecar.wait_for("h-3");
-    assert_eq!(resp["data"].as_array().unwrap().len(), 0);
+    let entries = resp["data"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], json!("entry-2"));
+
+    // Spelling 2: the canonical `entry_id`.
+    sidecar.send(json!({ "cmd": "delete_history", "id": "del-2", "entry_id": "entry-2" }));
+    assert_eq!(sidecar.wait_for("del-2")["ok"], json!(true));
+
+    sidecar.send(json!({ "cmd": "get_history", "id": "h-4" }));
+    assert_eq!(sidecar.wait_for("h-4")["data"].as_array().unwrap().len(), 0);
 }
 
 #[test]

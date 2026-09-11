@@ -28,7 +28,8 @@ let protocolMismatch = false;
  */
 export async function checkVersion(): Promise<void> {
   try {
-    const res = await sendCommand({ id: "version-check", cmd: "ping" });
+    // sendCommand generates and correlates the id itself (canario-dmp.10).
+    const res = await sendCommand({ cmd: "ping" });
     if (res?.ok && res.data) {
       const data = res.data as { version?: string; protocol?: number };
       sidecarVersion = data.version || null;

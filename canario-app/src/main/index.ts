@@ -290,7 +290,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
   // onboarding:get/set channels so the renderer surface is unchanged.
   ipcMain.handle("onboarding:get", async () => {
     try {
-      const res = await sendCommand({ id: "onboarding-get", cmd: "get_config" });
+      const res = await sendCommand({ cmd: "get_config" });
       if (res?.ok && res.data) {
         return (res.data as { onboarding_completed?: boolean }).onboarding_completed === true;
       }
@@ -301,7 +301,6 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
   ipcMain.handle("onboarding:set", async (_e, completed: boolean) => {
     try {
       const res = await sendCommand({
-        id: "onboarding-set",
         cmd: "update_config",
         config: { onboarding_completed: completed },
       });
@@ -347,7 +346,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
           overlayWindow?.webContents.send("hotkey:triggered");
         }
         if (routing.directToggle) {
-          sendCommand({ id: "hotkey", cmd: "toggle_recording" });
+          sendCommand({ cmd: "toggle_recording" });
         }
       });
     } catch {
@@ -453,6 +452,24 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
         setTrayOffline(true);
       }
 
+      // TranscriptionStarted (canario-dmp.9): the finished capture began
+      // transcribing — push the same overlay labelling the stop-response
+      // sniff in onCommandResponse below already does. Both paths stay
+      // valid: the sniff covers stops routed through this process, the
+      // event covers every other stop path (CLI/GTK frontend) — the
+      // event is the robust one.
+      if (event.event === "TranscriptionStarted") {
+        overlayWindow?.webContents.send("overlay:status", overlayStatusForStop(cachedConfig));
+      }
+
+      // ConfigChanged (canario-dmp.20): config.json was written by this
+      // instance or an external change was detected — consumers pull
+      // get_config. Refresh the main-process cache that auto-paste and
+      // tray decisions read (same freshness argument as canario-dmp.18).
+      if (event.event === "ConfigChanged") {
+        void fetchConfig();
+      }
+
       // Events forward WHOLE: optional fields the core adds later — e.g.
       // fgm.3's raw_text / transform-failure flag on TranscriptionReady —
       // reach the renderer untouched; nothing here or in the preload
@@ -503,7 +520,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     // timing (events emitted now would out-run the renderer's
     // subscription, but the status is pull-based).
     if (process.platform === "linux") {
-      await sendCommand({ id: "init-hotkey", cmd: "start_hotkey" }).catch(() => {
+      await sendCommand({ cmd: "start_hotkey" }).catch(() => {
         console.warn("Failed to start hotkey listener (may need permissions)");
       });
     }
@@ -576,7 +593,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
 
   async function fetchConfig() {
     try {
-      const res = await sendCommand({ id: "init-config", cmd: "get_config" });
+      const res = await sendCommand({ cmd: "get_config" });
       if (res?.ok && res.data) {
         cachedConfig = res.data as Record<string, unknown>;
       }
@@ -606,7 +623,6 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       const completed = parseLegacyOnboardingFile(readFileSync(path, "utf-8"));
       if (completed) {
         const res = await sendCommand({
-          id: "migrate-onboarding",
           cmd: "update_config",
           config: { onboarding_completed: true },
         });

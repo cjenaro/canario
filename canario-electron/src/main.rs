@@ -96,11 +96,13 @@ enum Command {
     #[serde(rename = "delete_history")]
     DeleteHistory {
         id: String,
-        /// Entry to delete. The Electron frontend sends `target_id`
-        /// (canario-app/src/renderer/primitives/createCanario.ts), while
-        /// PRD-ELECTRON.md Appendix A documents `id`. Accept both:
-        /// `target_id`/`entry_id` wins if present, otherwise fall back
-        /// to `id` (which then doubles as request id and entry id).
+        /// Entry to delete. `entry_id` is canonical; the Electron
+        /// renderer's spelling `target_id` is accepted as a serde
+        /// alias (canario-app/src/renderer/primitives/createCanario.ts).
+        /// When NEITHER is present the command errors — the request
+        /// `id` no longer doubles as the entry id (canario-dmp.8): a
+        /// typo'd command must fail loudly, not delete whatever entry
+        /// happens to share the request id.
         #[serde(default, alias = "target_id")]
         entry_id: Option<String>,
     },
@@ -430,11 +432,18 @@ fn handle_command(
             let entries = canario.search_history(&query);
             write_json(&ok_data(&id, serde_json::to_value(&entries).unwrap()));
         }
-        Command::DeleteHistory { id, entry_id } => {
-            let target = entry_id.as_deref().unwrap_or(&id);
-            canario.delete_history(target);
-            write_json(&ok(&id));
-        }
+        Command::DeleteHistory { id, entry_id } => match entry_id {
+            // canario-dmp.8: the entry id must be named explicitly
+            // (`entry_id`, or the renderer's `target_id` alias). The
+            // old fallback — reusing the request `id` as the entry id —
+            // is removed: it turned a malformed command into a
+            // silent, wrong deletion.
+            Some(entry_id) => {
+                canario.delete_history(&entry_id);
+                write_json(&ok(&id));
+            }
+            None => write_json(&err(&id, "delete_history requires entry_id (or target_id)")),
+        },
         Command::ClearHistory { id } => {
             canario.clear_history();
             write_json(&ok(&id));
