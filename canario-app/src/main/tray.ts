@@ -2,6 +2,7 @@
 import { Tray, Menu, nativeImage, BrowserWindow, app } from "electron";
 import { join } from "path";
 import { sendCommand } from "./sidecar.js";
+import { versionWarningText } from "./version.js";
 
 let tray: Tray | null = null;
 let currentState: "idle" | "recording" | "transcribing" = "idle";
@@ -36,7 +37,13 @@ export function createTray(): Tray {
   const icon = getTrayIcon();
 
   tray = new Tray(icon);
-  tray.setToolTip("Canario — Voice to Text");
+  // checkVersion() runs before the tray is created, so a version or
+  // protocol mismatch is visible in the tooltip from the start — and
+  // stays visible for as long as the tray lives (canario-dmp.4).
+  const warning = versionWarningText();
+  tray.setToolTip(
+    warning ? `Canario — Voice to Text (⚠ ${warning})` : "Canario — Voice to Text"
+  );
 
   updateTrayMenu(currentState);
 

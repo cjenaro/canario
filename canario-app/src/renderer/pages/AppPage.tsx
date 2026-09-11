@@ -113,6 +113,7 @@ export function AppPage() {
 
   // About / Updates
   const [appVersion, setAppVersion] = createSignal("...");
+  const [versionWarning, setVersionWarning] = createSignal<string | null>(null);
   const [updateChecking, setUpdateChecking] = createSignal(false);
   const [updateAvailable, setUpdateAvailable] = createSignal(false);
   const [updateVersion, setUpdateVersion] = createSignal("");
@@ -307,6 +308,19 @@ export function AppPage() {
       // 5. Get version info
       const ver = await canario.getVersion();
       if (ver) setAppVersion(ver.electron + (ver.sidecar ? ` (sidecar ${ver.sidecar})` : ""));
+      // Protocol/version skew must be loud, not silent feature loss
+      // (canario-dmp.4): persistent About banner + tray tooltip.
+      if (ver?.protocolMismatch) {
+        setVersionWarning(
+          ver.protocol === null
+            ? "The speech backend predates protocol versioning — commands and events may have drifted. Restart with a matching build."
+            : `App and speech backend speak different protocol versions (backend reports ${ver.protocol}). Restart with a matching build.`
+        );
+      } else if (ver?.mismatch && ver.sidecar) {
+        setVersionWarning(
+          `Speech backend ${ver.sidecar} does not match app ${ver.electron} — a stale backend may be running. Restart Canario.`
+        );
+      }
     } catch (err) {
       console.error("[AppPage] init error:", err);
       showToast("Failed to initialize. Check that canario-electron sidecar is running.", "error", 8000);
@@ -1135,6 +1149,22 @@ export function AppPage() {
           <section class="rounded-xl border p-5" style={sectionStyle}>
             <h2 class={sectionHeader} style={sectionHeaderStyle}>About</h2>
             <div class="flex flex-col gap-3">
+              <Show when={versionWarning()}>
+                {(warning) => (
+                  <div
+                    role="alert"
+                    class="rounded-lg border p-3 text-xs"
+                    style={{
+                      "background-color": "var(--bg)",
+                      "border-color": "var(--warning, #e6a700)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    <p class="font-medium">⚠ Version mismatch</p>
+                    <p style={{ color: "var(--text-secondary)" }}>{warning()}</p>
+                  </div>
+                )}
+              </Show>
               <div class="flex items-center justify-between">
                 <div>
                   <p class="text-sm font-medium">Version</p>

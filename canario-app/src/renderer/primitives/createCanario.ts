@@ -23,7 +23,13 @@ interface CanarioAPI {
   autoPaste: (text: string) => Promise<boolean>;
   setAutostart: (enabled: boolean) => Promise<boolean>;
   updateConfigCache: (config: Record<string, unknown>) => Promise<void>;
-  getVersion: () => Promise<{ electron: string; sidecar: string | null; mismatch: boolean }>;
+  getVersion: () => Promise<{
+    electron: string;
+    sidecar: string | null;
+    mismatch: boolean;
+    protocol: number | null;
+    protocolMismatch: boolean;
+  }>;
   checkForUpdate: () => Promise<{ available: boolean; version?: string }>;
   pickFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
   onUpdateAvailable: (callback: (info: { version: string }) => void) => () => void;

@@ -13,6 +13,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Version strings: app and sidecar must match (canario-dmp.4) ────
+  # The Electron app and the canario-electron sidecar are bundled and
+  # version-compared at runtime; drifting package.json/Cargo.toml
+  # versions fail here instead of shipping a mismatched pair.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: App and sidecar versions must match
+        run: |
+          set -euo pipefail
+          app=$(jq -r .version canario-app/package.json)
+          sidecar=$(sed -nE 's/^version = "(.*)"/\1/p' canario-electron/Cargo.toml | head -1)
+          echo "canario-app:    ${app}"
+          echo "canario-electron: ${sidecar}"
+          if [ "$app" != "$sidecar" ]; then
+            echo "::error::Version drift: canario-app/package.json=${app} but canario-electron/Cargo.toml=${sidecar} — release them together"
+            exit 1
+          fi
+
   # ── Rust checks: fmt, check, clippy, test ────────────────────────────
   rust:
     runs-on: ubuntu-latest

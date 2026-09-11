@@ -168,6 +168,70 @@ fn get_config_reflects_external_edits_without_restart() {
     );
 }
 
+#[test]
+fn pin_ping_shape_and_ts_protocol_constant() {
+    // canario-dmp.4: the ping wire shape is the protocol handshake.
+    // Pin every field so an accidental shape change fails here instead
+    // of silently breaking the app's version check.
+    let mut sidecar = Sidecar::spawn();
+    sidecar.send(json!({ "cmd": "ping", "id": "pin-ping" }));
+    let resp = sidecar.wait_for("pin-ping");
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(resp["data"]["pong"], json!(true));
+    assert!(
+        resp["data"]["version"].as_str().is_some(),
+        "ping must report the sidecar crate version: {resp}"
+    );
+    let wire_protocol = resp["data"]["protocol"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("ping must report the protocol version: {resp}"))
+        as u32;
+
+    // The protocol constant lives in BOTH the sidecar (a binary crate —
+    // not importable from an integration test, so parse the source)
+    // and the Electron app (TypeScript; no codegen between the two
+    // sides). Fail CI when any one of the three drifts from the others.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let declared = [
+        (
+            "canario-electron/src/main.rs",
+            manifest.join("src/main.rs"),
+            "pub const PROTOCOL_VERSION",
+        ),
+        (
+            "canario-app/src/main/version.ts",
+            manifest.join("../canario-app/src/main/version.ts"),
+            "export const PROTOCOL_VERSION",
+        ),
+    ];
+    for (label, path, needle) in declared {
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} to cross-check PROTOCOL_VERSION ({}); update this test if the file moved",
+                path.display(),
+                e
+            )
+        });
+        let parsed: Option<u32> = source
+            .lines()
+            .find(|l| l.trim().starts_with(needle))
+            .and_then(|l| l.split('=').nth(1))
+            .and_then(|rhs| {
+                rhs.trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .ok()
+            });
+        assert_eq!(
+            parsed,
+            Some(wire_protocol),
+            "PROTOCOL_VERSION drifted: wire={wire_protocol}, {label}={parsed:?} — bump all three together (sidecar const, TS const, this pin)"
+        );
+    }
+}
+
 /// Micro-benchmark: `get_config` round-trip latency (canario-dmp.18).
 ///
 /// The Electron main process re-fetches config before each auto-paste

@@ -45,6 +45,17 @@ fn event_timing_stage(event: &canario_core::Event) -> Option<&'static str> {
 
 // ── Command types ────────────────────────────────────────────────────────────
 
+/// Wire-protocol compatibility version between this sidecar and the
+/// Electron app (canario-dmp.4).
+///
+/// Bump when a command, event, or response shape changes in a way an
+/// old peer must not silently misinterpret. The Electron app carries
+/// its own copy (canario-app/src/main/version.ts) — there is no
+/// codegen; the pair is pinned together by
+/// `pin_ping_shape_and_ts_protocol_constant` in tests/protocol.rs and
+/// compared at runtime by checkVersion().
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd")]
 enum Command {
@@ -415,6 +426,7 @@ fn handle_command(
                 serde_json::json!({
                     "pong": true,
                     "version": env!("CARGO_PKG_VERSION"),
+                    "protocol": PROTOCOL_VERSION,
                 }),
             ));
         }
