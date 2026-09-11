@@ -230,7 +230,7 @@ fn handle_event(
                         if pasted {
                             tracing::info!("📋 Auto-typed");
                             if config.sound_effects {
-                                super::app::app_beep_confirm();
+                                super::app::app_beep_confirm(config.sound_effects_volume);
                             }
                         } else {
                             tracing::info!("📋 Copied to clipboard (Ctrl+V to paste)");
@@ -284,7 +284,8 @@ fn handle_event(
     }
 }
 
-/// Play confirmation beep (callable without &self)
-pub fn app_beep_confirm() {
-    canario_core::audio_effects::beep_confirm();
+/// Play confirmation beep (callable without &self). `volume` comes from
+/// `AppConfig::sound_effects_volume` and is clamped in the effect.
+pub fn app_beep_confirm(volume: f32) {
+    canario_core::audio_effects::beep_confirm(volume);
 }

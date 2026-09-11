@@ -35,6 +35,7 @@ mod hotkey;
 mod inference;
 mod paste;
 mod recording;
+pub mod timing;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -50,6 +51,11 @@ pub use paste::paste_text;
 // Re-export for convenience
 pub use inference::read_wav;
 pub use inference::TranscriptionEngine;
+
+// Benchmark reachability: `inference` is a private module, but the
+// pipeline benches (benches/pipeline.rs) exercise `resample` directly —
+// the same function the recording thread calls on stop.
+pub use inference::resample;
 pub use recording::RecordingHandle;
 
 // Re-export submodules that frontends need

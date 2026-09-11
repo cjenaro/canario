@@ -230,4 +230,57 @@ describe("createCanario event mapping", () => {
     await tick();
     expect(machine.state().status).toBe("recording");
   });
+
+  it("Electron hotkey sends exactly one toggle_recording per press", async () => {
+    // Audit D9: main used to ALSO send toggle_recording directly, so each
+    // press produced two commands (start + instant stop → zero-length
+    // recordings). Main now notifies only (hotkeyRouting.ts) — the
+    // renderer must be the single command owner per press.
+    const { machine, mock } = await setup();
+    mock.emitHotkey();
+    await tick();
+    const toggles = mock.api.sendCommand.mock.calls.filter(
+      (call) => call[0]?.cmd === "toggle_recording",
+    );
+    expect(toggles).toHaveLength(1);
+    expect(machine.state().status).toBe("recording");
+  });
+
+  it("a rejected download_model unwedges the machine to idle and surfaces the error", async () => {
+    // e.g. Custom variant ("local-only") or "Download already in
+    // progress": the sidecar answers ok:false and never emits
+    // ModelDownload* events — without this path the machine would stay
+    // stuck in `downloading` forever (audit D1).
+    const { machine, bridge, mock } = await setup((cmd) => {
+      if (cmd.cmd === "is_model_downloaded") return { ok: true, data: true };
+      if (cmd.cmd === "download_model") {
+        return { ok: false, error: "Custom models are local-only — set custom model paths instead of downloading" };
+      }
+      return { ok: true };
+    });
+    machine.updateContext({ modelReady: true });
+
+    const res = await bridge.downloadModel();
+    expect(res).toMatchObject({ ok: false });
+    // Out of `downloading`, back on the Download button.
+    expect(machine.state().status).toBe("idle");
+    expect(machine.context().lastError).toBe(
+      "Custom models are local-only — set custom model paths instead of downloading",
+    );
+    // Readiness is re-derived from the sidecar (the rejection may belong
+    // to a variant other than the one now selected) — the machine's
+    // DOWNLOAD_FAILED flip to false must not win.
+    expect(machine.context().modelReady).toBe(true);
+  });
+
+  it("an unreachable sidecar (null response) also unwedges the machine", async () => {
+    const { machine, bridge } = await setup((cmd) => {
+      if (cmd.cmd === "download_model") throw new Error("sidecar gone");
+      return { ok: true };
+    });
+    const res = await bridge.downloadModel();
+    expect(res).toBeNull();
+    expect(machine.state().status).toBe("idle");
+    expect(machine.context().lastError).toBe("Model download could not be started");
+  });
 });

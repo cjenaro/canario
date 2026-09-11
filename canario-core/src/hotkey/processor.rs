@@ -9,18 +9,23 @@
 ///   (stays on until next explicit tap or toggle). This is useful for longer dictation.
 ///
 /// **Modifier-only handling**: If the hotkey is a modifier (Super, Alt, Ctrl), we use a
-///   0.3s threshold to distinguish "hotkey press" from "normal modifier use" — if any other
-///   key is pressed while the modifier is held, we cancel the hotkey.
+///   configurable threshold (`modifier_threshold`, default 0.3s) to distinguish "hotkey press"
+///   from "normal modifier use" — if any other key is pressed while the modifier is held,
+///   we cancel the hotkey.
 ///
 /// **Cancel**: Escape key or mouse click cancels an active recording.
 use std::time::{Duration, Instant};
 
-/// Duration within which two key presses count as a double-tap.
-const DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(300);
+/// Default duration within which two key presses count as a double-tap.
+/// Configurable per-app via `AppConfig::double_tap_timeout_ms`
+/// (plumbed through `ProcessorConfig::double_tap_timeout`).
+const DEFAULT_DOUBLE_TAP_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Time to wait after a modifier press before deciding it's a hotkey activation.
-/// If any other key is pressed during this window, the hotkey is cancelled.
-const MODIFIER_THRESHOLD: Duration = Duration::from_millis(300);
+/// Default time to wait after a modifier press before deciding it's a
+/// hotkey activation. If any other key is pressed during this window,
+/// the hotkey is cancelled. Configurable per-app via
+/// `AppConfig::modifier_threshold_ms`.
+const DEFAULT_MODIFIER_THRESHOLD: Duration = Duration::from_millis(300);
 
 /// Actions the processor can emit.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,16 +54,23 @@ enum ProcessorState {
 }
 
 /// Configuration for the processor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProcessorConfig {
     /// Minimum time the key must be held to trigger recording (seconds).
     /// Presses shorter than this are ignored (accidental taps).
     pub minimum_key_time: Duration,
+    /// Window within which two key presses count as a double-tap
+    /// (locking the recording on). From `AppConfig::double_tap_timeout_ms`.
+    pub double_tap_timeout: Duration,
     /// Enable double-tap to lock recording on.
     pub double_tap_lock: bool,
     /// Only double-tap controls recording: press-and-hold never starts
     /// one. Implies double-tap detection even if `double_tap_lock` is off.
     pub double_tap_only: bool,
+    /// How long a modifier-only hotkey must be held before it counts as
+    /// an activation (any other key during the window cancels it).
+    /// From `AppConfig::modifier_threshold_ms`.
+    pub modifier_threshold: Duration,
     /// Is the hotkey a modifier key? (affects cancellation logic)
     pub is_modifier: bool,
 }
@@ -67,8 +79,10 @@ impl Default for ProcessorConfig {
     fn default() -> Self {
         Self {
             minimum_key_time: Duration::from_millis(200),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: true,
             double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: true,
         }
     }
@@ -109,7 +123,9 @@ impl HotkeyProcessor {
                 None
             }
             ProcessorState::WaitingForSecondTap { released_at } => {
-                if self.double_tap_enabled() && released_at.elapsed() < DOUBLE_TAP_TIMEOUT {
+                if self.double_tap_enabled()
+                    && released_at.elapsed() < self.config.double_tap_timeout
+                {
                     // Double-tap detected — lock recording ON
                     self.state = ProcessorState::LockedRecording;
                     self.recording = true;
@@ -206,7 +222,7 @@ impl HotkeyProcessor {
                 let held = pressed_at.elapsed();
 
                 let threshold = if self.config.is_modifier {
-                    MODIFIER_THRESHOLD
+                    self.config.modifier_threshold
                 } else {
                     self.config.minimum_key_time
                 };
@@ -277,8 +293,10 @@ mod tests {
     fn test_press_and_hold() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: false,
             double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -297,8 +315,10 @@ mod tests {
     fn test_short_tap_ignored() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(200),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: false,
             double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -312,8 +332,10 @@ mod tests {
     fn test_double_tap_lock() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: true,
             double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -334,8 +356,10 @@ mod tests {
     fn test_escape_cancels() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(10),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: false,
             double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -352,8 +376,10 @@ mod tests {
     fn test_modifier_other_key_cancels() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: false,
             double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: true,
         });
 
@@ -369,8 +395,10 @@ mod tests {
     fn test_double_tap_only_disables_press_and_hold() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: true,
             double_tap_only: true,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -389,8 +417,10 @@ mod tests {
     fn test_double_tap_only_still_locks_on_double_tap() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: true,
             double_tap_only: true,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -414,8 +444,10 @@ mod tests {
     fn test_double_tap_only_implies_double_tap_detection() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: false,
             double_tap_only: true,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -430,8 +462,10 @@ mod tests {
     fn test_double_tap_only_escape_cancels_locked_recording() {
         let mut proc = HotkeyProcessor::new(ProcessorConfig {
             minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
             double_tap_lock: false,
             double_tap_only: true,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
             is_modifier: false,
         });
 
@@ -440,5 +474,71 @@ mod tests {
         assert_eq!(proc.on_key_press(), Some(HotkeyAction::StartRecording));
         assert_eq!(proc.on_escape(), Some(HotkeyAction::CancelRecording));
         assert!(!proc.is_recording());
+    }
+
+    /// A widened `double_tap_timeout` keeps counting taps as a double
+    /// well past the old hardcoded 300 ms window.
+    #[test]
+    fn test_double_tap_timeout_window_widens() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: Duration::from_millis(1000),
+            double_tap_lock: true,
+            double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
+            is_modifier: false,
+        });
+
+        // First tap + release
+        assert_eq!(proc.on_key_press(), None);
+        assert_eq!(proc.on_key_release(), None);
+        // Wait past the old 300 ms default (but inside the 1000 ms
+        // window) — the second tap must still lock the recording.
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(proc.on_key_press(), Some(HotkeyAction::StartRecording));
+        assert!(proc.is_recording());
+    }
+
+    /// A narrowed `double_tap_timeout` treats a slow second tap as a
+    /// new single press instead of a double-tap lock.
+    #[test]
+    fn test_double_tap_timeout_window_shrinks() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            minimum_key_time: Duration::from_millis(50),
+            double_tap_timeout: Duration::from_millis(80),
+            double_tap_lock: true,
+            double_tap_only: false,
+            modifier_threshold: DEFAULT_MODIFIER_THRESHOLD,
+            is_modifier: false,
+        });
+
+        assert_eq!(proc.on_key_press(), None);
+        assert_eq!(proc.on_key_release(), None);
+        std::thread::sleep(Duration::from_millis(150));
+        // Too slow even for the narrowed window — a fresh single press,
+        // not a lock. Recording only starts via the hold threshold.
+        assert_eq!(proc.on_key_press(), None);
+        assert!(!proc.is_recording());
+    }
+
+    /// A lowered `modifier_threshold` starts a modifier-hotkey recording
+    /// sooner than the old hardcoded 300 ms.
+    #[test]
+    fn test_modifier_threshold_lowered() {
+        let mut proc = HotkeyProcessor::new(ProcessorConfig {
+            // If the threshold knob were ignored, this hold time would
+            // gate the start and 60 ms would not be enough.
+            minimum_key_time: Duration::from_millis(200),
+            double_tap_timeout: DEFAULT_DOUBLE_TAP_TIMEOUT,
+            double_tap_lock: false,
+            double_tap_only: false,
+            modifier_threshold: Duration::from_millis(50),
+            is_modifier: true,
+        });
+
+        assert_eq!(proc.on_key_press(), None);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(proc.on_tick(), Some(HotkeyAction::StartRecording));
+        assert!(proc.is_recording());
     }
 }

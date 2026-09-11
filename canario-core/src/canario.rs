@@ -12,6 +12,7 @@ use crate::event::Event;
 use crate::history::History;
 use crate::hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener, HotkeyStatus};
 use crate::recording::RecordingHandle;
+use crate::timing;
 
 /// Lock a mutex, recovering from poisoning instead of panicking.
 /// A poisoned mutex just means a thread panicked while holding it;
@@ -134,6 +135,13 @@ impl Canario {
     /// itself is unit-tested in `recording`.
     #[cfg(not(test))]
     fn prewarm_recognizer_if_ready(config: &AppConfig) {
+        // Benchmark knob (scripts/bench-pipeline --cold): a cold run must
+        // pay the model load inside its first dictation, not hide it in
+        // a startup prewarm.
+        if crate::timing::bench_disable_prewarm() {
+            tracing::debug!("Prewarm skipped: CANARIO_BENCH_DISABLE_PREWARM is set");
+            return;
+        }
         match config.model_paths() {
             Ok(paths) if paths.all_exist() => {
                 crate::recording::prewarm_recognizer_cache(paths);
@@ -155,6 +163,7 @@ impl Canario {
     /// stop and transcribe. Events: `RecordingStarted`, `AudioLevel`,
     /// `TranscriptionReady`, `RecordingStopped`, `Error`.
     pub fn start_recording(&self) -> anyhow::Result<()> {
+        timing::mark("start_recording_called");
         if self.is_recording() {
             return Err(anyhow::anyhow!("Already recording"));
         }
@@ -176,6 +185,7 @@ impl Canario {
         let model_paths = config.model_paths()?;
         let post_processor = config.post_processor.clone();
         let sound_effects = config.sound_effects;
+        let sound_volume = config.sound_effects_volume;
 
         // Mute system audio for the recording if configured. The guard
         // restores the prior state on stop/cancel (or on failure below).
@@ -186,23 +196,28 @@ impl Canario {
 
         let tx = self.inner.event_tx.clone();
 
-        let handle =
-            match crate::recording::start_recording(model_paths, tx, post_processor, sound_effects)
-            {
-                Ok(handle) => handle,
-                Err(e) => {
-                    // Recording never started — undo the mute immediately.
-                    if let Some(guard) = mute_guard {
-                        guard.restore();
-                    }
-                    return Err(e);
+        let handle = match crate::recording::start_recording(
+            model_paths,
+            tx,
+            post_processor,
+            sound_effects,
+            sound_volume,
+        ) {
+            Ok(handle) => handle,
+            Err(e) => {
+                // Recording never started — undo the mute immediately.
+                if let Some(guard) = mute_guard {
+                    guard.restore();
                 }
-            };
+                return Err(e);
+            }
+        };
 
         *lock(&self.inner.mute_guard) = mute_guard;
         *lock(&self.inner.recording_handle) = Some(handle);
         self.inner.is_recording.store(true, Ordering::SeqCst);
         tracing::info!("Recording started");
+        timing::mark("recording_started_event");
         let _ = self.inner.event_tx.send(Event::RecordingStarted);
         Ok(())
     }
@@ -212,6 +227,7 @@ impl Canario {
     /// The recording thread will emit `Event::RecordingStopped` when
     /// transcription is complete (or immediately for short recordings).
     pub fn stop_recording(&self) {
+        timing::mark("stop_recording_called");
         if let Some(h) = lock(&self.inner.recording_handle).as_ref() {
             tracing::info!("Recording stop requested");
             h.stop();
@@ -443,6 +459,8 @@ impl Canario {
             config.minimum_key_time,
             config.double_tap_lock,
             config.double_tap_only,
+            config.double_tap_timeout_ms,
+            config.modifier_threshold_ms,
         );
 
         let tx = self.inner.event_tx.clone();
@@ -453,9 +471,17 @@ impl Canario {
         listener.start(hk_config, move |action| {
             match action {
                 HotkeyAction::StartRecording | HotkeyAction::StopRecording => {
+                    // Marks the moment the hotkey backend dispatched the
+                    // action (its poll loop already noticed the key) —
+                    // the latest core-side witness of the physical press.
+                    timing::mark(match action {
+                        HotkeyAction::StartRecording => "hotkey_start_action",
+                        _ => "hotkey_stop_action",
+                    });
                     let _ = tx.send(Event::HotkeyTriggered);
                 }
                 HotkeyAction::CancelRecording => {
+                    timing::mark("hotkey_cancel_action");
                     // Handle cancellation in-core: stop capturing and
                     // discard the buffer without transcribing. The
                     // recording thread emits `RecordingCancelled`.

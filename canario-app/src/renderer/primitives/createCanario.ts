@@ -94,10 +94,26 @@ export function createCanario(machine: AppMachine) {
     return res;
   }
 
-  // Download model
-  async function downloadModel() {
+  // Download model — returns the command response so callers can surface
+  // rejections (AppPage's handleDownload shows them as a toast).
+  async function downloadModel(): Promise<Record<string, unknown> | null> {
     send({ type: "START_DOWNLOAD" });
-    await command("download_model");
+    const res = await command("download_model");
+    if (!res?.ok) {
+      // Rejected command (Custom models are local-only, a download is
+      // already in progress, sidecar unreachable): no ModelDownload*
+      // event will ever arrive, so exit `downloading` synthetically —
+      // otherwise the machine wedges on a 0% progress bar with the
+      // Download button gone (audit D1). Mirror the ModelDownloadFailed
+      // event path: record the reason, then re-derive readiness (the
+      // rejection may belong to a variant other than the one selected).
+      updateContext({
+        lastError: (res?.error as string) || "Model download could not be started",
+      });
+      send({ type: "DOWNLOAD_FAILED" });
+      await checkModel();
+    }
+    return res;
   }
 
   // Delete model

@@ -30,8 +30,20 @@ pub struct AppConfig {
     /// Enable double-tap to lock recording
     pub double_tap_lock: bool,
 
+    /// Window in milliseconds within which two taps of the hotkey count
+    /// as a double-tap (locking the recording on). Read by the hotkey
+    /// processor when the listener starts — frontends restart the
+    /// hotkey after changing it.
+    pub double_tap_timeout_ms: u64,
+
     /// Use double-tap only (no press-and-hold)
     pub double_tap_only: bool,
+
+    /// Milliseconds a modifier-only hotkey must be held before it counts
+    /// as an activation (any other key pressed during the window cancels
+    /// it, so normal modifier use like Super+C is unaffected). Advanced
+    /// knob — no settings UI; edit config.json directly.
+    pub modifier_threshold_ms: u64,
 
     /// Audio behavior during recording
     pub recording_audio_behavior: AudioBehavior,
@@ -58,6 +70,12 @@ pub struct AppConfig {
 
     /// Play sound effects on recording start/stop
     pub sound_effects: bool,
+
+    /// Volume of the sound effects (0.0 = silent, 1.0 = loudest).
+    /// Values outside the range are clamped when the beeps are
+    /// generated (see `audio::effects::clamp_volume`), so a
+    /// hand-edited config cannot produce an invalid amplitude.
+    pub sound_effects_volume: f32,
 
     /// Stream live caption previews (PartialTranscript events) in the
     /// overlay during long recordings
@@ -93,6 +111,14 @@ pub struct AppConfig {
     /// motion.ts (application) and styles/animations.css (gating).
     /// Defaults keep every effect on (the pre-existing behavior).
     pub animations: AnimationSettings,
+
+    /// Onboarding wizard completion flag (PRD §5.1, canario-xv9): true
+    /// once the user finished (or skipped) the first-launch wizard. The
+    /// Electron main process reads and flips it through the sidecar's
+    /// `get_config` / `update_config` commands, so all app state lives
+    /// in this one config. Defaults to false — fresh installs (and old
+    /// config files written before the field existed) run the wizard.
+    pub onboarding_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -204,7 +230,9 @@ impl Default for AppConfig {
             hotkey: vec!["Super".into(), "Alt".into(), "Space".into()],
             minimum_key_time: 0.2,
             double_tap_lock: true,
+            double_tap_timeout_ms: 300,
             double_tap_only: false,
+            modifier_threshold_ms: 300,
             recording_audio_behavior: AudioBehavior::DoNothing,
             auto_paste: true,
             show_tray_icon: true,
@@ -215,12 +243,14 @@ impl Default for AppConfig {
             post_processor: PostProcessor::default(),
             autostart: false,
             sound_effects: true,
+            sound_effects_volume: 0.3,
             live_captions: true,
             live_captions_threshold_secs: 8.0,
             theme: ThemeMode::Dark,
             accent_color: None,
             overlay_offsets: BTreeMap::new(),
             animations: AnimationSettings::default(),
+            onboarding_completed: false,
         }
     }
 }
@@ -362,11 +392,16 @@ mod tests {
         assert_eq!(config.minimum_key_time, 0.2);
         assert!(config.double_tap_lock);
         assert!(!config.double_tap_only);
+        // Timing windows default to the old hardcoded 300 ms
+        assert_eq!(config.double_tap_timeout_ms, 300);
+        assert_eq!(config.modifier_threshold_ms, 300);
         assert_eq!(config.recording_audio_behavior, AudioBehavior::DoNothing);
         assert!(config.show_tray_icon);
         assert_eq!(config.num_threads, 4);
         assert!(!config.autostart);
         assert!(config.sound_effects);
+        // Beep loudness defaults to the old hardcoded 0.3 amplitude
+        assert_eq!(config.sound_effects_volume, 0.3);
         // Live captions default to on with the long-session threshold
         assert!(config.live_captions);
         assert_eq!(config.live_captions_threshold_secs, 8.0);
@@ -378,6 +413,8 @@ mod tests {
         assert!(config.overlay_offsets.is_empty());
         // Animations default to fully on (existing behavior)
         assert_eq!(config.animations, AnimationSettings::default());
+        // Onboarding defaults to not completed → old configs re-run the wizard
+        assert!(!config.onboarding_completed);
     }
 
     #[test]
@@ -404,6 +441,9 @@ mod tests {
         assert_eq!(loaded.num_threads, config.num_threads);
         assert_eq!(loaded.auto_paste, config.auto_paste);
         assert_eq!(loaded.sound_effects, config.sound_effects);
+        assert_eq!(loaded.sound_effects_volume, config.sound_effects_volume);
+        assert_eq!(loaded.double_tap_timeout_ms, config.double_tap_timeout_ms);
+        assert_eq!(loaded.modifier_threshold_ms, config.modifier_threshold_ms);
         assert_eq!(loaded.live_captions, config.live_captions);
         assert_eq!(
             loaded.live_captions_threshold_secs,
@@ -413,6 +453,7 @@ mod tests {
         assert_eq!(loaded.accent_color, config.accent_color);
         assert_eq!(loaded.overlay_offsets, config.overlay_offsets);
         assert_eq!(loaded.animations, config.animations);
+        assert_eq!(loaded.onboarding_completed, config.onboarding_completed);
     }
 
     #[test]
@@ -531,6 +572,83 @@ mod tests {
         cleared["overlay_offsets"] = serde_json::json!({});
         let cleared: AppConfig = serde_json::from_value(cleared).unwrap();
         assert!(cleared.overlay_offsets.is_empty());
+    }
+
+    #[test]
+    fn onboarding_completed_defaults_false_and_round_trips() {
+        // Old configs (and `{}`) have no onboarding_completed key — the
+        // wizard then runs on next launch. A completed flag parses,
+        // serializes snake_case, and survives a round trip.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.onboarding_completed);
+        let config: AppConfig =
+            serde_json::from_str(r#"{ "onboarding_completed": true }"#).unwrap();
+        assert!(config.onboarding_completed);
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""onboarding_completed":true"#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(loaded.onboarding_completed);
+        // Flipping it back off round-trips too (Settings → About re-run)
+        let mut flipped = loaded;
+        flipped.onboarding_completed = false;
+        let json = serde_json::to_string(&flipped).unwrap();
+        assert!(json.contains(r#""onboarding_completed":false"#));
+        let reloaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(!reloaded.onboarding_completed);
+    }
+
+    #[test]
+    fn hotkey_timing_fields_parse_and_round_trip() {
+        // Old configs (and `{}`) have no timing keys — both windows
+        // default to the previously hardcoded 300 ms.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.double_tap_timeout_ms, 300);
+        assert_eq!(config.modifier_threshold_ms, 300);
+        // Explicit values parse snake_case...
+        let config: AppConfig = serde_json::from_str(
+            r#"{ "double_tap_timeout_ms": 450, "modifier_threshold_ms": 250 }"#,
+        )
+        .unwrap();
+        assert_eq!(config.double_tap_timeout_ms, 450);
+        assert_eq!(config.modifier_threshold_ms, 250);
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+        // ...and survive a round trip through save/load.
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""double_tap_timeout_ms":450"#));
+        assert!(json.contains(r#""modifier_threshold_ms":250"#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.double_tap_timeout_ms, 450);
+        assert_eq!(loaded.modifier_threshold_ms, 250);
+    }
+
+    #[test]
+    fn sound_effects_volume_parses_and_round_trips() {
+        // Old configs (and `{}`) have no volume key — the beeps keep
+        // the previously hardcoded 0.3 amplitude.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.sound_effects_volume, 0.3);
+        // Explicit values parse and round-trip; out-of-range values are
+        // STORED as-is and clamped when the beeps are generated (see
+        // audio::effects::clamp_volume), so a hand-edited config loads
+        // instead of erroring.
+        let config: AppConfig =
+            serde_json::from_str(r#"{ "sound_effects_volume": 0.75 }"#).unwrap();
+        assert_eq!(config.sound_effects_volume, 0.75);
+        let mut over = config.clone();
+        over.sound_effects_volume = 1.5;
+        let mut under = config;
+        under.sound_effects_volume = -0.2;
+        for config in [over, under] {
+            let json = serde_json::to_string(&config).unwrap();
+            let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded.sound_effects_volume, config.sound_effects_volume);
+        }
+        // The default config serializes the field explicitly.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(r#""sound_effects_volume":0.3"#));
     }
 
     #[test]

@@ -75,7 +75,8 @@ const api = {
   getTheme: () => ipcRenderer.invoke("theme:get"),
   setTheme: (theme: string) => ipcRenderer.invoke("theme:set", theme),
 
-  // Onboarding completion flag (persisted in main process, mirrors theme.json)
+  // Onboarding completion flag (persisted in the sidecar-owned AppConfig
+  // via get_config/update_config — canario-xv9)
   getOnboardingCompleted: () => ipcRenderer.invoke("onboarding:get"),
   setOnboardingCompleted: (completed: boolean) => ipcRenderer.invoke("onboarding:set", completed),
 

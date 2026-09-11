@@ -11,6 +11,38 @@ use std::io::{BufRead, Write};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+// ── Pipeline timing marks ────────────────────────────────────────────────────
+
+/// Timing stage for a received command, for the latency-relevant
+/// commands only (recording control). `None` = not worth a mark.
+///
+/// Marks fire the moment the command is parsed, i.e. after stdin read +
+/// JSON parse — the entry edge of the sidecar hop. See
+/// `canario_core::timing` for the full stage model.
+fn cmd_timing_stage(cmd: &Command) -> Option<&'static str> {
+    match cmd {
+        Command::StartRecording { .. } => Some("sidecar_cmd_start_recording"),
+        Command::StopRecording { .. } => Some("sidecar_cmd_stop_recording"),
+        Command::ToggleRecording { .. } => Some("sidecar_cmd_toggle_recording"),
+        _ => None,
+    }
+}
+
+/// Timing stage for a forwarded event, for the pipeline milestones only
+/// (frequent chatter like `AudioLevel` is deliberately unmarked).
+fn event_timing_stage(event: &canario_core::Event) -> Option<&'static str> {
+    use canario_core::Event;
+    match event {
+        Event::RecordingStarted => Some("sidecar_event_recording_started"),
+        Event::RecordingStopped => Some("sidecar_event_recording_stopped"),
+        Event::RecordingCancelled => Some("sidecar_event_recording_cancelled"),
+        Event::TranscriptionReady { .. } => Some("sidecar_event_transcription_ready"),
+        Event::HotkeyTriggered => Some("sidecar_event_hotkey_triggered"),
+        Event::Error { .. } => Some("sidecar_event_error"),
+        _ => None,
+    }
+}
+
 // ── Command types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +190,9 @@ fn main() -> anyhow::Result<()> {
             {
                 event_tx_canario.add_history(text.clone(), duration_secs, None);
             }
+            if let Some(stage) = event_timing_stage(&event) {
+                canario_core::timing::mark(stage);
+            }
             write_json(&event);
         }
         info!("Event channel closed, sidecar exiting");
@@ -200,6 +235,9 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
+        if let Some(stage) = cmd_timing_stage(&cmd) {
+            canario_core::timing::mark(stage);
+        }
         handle_command(&canario, cmd, &mut log_guard);
     }
 
@@ -427,6 +465,22 @@ mod tests {
         assert!((cfg.minimum_key_time - 0.5).abs() < f64::EPSILON);
         // Untouched field keeps default
         assert!(cfg.sound_effects);
+    }
+
+    #[test]
+    fn merge_applies_onboarding_completed() {
+        // The Electron main process flips the first-launch wizard flag
+        // through update_config (canario-xv9) — the generic merge path
+        // must accept it like any other known AppConfig key.
+        let mut cfg = canario_core::AppConfig::default();
+        assert!(!cfg.onboarding_completed);
+        merge_config(&mut cfg, &serde_json::json!({ "onboarding_completed": true }));
+        assert!(cfg.onboarding_completed);
+        // And back off (Settings → About "Re-run onboarding")
+        merge_config(&mut cfg, &serde_json::json!({ "onboarding_completed": false }));
+        assert!(!cfg.onboarding_completed);
+        // Untouched field keeps default
+        assert!(cfg.auto_paste);
     }
 
     #[test]

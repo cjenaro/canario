@@ -10,6 +10,7 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 use crate::config::ModelPaths;
 use crate::event::Event;
 use crate::inference::postprocess::PostProcessor;
+use crate::timing;
 
 /// Handle to stop a running recording and track thread completion.
 pub struct RecordingHandle {
@@ -51,6 +52,7 @@ pub fn start_recording(
     tx: std::sync::mpsc::Sender<Event>,
     post_processor: PostProcessor,
     sound_effects: bool,
+    sound_volume: f32,
 ) -> anyhow::Result<RecordingHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
@@ -61,7 +63,7 @@ pub fn start_recording(
 
     // Play start beep
     if sound_effects {
-        crate::audio::effects::beep_start();
+        crate::audio::effects::beep_start(sound_volume);
     }
 
     // Inference thread count (0 = auto). Part of the recognizer cache
@@ -77,6 +79,7 @@ pub fn start_recording(
             cancel_clone,
             &post_processor,
             sound_effects,
+            sound_volume,
             num_threads,
         );
         if let Err(e) = &result {
@@ -101,9 +104,12 @@ fn recording_loop(
     cancel: Arc<AtomicBool>,
     post_processor: &PostProcessor,
     sound_effects: bool,
+    sound_volume: f32,
     num_threads: i32,
 ) -> anyhow::Result<()> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    timing::mark("recording_thread_start");
 
     // ── Open mic ────────────────────────────────────────────────────
     let host = cpal::default_host();
@@ -113,6 +119,7 @@ fn recording_loop(
     let supported = device.default_input_config()?;
     let mic_sr = supported.sample_rate().0;
     let channels = supported.channels() as usize;
+    timing::mark("mic_device_opened");
 
     tracing::info!(
         "Recording from '{}' at {}Hz",
@@ -123,11 +130,19 @@ fn recording_loop(
     let audio_buf: Arc<parking_lot::Mutex<Vec<f32>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
 
+    // Set by the first mic callback — the moment audio actually starts
+    // flowing (press-to-record's true endpoint, later than `stream.play`).
+    let first_audio = Arc::new(AtomicBool::new(false));
+
     let audio_buf_clone = audio_buf.clone();
+    let first_audio_f32 = first_audio.clone();
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &supported.into(),
             move |data: &[f32], _| {
+                if !first_audio_f32.swap(true, Ordering::SeqCst) {
+                    timing::mark("first_audio");
+                }
                 let mono: Vec<f32> = data
                     .chunks(channels)
                     .map(|frame| frame.iter().sum::<f32>() / channels as f32)
@@ -139,9 +154,13 @@ fn recording_loop(
         )?,
         cpal::SampleFormat::I16 => {
             let buf = audio_buf.clone();
+            let first_audio_i16 = first_audio.clone();
             device.build_input_stream(
                 &supported.into(),
                 move |data: &[i16], _| {
+                    if !first_audio_i16.swap(true, Ordering::SeqCst) {
+                        timing::mark("first_audio");
+                    }
                     let mono: Vec<f32> = data
                         .chunks(channels)
                         .map(|frame| {
@@ -162,6 +181,7 @@ fn recording_loop(
     };
 
     stream.play()?;
+    timing::mark("mic_stream_started");
 
     // ── Live captions for long sessions ─────────────────────────────
     // Detached worker: decodes a sliding window of the buffer and emits
@@ -209,6 +229,8 @@ fn recording_loop(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
+    timing::mark("stop_observed");
+
     // ── Stop: grab audio, release mic ───────────────────────────────
     // Cancel path: release the mic and discard the buffer — skip the
     // stop beep, resample, and transcription entirely.
@@ -216,16 +238,21 @@ fn recording_loop(
         drop(stream);
         audio_buf.lock().clear();
         tracing::info!("Recording cancelled — discarding captured audio");
+        timing::mark("recording_cancelled");
         let _ = tx.send(Event::RecordingCancelled);
         return Ok(());
     }
 
     let raw_audio = audio_buf.lock().clone();
+    timing::mark("audio_cloned");
     drop(stream);
+    timing::mark("mic_released");
 
     // Play stop beep (double-beep) before transcription begins
     if sound_effects {
-        crate::audio::effects::beep_stop();
+        timing::mark("beep_stop_start");
+        crate::audio::effects::beep_stop(sound_volume);
+        timing::mark("beep_stop_done");
     }
 
     let duration = raw_audio.len() as f64 / mic_sr as f64;
@@ -244,7 +271,10 @@ fn recording_loop(
     // ── Resample to 16kHz if needed ─────────────────────────────────
     let audio_16k = if mic_sr != 16000 {
         tracing::info!("Resampling {}Hz → 16000Hz...", mic_sr);
-        crate::inference::resample::resample(&raw_audio, mic_sr, 16000)?
+        timing::mark("resample_start");
+        let out = crate::inference::resample::resample(&raw_audio, mic_sr, 16000)?;
+        timing::mark("resample_done");
+        out
     } else {
         raw_audio
     };
@@ -257,7 +287,9 @@ fn recording_loop(
         let rec_stream = recognizer.create_stream();
         rec_stream.accept_waveform(16000, &audio_16k);
         let decode_start = std::time::Instant::now();
+        timing::mark("decode_start");
         recognizer.decode(&rec_stream);
+        timing::mark("decode_end");
         let decode_secs = decode_start.elapsed().as_secs_f64();
         tracing::info!(
             "Decoded {:.1}s of audio in {:.2}s ({:.2}x realtime)",
@@ -279,6 +311,7 @@ fn recording_loop(
                     text.chars().count(),
                     text
                 );
+                timing::mark("transcript_ready");
                 let _ = tx.send(Event::TranscriptionReady {
                     text,
                     duration_secs: duration,
@@ -290,6 +323,7 @@ fn recording_loop(
     })?;
 
     let _ = tx.send(Event::RecordingStopped);
+    timing::mark("recording_stopped");
     Ok(())
 }
 
@@ -517,6 +551,7 @@ fn with_recognizer<R>(
         .is_none_or(|c| c.model_paths != *model_paths || c.num_threads != num_threads);
     if stale {
         tracing::info!("Loading ASR model (encoder: {:?})...", model_paths.encoder);
+        timing::mark("recognizer_load_start");
         // Validation failures are corrupt-file errors (bad tokens, bad
         // ONNX): actionable for the user, so surface them instead of
         // the generic "not found" message.
@@ -531,6 +566,7 @@ fn with_recognizer<R>(
                 "ASR model files not found. Download from Settings or configure custom model paths."
             )
         })?;
+        timing::mark("recognizer_load_done");
         tracing::info!("ASR model loaded");
     } else {
         tracing::debug!("Reusing cached ASR recognizer");
@@ -653,13 +689,16 @@ fn prewarm_once(model_paths: &ModelPaths, num_threads: i32, epoch: u64) -> Prewa
         return PrewarmOutcome::AlreadyWarm;
     }
 
+    timing::mark("recognizer_load_start");
     // Validation ran above, so `Err` here is at most a race (a file
     // replaced between the check and the load) — same handling as a
     // plain load failure: leave the cache untouched.
-    match store_recognizer(&mut cache, model_paths, num_threads) {
+    let outcome = match store_recognizer(&mut cache, model_paths, num_threads) {
         Ok(Some(())) => PrewarmOutcome::Warmed,
         Ok(None) | Err(_) => PrewarmOutcome::LoadFailed,
-    }
+    };
+    timing::mark("recognizer_load_done");
+    outcome
 }
 
 // ── Model file validation ────────────────────────────────────────────

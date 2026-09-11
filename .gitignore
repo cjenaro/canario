@@ -24,3 +24,7 @@ canario-app/sidecar/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Python bytecode (bench tooling)
+__pycache__/
+*.pyc

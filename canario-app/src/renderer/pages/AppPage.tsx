@@ -54,6 +54,12 @@ const ALL_MODELS = [...MODELS, CUSTOM_MODEL];
 
 type HistoryEntry = { id: string; text: string; duration_secs: number; timestamp: string };
 
+// Read a numeric AppConfig field, falling back to the default when the
+// field is missing or not a number (old configs / hand edits).
+function readNumberConfig(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
 export function AppPage() {
   const machine = useAppState();
   const canario = createCanario(machine);
@@ -85,7 +91,11 @@ export function AppPage() {
   const [hotkey, setHotkey] = createSignal<string[]>([]);
   const [autoPaste, setAutoPaste] = createSignal(true);
   const [soundEffects, setSoundEffects] = createSignal(true);
+  const [soundEffectsVolume, setSoundEffectsVolume] = createSignal(0.3);
   const [liveCaptions, setLiveCaptions] = createSignal(true);
+  const [doubleTapLock, setDoubleTapLock] = createSignal(true);
+  const [minimumKeyTime, setMinimumKeyTime] = createSignal(0.2);
+  const [doubleTapTimeoutMs, setDoubleTapTimeoutMs] = createSignal(300);
   const [autostart, setAutostart] = createSignal(false);
   const [showTrayIcon, setShowTrayIcon] = createSignal(true);
   const [audioBehavior, setAudioBehavior] = createSignal<string>("DoNothing");
@@ -220,7 +230,11 @@ export function AppPage() {
         setHotkey((config.hotkey as string[]) || []);
         setAutoPaste((config.auto_paste as boolean) ?? true);
         setSoundEffects((config.sound_effects as boolean) ?? true);
+        setSoundEffectsVolume(readNumberConfig(config.sound_effects_volume, 0.3));
         setLiveCaptions((config.live_captions as boolean) ?? true);
+        setDoubleTapLock((config.double_tap_lock as boolean) ?? true);
+        setMinimumKeyTime(readNumberConfig(config.minimum_key_time, 0.2));
+        setDoubleTapTimeoutMs(readNumberConfig(config.double_tap_timeout_ms, 300));
         setAutostart((config.autostart as boolean) ?? false);
         setShowTrayIcon((config.show_tray_icon as boolean) ?? true);
         setAudioBehavior((config.recording_audio_behavior as string) || "DoNothing");
@@ -368,7 +382,13 @@ export function AppPage() {
   }
 
   async function handleDownload() {
-    await canario.downloadModel();
+    const res = await canario.downloadModel();
+    // A rejected download_model (Custom is local-only, another download
+    // already running) returns the machine to idle — surface the reason
+    // the same way handleToggle reports command errors.
+    if (res && !res.ok) {
+      showToast((res.error as string) || "Download failed to start", "error");
+    }
   }
 
   async function handleHotkeyChange(keys: string[]) {
@@ -415,6 +435,42 @@ export function AppPage() {
   async function handleAudioBehaviorChange(behavior: string) {
     setAudioBehavior(behavior);
     await canario.updateConfig({ recording_audio_behavior: behavior });
+  }
+
+  // Sound effects volume (0.0–1.0). Clamped client-side; the core clamps
+  // again when generating the beep. The start/stop beeps read the config
+  // at recording time, so no restart is needed.
+  async function handleSoundVolumeChange(value: number) {
+    const clamped = Math.min(1, Math.max(0, value));
+    setSoundEffectsVolume(clamped);
+    await canario.updateConfig({ sound_effects_volume: clamped });
+  }
+
+  // Hotkey processor knobs (double-tap lock/timing, hold time): the
+  // listener bakes its config in when it starts, so changes need a
+  // restart to take effect — same as handleHotkeyChange.
+  async function persistHotkeyKnob(patch: Record<string, number | boolean>) {
+    await canario.updateConfig(patch);
+    if (platform().isLinux) {
+      await canario.restartHotkey();
+    }
+  }
+
+  async function handleDoubleTapLockChange(value: boolean) {
+    setDoubleTapLock(value);
+    await persistHotkeyKnob({ double_tap_lock: value });
+  }
+
+  async function handleMinimumHoldChange(value: number) {
+    const clamped = Math.min(1, Math.max(0.05, value));
+    setMinimumKeyTime(clamped);
+    await persistHotkeyKnob({ minimum_key_time: clamped });
+  }
+
+  async function handleDoubleTapWindowChange(value: number) {
+    const clamped = Math.min(2000, Math.max(50, Math.round(value)));
+    setDoubleTapTimeoutMs(clamped);
+    await persistHotkeyKnob({ double_tap_timeout_ms: clamped });
   }
 
   async function handlePostProcessorChange(pp: { remappings: { from: string; to: string }[]; removals: { word: string }[] }) {
@@ -850,6 +906,66 @@ export function AppPage() {
             <p class="text-xs mt-2" style={{ color: "var(--text-secondary)" }}>
               Press-and-hold to record. Release to stop and transcribe.
             </p>
+            <div class="flex flex-col gap-4 mt-4">
+              {/* Double-tap to lock */}
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Double-tap to lock</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Double-tap the hotkey to toggle recording on/off</p>
+                </div>
+                <Toggle checked={doubleTapLock()} onChange={(v) => handleDoubleTapLockChange(v)} />
+              </div>
+
+              {/* Minimum hold time */}
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Minimum hold time</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Seconds to hold before recording starts</p>
+                </div>
+                <input
+                  type="number"
+                  min={0.05}
+                  max={1}
+                  step={0.05}
+                  value={minimumKeyTime()}
+                  onChange={(e) => {
+                    const v = parseFloat(e.currentTarget.value);
+                    if (Number.isFinite(v)) void handleMinimumHoldChange(v);
+                  }}
+                  class="px-3 py-1.5 rounded-lg border text-sm w-24"
+                  style={{
+                    "background-color": "var(--bg)",
+                    "border-color": "var(--border)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </div>
+
+              {/* Double-tap window */}
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Double-tap window</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Milliseconds within which two taps count as a double-tap</p>
+                </div>
+                <input
+                  type="number"
+                  min={50}
+                  max={2000}
+                  step={10}
+                  value={doubleTapTimeoutMs()}
+                  onChange={(e) => {
+                    const v = parseFloat(e.currentTarget.value);
+                    if (Number.isFinite(v)) void handleDoubleTapWindowChange(v);
+                  }}
+                  class="px-3 py-1.5 rounded-lg border text-sm w-24"
+                  style={{
+                    "background-color": "var(--bg)",
+                    "border-color": "var(--border)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </div>
+            </div>
             <Show when={shouldShowHotkeyPermissionNotice(hotkeyStatus(), platform().isLinux)}>
               <div class="mt-3">
                 <HotkeyPermissionNotice status={hotkeyStatus()!} />
@@ -877,6 +993,35 @@ export function AppPage() {
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Play sounds on recording start/stop</p>
                 </div>
                 <Toggle checked={soundEffects()} onChange={(v) => handleConfigToggle("sound_effects", v)} />
+              </div>
+
+              {/* Sound effects volume */}
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Sound volume</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                    Loudness of the beeps ({Math.round(soundEffectsVolume() * 100)}%)
+                  </p>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={soundEffectsVolume()}
+                  onInput={(e) => {
+                    // Live percentage label while dragging…
+                    const v = parseFloat(e.currentTarget.value);
+                    setSoundEffectsVolume(Number.isFinite(v) ? v : 0);
+                  }}
+                  // …persisted once when the handle is released.
+                  onChange={(e) => {
+                    const v = parseFloat(e.currentTarget.value);
+                    if (Number.isFinite(v)) void handleSoundVolumeChange(v);
+                  }}
+                  class="w-36"
+                  style={{ "accent-color": "var(--accent)", cursor: "pointer" }}
+                />
               </div>
 
               {/* Live captions */}

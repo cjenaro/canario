@@ -26,7 +26,10 @@ mod windows;
 /// Paste text: copy to clipboard + attempt injection into the focused app.
 /// Returns Ok(true) if injected, Ok(false) if only in clipboard.
 pub fn paste_text(text: &str) -> Result<bool> {
-    paste_with(text, set_clipboard, inject)
+    crate::timing::mark("paste_start");
+    let out = paste_with(text, set_clipboard, inject);
+    crate::timing::mark("paste_done");
+    out
 }
 
 /// The paste flow, with the clipboard and injection backends injected so

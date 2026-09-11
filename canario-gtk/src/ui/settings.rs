@@ -241,6 +241,36 @@ fn build_settings_window(app: &adw::Application, canario: &Canario) -> adw::Appl
     });
     behavior_group.add(&sound_row);
 
+    let volume_row = adw::SpinRow::new(
+        Some(&gtk4::Adjustment::new(
+            config.sound_effects_volume as f64,
+            0.0,
+            1.0,
+            0.05,
+            0.1,
+            0.1,
+        )),
+        0.05,
+        2,
+    );
+    volume_row.set_title("Sound Effects Volume");
+    volume_row.set_subtitle("Beep loudness, from 0.0 (silent) to 1.0");
+    let c = canario.clone();
+    volume_row.connect_notify(Some("value"), move |row, _| {
+        let _ = c.update_config(|cfg| cfg.sound_effects_volume = row.value() as f32);
+    });
+    behavior_group.add(&volume_row);
+
+    let captions_row = adw::SwitchRow::new();
+    captions_row.set_title("Live Captions");
+    captions_row.set_subtitle("Stream a text preview in the indicator during long recordings");
+    captions_row.set_active(config.live_captions);
+    let c = canario.clone();
+    captions_row.connect_notify(Some("active"), move |row, _| {
+        let _ = c.update_config(|cfg| cfg.live_captions = row.is_active());
+    });
+    behavior_group.add(&captions_row);
+
     let tray_row = adw::SwitchRow::new();
     tray_row.set_title("Show Tray Icon");
     tray_row.set_subtitle("Show Canario in the system tray");
@@ -362,6 +392,14 @@ fn build_settings_window(app: &adw::Application, canario: &Canario) -> adw::Appl
     let c = canario.clone();
     double_tap_row.connect_notify(Some("active"), move |row, _| {
         let _ = c.update_config(|cfg| cfg.double_tap_lock = row.is_active());
+        // The processor bakes its config in when the listener starts,
+        // so the change only takes effect after a restart.
+        if let Err(error) = c.restart_hotkey() {
+            tracing::warn!(
+                "Could not restart hotkey after double-tap change: {}",
+                error
+            );
+        }
     });
     hotkey_group.add(&double_tap_row);
 
@@ -382,8 +420,37 @@ fn build_settings_window(app: &adw::Application, canario: &Canario) -> adw::Appl
     let c = canario.clone();
     hold_row.connect_notify(Some("value"), move |row, _| {
         let _ = c.update_config(|cfg| cfg.minimum_key_time = row.value());
+        if let Err(error) = c.restart_hotkey() {
+            tracing::warn!("Could not restart hotkey after hold-time change: {}", error);
+        }
     });
     hotkey_group.add(&hold_row);
+
+    let double_tap_window_row = adw::SpinRow::new(
+        Some(&gtk4::Adjustment::new(
+            config.double_tap_timeout_ms as f64,
+            50.0,
+            1000.0,
+            10.0,
+            50.0,
+            50.0,
+        )),
+        10.0,
+        0,
+    );
+    double_tap_window_row.set_title("Double-tap Window");
+    double_tap_window_row.set_subtitle("Milliseconds within which two taps count as a double-tap");
+    let c = canario.clone();
+    double_tap_window_row.connect_notify(Some("value"), move |row, _| {
+        let _ = c.update_config(|cfg| cfg.double_tap_timeout_ms = row.value() as u64);
+        if let Err(error) = c.restart_hotkey() {
+            tracing::warn!(
+                "Could not restart hotkey after double-tap window change: {}",
+                error
+            );
+        }
+    });
+    hotkey_group.add(&double_tap_window_row);
     main_box.append(&hotkey_group);
 
     // ── Word Remapping section ──────────────────────────────────────

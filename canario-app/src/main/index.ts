@@ -9,6 +9,8 @@ import { autoPasteText } from "./autoPaste.js";
 import { initUpdater, cleanupUpdater, checkForUpdatesManual } from "./updater.js";
 import { checkVersion, getVersionInfo } from "./version.js";
 import { acquireSingleInstanceLock } from "./singleInstance.js";
+import { parseLegacyOnboardingFile } from "./onboarding.js";
+import { decideHotkeyRouting } from "./hotkeyRouting.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -279,26 +281,38 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     } catch { /* ignore */ }
   });
 
-  // Onboarding completion persistence (mirrors theme persistence above).
-  // Stored in a small JSON file rather than the sidecar's AppConfig so the
-  // renderer can gate first-launch routing without a protocol change.
-  ipcMain.handle("onboarding:get", () => {
+  // Onboarding completion persistence (canario-xv9): the flag lives in
+  // the sidecar-owned AppConfig (`onboarding_completed` in config.json),
+  // read/written through the existing get_config / update_config
+  // commands — no dedicated protocol command needed. Kept behind the
+  // onboarding:get/set channels so the renderer surface is unchanged.
+  ipcMain.handle("onboarding:get", async () => {
     try {
-      const path = join(app.getPath("userData"), "onboarding.json");
-      const { readFileSync, existsSync } = require("fs");
-      if (existsSync(path)) {
-        return !!JSON.parse(readFileSync(path, "utf-8")).completed;
+      const res = await sendCommand({ id: "onboarding-get", cmd: "get_config" });
+      if (res?.ok && res.data) {
+        return (res.data as { onboarding_completed?: boolean }).onboarding_completed === true;
       }
     } catch { /* ignore */ }
     return false; // default: onboarding not completed → first launch
   });
 
-  ipcMain.handle("onboarding:set", (_e, completed: boolean) => {
+  ipcMain.handle("onboarding:set", async (_e, completed: boolean) => {
     try {
-      const { writeFileSync } = require("fs");
-      const path = join(app.getPath("userData"), "onboarding.json");
-      writeFileSync(path, JSON.stringify({ completed }));
-    } catch { /* ignore */ }
+      const res = await sendCommand({
+        id: "onboarding-set",
+        cmd: "update_config",
+        config: { onboarding_completed: completed },
+      });
+      if (res?.ok) {
+        // Keep the main-process cache in sync (the sidecar now owns the
+        // persisted value; the renderer's config:update-cache path
+        // never mentions this key).
+        cachedConfig = { ...(cachedConfig ?? {}), onboarding_completed: completed };
+      }
+      return res?.ok === true;
+    } catch {
+      return false;
+    }
   });
 
   // Auto-paste: copy text to clipboard + simulate Ctrl/Cmd+V
@@ -311,9 +325,20 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     globalShortcut.unregisterAll();
     try {
       return globalShortcut.register(accelerator, () => {
-        mainWindow?.webContents.send("hotkey:triggered");
-        overlayWindow?.webContents.send("hotkey:triggered");
-        sendCommand({ id: "hotkey", cmd: "toggle_recording" });
+        // Exactly one toggle_recording per press (audit D9 fix): main
+        // notifies, the renderer commands through its state machine. The
+        // direct command below is a fallback for the no-live-window case
+        // only — see hotkeyRouting.ts for the window-lifecycle reasoning.
+        const routing = decideHotkeyRouting({ settings: mainWindow, overlay: overlayWindow });
+        if (routing.notifySettings) {
+          mainWindow?.webContents.send("hotkey:triggered");
+        }
+        if (routing.notifyOverlay) {
+          overlayWindow?.webContents.send("hotkey:triggered");
+        }
+        if (routing.directToggle) {
+          sendCommand({ id: "hotkey", cmd: "toggle_recording" });
+        }
       });
     } catch {
       return false;
@@ -374,6 +399,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       if (event.event === "TranscriptionReady" && event.text) {
         const config = cachedConfig;
         if (config?.auto_paste) {
+          timingMark("electron:transcript_received");
           // Never simulate a paste into our own windows: the renderer owns
           // that UI (the onboarding practice box fills itself from the
           // event), and a synthetic Ctrl+V into ourselves would rely on the
@@ -383,9 +409,12 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
           const ownWindowFocused =
             focused !== null && (focused === mainWindow || focused === overlayWindow);
           if (!ownWindowFocused) {
-            autoPasteText(event.text as string).catch((err) => {
-              console.error("[main] Auto-paste failed:", err);
-            });
+            timingMark("electron:paste_start");
+            autoPasteText(event.text as string)
+              .then(() => timingMark("electron:paste_done"))
+              .catch((err) => {
+                console.error("[main] Auto-paste failed:", err);
+              });
           }
         }
       }
@@ -414,6 +443,11 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
 
     // Fetch config from sidecar (for auto-paste flag, tray visibility, etc.)
     await fetchConfig();
+
+    // One-time import of the legacy main-process onboarding.json flag
+    // into the sidecar-owned AppConfig (canario-xv9) — before the
+    // renderer's first-launch routing reads it.
+    await migrateLegacyOnboarding();
 
     // Start the sidecar's hotkey listener on Linux BEFORE any renderer
     // window exists. The /dev/input permission probe settles
@@ -456,6 +490,30 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     globalShortcut.unregisterAll();
   });
 
+  // ── Pipeline timing marks ───────────────────────────────────────────────
+  // Same schema as canario-core's timing module (CANARIO_TIMING=1):
+  // one JSON line per stage, wall-clock ts_ms shared with the sidecar's
+  // marks so transcript-to-paste can be measured across the process hop.
+  // Marks append to CANARIO_TIMING_FILE when set (one mark stream for the
+  // whole pipeline, matching scripts/bench-pipeline); otherwise they go
+  // to stdout.
+  const timingEnabled = !!process.env.CANARIO_TIMING;
+  const timingFile = process.env.CANARIO_TIMING_FILE || null;
+  function timingMark(stage: string): void {
+    if (!timingEnabled) return;
+    const line = JSON.stringify({ stage, ts_ms: Date.now(), pid: process.pid });
+    if (timingFile) {
+      try {
+        const { appendFileSync } = require("fs");
+        appendFileSync(timingFile, line + "\n");
+        return;
+      } catch (err) {
+        console.error("[main] timing mark write failed:", err);
+      }
+    }
+    console.log(line);
+  }
+
   // ── Config cache ────────────────────────────────────────────────────────
   // Cache sidecar config so the main process can check auto_paste, etc.
   let cachedConfig: Record<string, unknown> | null = null;
@@ -468,6 +526,38 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
       }
     } catch {
       // Config fetch is non-critical
+    }
+  }
+
+  // ── Onboarding flag migration (canario-xv9) ─────────────────────────────
+  // The completion flag used to live in a main-process onboarding.json
+  // (mirroring theme.json — which stays put). It now lives in the
+  // sidecar-owned AppConfig, so import the legacy value once and delete
+  // the file. Only a "completed" flag is imported: the AppConfig default
+  // is already false, so an unfinished wizard simply stays unfinished.
+  // Best-effort — if the sidecar import fails the file survives and the
+  // migration retries on the next launch.
+  async function migrateLegacyOnboarding() {
+    try {
+      const { existsSync, readFileSync, rmSync } = require("fs");
+      const path = join(app.getPath("userData"), "onboarding.json");
+      if (!existsSync(path)) return;
+      const completed = parseLegacyOnboardingFile(readFileSync(path, "utf-8"));
+      if (completed) {
+        const res = await sendCommand({
+          id: "migrate-onboarding",
+          cmd: "update_config",
+          config: { onboarding_completed: true },
+        });
+        if (!res?.ok) {
+          console.warn("[main] onboarding.json import deferred (update_config failed)");
+          return; // keep the file for the next launch
+        }
+        cachedConfig = { ...(cachedConfig ?? {}), onboarding_completed: true };
+      }
+      rmSync(path, { force: true });
+    } catch (err) {
+      console.error("[main] Legacy onboarding.json migration failed:", err);
     }
   }
 

@@ -210,12 +210,17 @@ impl Default for HotkeyConfig {
 impl HotkeyConfig {
     /// Create config from the app config's hotkey field.
     /// The hotkey vector format is like ["Super", "Space"] — last element is the key,
-    /// everything else is a modifier.
+    /// everything else is a modifier. The timing values come straight from
+    /// `AppConfig` (`minimum_key_time`, `double_tap_timeout_ms`,
+    /// `modifier_threshold_ms`), so callers must restart the listener
+    /// after changing any of them.
     pub fn from_app_config(
         hotkey: &[String],
         minimum_key_time: f64,
         double_tap_lock: bool,
         double_tap_only: bool,
+        double_tap_timeout_ms: u64,
+        modifier_threshold_ms: u64,
     ) -> Self {
         if hotkey.is_empty() {
             return Self::default();
@@ -238,8 +243,10 @@ impl HotkeyConfig {
             modifiers,
             processor: ProcessorConfig {
                 minimum_key_time: std::time::Duration::from_secs_f64(minimum_key_time),
+                double_tap_timeout: std::time::Duration::from_millis(double_tap_timeout_ms),
                 double_tap_lock,
                 double_tap_only,
+                modifier_threshold: std::time::Duration::from_millis(modifier_threshold_ms),
                 is_modifier,
             },
         }
@@ -577,6 +584,42 @@ mod tests {
     #[test]
     fn fresh_listener_reports_not_started() {
         assert_eq!(HotkeyListener::new().status().backend, "not-started");
+    }
+
+    /// `from_app_config` must carry every processor knob (hold time,
+    /// double-tap window, modifier threshold) into the listener config
+    /// — a dropped field would silently fall back to its default.
+    #[test]
+    fn from_app_config_plumbs_processor_timing() {
+        let hk = HotkeyConfig::from_app_config(
+            &["Super".into(), "Alt".into(), "Space".into()],
+            0.5,
+            true,
+            false,
+            450,
+            250,
+        );
+        assert_eq!(hk.key, "Space");
+        assert_eq!(hk.modifiers, vec!["Super".to_string(), "Alt".to_string()]);
+        assert_eq!(
+            hk.processor.minimum_key_time,
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            hk.processor.double_tap_timeout,
+            std::time::Duration::from_millis(450)
+        );
+        assert_eq!(
+            hk.processor.modifier_threshold,
+            std::time::Duration::from_millis(250)
+        );
+        assert!(hk.processor.double_tap_lock);
+        assert!(!hk.processor.double_tap_only);
+        assert!(!hk.processor.is_modifier); // "space" is not a modifier
+
+        // An empty hotkey vector keeps the defaults (300 ms windows).
+        let fallback = HotkeyConfig::from_app_config(&[], 0.2, true, false, 300, 300);
+        assert_eq!(fallback.processor, ProcessorConfig::default());
     }
 
     /// The macOS Accessibility guidance rides along exactly like the

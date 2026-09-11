@@ -2,29 +2,41 @@
 ///
 /// Generates simple beep tones programmatically and plays them
 /// using the `rodio` audio output library. No external sound files needed.
+///
+/// Every beep takes a `volume` argument (from
+/// `AppConfig::sound_effects_volume`); out-of-range values are clamped
+/// by [`clamp_volume`], which is also the default amplitude.
 use std::io::Cursor;
 
 /// A single-beep tone at ~800 Hz, 120 ms — played when recording starts.
-pub fn beep_start() {
-    play_tone(800.0, 0.12);
+pub fn beep_start(volume: f32) {
+    play_tone(800.0, 0.12, volume);
 }
 
 /// A double-beep tone at ~600 Hz, 80 ms × 2 — played when recording stops.
-pub fn beep_stop() {
-    play_tone(600.0, 0.08);
+pub fn beep_stop(volume: f32) {
+    play_tone(600.0, 0.08, volume);
     std::thread::sleep(std::time::Duration::from_millis(60));
-    play_tone(600.0, 0.08);
+    play_tone(600.0, 0.08, volume);
 }
 
 /// A confirmation chime at ~1000 Hz, 150 ms — played after transcription is pasted.
-pub fn beep_confirm() {
-    play_tone(1000.0, 0.15);
+pub fn beep_confirm(volume: f32) {
+    play_tone(1000.0, 0.15, volume);
+}
+
+/// Clamp a configured volume into the valid amplitude range 0.0–1.0.
+/// Values outside it (e.g. from a hand-edited config.json) never reach
+/// the sample generator.
+fn clamp_volume(volume: f32) -> f32 {
+    volume.clamp(0.0, 1.0)
 }
 
 /// Generate a sine-wave WAV in memory and play it via rodio.
-fn play_tone(freq: f32, duration_secs: f32) {
+fn play_tone(freq: f32, duration_secs: f32, volume: f32) {
     let sample_rate = 44100u32;
     let num_samples = (sample_rate as f32 * duration_secs) as usize;
+    let amplitude = clamp_volume(volume);
 
     // Generate sine wave samples with fade-in/fade-out envelope
     let samples: Vec<f32> = (0..num_samples)
@@ -35,7 +47,7 @@ fn play_tone(freq: f32, duration_secs: f32) {
                 let release = ((num_samples - i) as f32 / (sample_rate as f32 * 0.01)).min(1.0);
                 attack * release
             };
-            (2.0 * std::f32::consts::PI * freq * t).sin() * envelope * 0.3
+            (2.0 * std::f32::consts::PI * freq * t).sin() * envelope * amplitude
         })
         .collect();
 
@@ -102,4 +114,22 @@ fn play_wav_bytes(wav_data: &[u8]) -> anyhow::Result<()> {
     sink.sleep_until_end();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The volume knob is clamped, not rejected: a hand-edited
+    /// config.json with an out-of-range value still produces a valid
+    /// (silent or full) beep instead of an invalid amplitude.
+    #[test]
+    fn clamp_volume_bounds_the_amplitude() {
+        assert_eq!(clamp_volume(0.0), 0.0);
+        assert_eq!(clamp_volume(0.3), 0.3);
+        assert_eq!(clamp_volume(1.0), 1.0);
+        assert_eq!(clamp_volume(1.5), 1.0);
+        assert_eq!(clamp_volume(-0.2), 0.0);
+        assert_eq!(clamp_volume(f32::INFINITY), 1.0);
+    }
 }

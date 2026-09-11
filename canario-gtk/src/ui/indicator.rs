@@ -5,17 +5,24 @@
 /// preview — authoritative text still arrives via `TranscriptionReady`).
 /// Disappears when the recording stops.
 ///
-/// Positioning limitations: GTK4 deliberately offers no API to position
-/// top-level windows, keep them above others, or make them click-through —
-/// on Wayland that is exclusively layer-shell territory. So this window:
+/// Positioning: GTK4 deliberately offers no API to position top-level
+/// windows, keep them above others, or make them click-through — on
+/// Wayland that is exclusively layer-shell territory. So this window:
 /// - is undecorated and small (240x80, growing to a bounded caption size
 ///   while live captions are shown), and
 /// - never accepts keyboard focus (it must not steal focus from the app
 ///   the user is dictating into).
 ///
-/// Its on-screen position is left to the compositor. Proper top-center
-/// overlay placement (active-monitor workarea) + keep-on-top require
-/// gtk4-layer-shell — tracked as bead canario-7ah.10.
+/// With the `layer-shell` cargo feature (see [`apply_layer_shell`]) the
+/// window is additionally made an Overlay layer surface anchored to the
+/// top edge only — the compositor centers a layer surface on its
+/// unanchored axis, giving top-center placement — with keyboard
+/// interactivity off and no reserved screen space, kept above other
+/// windows by the compositor. Click-through is *not* provided:
+/// layer-shell alone cannot blank the input region, so the indicator
+/// still takes pointer events. Without the feature, or in a session
+/// without the layer-shell protocol (X11), position is left to the
+/// compositor.
 use gtk4::prelude::*;
 use libadwaita as adw;
 
@@ -210,6 +217,11 @@ fn build_indicator_window(app: &adw::Application) -> gtk4::Window {
     win.set_can_focus(false);
     win.set_focusable(false);
 
+    // Overlay placement. Must run before the window is realized, i.e.
+    // before the `present()` in `RecordingIndicator::show`.
+    #[cfg(feature = "layer-shell")]
+    apply_layer_shell(&win);
+
     let container = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     container.set_margin_start(12);
     container.set_margin_end(12);
@@ -264,6 +276,51 @@ fn build_indicator_window(app: &adw::Application) -> gtk4::Window {
     win.set_application(Some(app));
 
     win
+}
+
+/// Make the indicator a Wayland layer surface: top-center of the output,
+/// kept above normal windows, no keyboard interactivity, no reserved
+/// screen space. No-op — the plain compositor-positioned window remains —
+/// when the session lacks the layer-shell protocol (X11, or a Wayland
+/// compositor without it).
+///
+/// Version note: gtk4-layer-shell 0.3 is the newest release built
+/// against gtk4 ^0.8 / glib ^0.19; 0.4+ need gtk4 0.9+/glib 0.20+ and
+/// would pull a second, incompatible gtk4 into the build (see
+/// Cargo.toml).
+///
+/// Limitations: layer-shell anchors to the output edge, not the shell
+/// workarea — an Overlay surface may draw over a top panel; using an
+/// exclusive zone of -1 instead of 0 would place it below other
+/// surfaces' exclusive zones if that ever matters. Click-through is not
+/// achievable via layer-shell alone (it needs an empty input region);
+/// the surface still receives pointer events.
+#[cfg(feature = "layer-shell")]
+fn apply_layer_shell(win: &gtk4::Window) {
+    use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+
+    if !gtk4_layer_shell::is_supported() {
+        return;
+    }
+
+    // Turns `win` into a layer surface; valid only before it is mapped.
+    win.init_layer_shell();
+    // Overlay sits above Top (where panels live) and all normal windows:
+    // keep-on-top without raising/focusing.
+    win.set_layer(Layer::Overlay);
+    // Anchor to the top edge only: the protocol centers a surface on
+    // unanchored axes, so this is "top-center". No monitor is set — the
+    // compositor picks the output (typically the active one), matching
+    // the pre-layer-shell behavior of leaving output choice to it.
+    win.set_anchor(Edge::Top, true);
+    // Passive overlay, the layer-shell analogue of `set_focusable(false)`
+    // above: never take keyboard focus from the app being dictated into.
+    win.set_keyboard_mode(KeyboardMode::None);
+    // 0 = occupy space without reserving any: the indicator never shrinks
+    // other surfaces' usable area.
+    win.set_exclusive_zone(0);
+    // Identifies the surface to compositors and debug tooling.
+    win.set_namespace("canario-indicator");
 }
 
 #[cfg(test)]

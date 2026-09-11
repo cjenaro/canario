@@ -1,0 +1,931 @@
+#!/usr/bin/env python3
+"""bench-pipeline — Canario end-to-end latency benchmark runner (bead canario-oxi).
+
+Drives a real Canario process through N dictation cycles and reports
+stage timings for the three product metrics:
+
+  * press-to-record       toggle issued -> mic capturing (first audio)
+  * release-to-transcript toggle (stop) issued -> final transcript ready
+  * transcript-to-paste   transcript ready -> text delivered (paste paths)
+
+Stage numbers come from canario-core's timing marks (JSONL, one line per
+stage; see canario-core/src/timing.rs), captured via CANARIO_TIMING=1 and
+CANARIO_TIMING_FILE. The script's own wall clock (same CLOCK_REALTIME)
+anchors externally issued toggles, so script-time -> mark-time intervals
+are valid.
+
+Backends
+  sidecar  spawn target/{profile}/canario-electron and drive it with
+           toggle_recording commands over stdin — the Electron backend
+           process minus the Electron main/renderer hop (default).
+  cli      spawn canario-cli --mic --toggle --paste — the native CLI
+           path, including the native paste (wtype/xdotool). NOTE: the
+           CLI drains events on stdin lines, so transcript->paste here
+           carries a small artificial drain-hop overhead (noted in
+           output).
+  electron spawn the real Electron app (e.g. "npm run dev" in
+           canario-app, or a packaged AppImage); drive it through the
+           hotkey socket and read marks from sidecar + Electron main.
+           Requires a focused non-Canario window for paste marks.
+
+Modes
+  --cold              single iteration with CANARIO_BENCH_DISABLE_PREWARM=1
+                      (first dictation pays the model load)
+  --sound-effects ... on/off flips config.sound_effects for the run
+                      (restores after) — isolates the stop-beep cost
+  --socket-only       measure hotkey-socket toggle latency only
+                      (datagram -> HotkeyTriggered; the 50 ms socket poll)
+
+A microphone is required for every mode except --socket-only. Output is
+a JSON summary (also written to --out FILE when given).
+
+Examples
+  scripts/bench-pipeline --iterations 10
+  scripts/bench-pipeline --cold
+  scripts/bench-pipeline --sound-effects off --iterations 10
+  scripts/bench-pipeline --backend cli --iterations 5 --hold-secs 3
+  scripts/bench-pipeline --backend electron --electron-cmd "npm run dev"
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import queue
+import random
+import signal
+import socket
+import statistics
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+# Spoken during the hold when --speech is given, so the mic has real
+# speech to decode instead of room silence.
+BENCH_SENTENCE = ("This is a canario pipeline benchmark sentence. "
+                  "The quick brown fox jumps over the lazy dog.")
+
+
+# ── small helpers ────────────────────────────────────────────────────────────
+
+
+def now() -> float:
+    """Wall-clock seconds (CLOCK_REALTIME — the same clock as ts_ms marks)."""
+    return time.time()
+
+
+def stats_ms(samples) -> dict | None:
+    vals = [s for s in samples if s is not None]
+    if not vals:
+        return None
+    s = sorted(vals)
+    p95 = s[min(len(s) - 1, max(0, round(0.95 * len(s)) - 1))]
+    return {
+        "n": len(s),
+        "mean_ms": round(statistics.fmean(s), 2),
+        "p50_ms": round(statistics.median(s), 2),
+        "p95_ms": round(p95, 2),
+        "min_ms": round(s[0], 2),
+        "max_ms": round(s[-1], 2),
+    }
+
+
+def diff_ms(a: float | None, b: float | None) -> float | None:
+    """b - a in ms over mark/script timestamps (both CLOCK_REALTIME seconds)."""
+    if a is None or b is None:
+        return None
+    return round((b - a) * 1000.0, 2)
+
+
+class LineReader(threading.Thread):
+    """Reads binary stdout lines with receive timestamps into a queue."""
+
+    def __init__(self, stream):
+        super().__init__(daemon=True)
+        self.q: queue.Queue[tuple[float, bytes]] = queue.Queue()
+        self.stream = stream
+
+    def run(self):
+        try:
+            for line in iter(self.stream.readline, b""):
+                self.q.put((now(), line))
+        finally:
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+
+
+class EventStream:
+    """Sidecar stdout as parsed JSON events.
+
+    Unmatched events are retained (not dropped) so successive waits can
+    each find their milestone; AudioLevel chatter is discarded outright.
+    """
+
+    def __init__(self, reader: LineReader):
+        self.reader = reader
+        self.retained: list[tuple[float, dict]] = []
+
+    def _parse(self, raw: bytes) -> dict | None:
+        text = raw.decode(errors="replace").strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            ev = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return ev if isinstance(ev, dict) else None
+
+    def wait(self, event_name: str, timeout: float = 60.0) -> tuple[float, dict] | None:
+        for ts, ev in list(self.retained):
+            if ev.get("event") == event_name:
+                self.retained.remove((ts, ev))
+                return ts, ev
+        deadline = now() + timeout
+        while now() < deadline:
+            try:
+                ts, raw = self.reader.q.get(timeout=max(0.0, deadline - now()))
+            except queue.Empty:
+                break
+            ev = self._parse(raw)
+            if ev is None:
+                continue
+            if ev.get("event") == event_name:
+                return ts, ev
+            if ev.get("event") != "AudioLevel":
+                self.retained.append((ts, ev))
+        return None
+
+    def wait_either(self, names: tuple[str, ...], timeout: float = 60.0):
+        """Wait for the first of several events; returns (name, ts, event)."""
+        retained_hit = next(
+            ((ev.get("event"), ts, ev) for ts, ev in list(self.retained)
+             if ev.get("event") in names),
+            None,
+        )
+        if retained_hit:
+            self.retained.remove((retained_hit[1], retained_hit[2]))
+            return retained_hit
+        deadline = now() + timeout
+        while now() < deadline:
+            try:
+                ts, raw = self.reader.q.get(timeout=max(0.0, deadline - now()))
+            except queue.Empty:
+                break
+            ev = self._parse(raw)
+            if ev is None:
+                continue
+            name = ev.get("event")
+            if name in names:
+                return name, ts, ev
+            if name != "AudioLevel":
+                self.retained.append((ts, ev))
+        return None
+
+    def drain(self):
+        self.retained.clear()
+        while True:
+            try:
+                self.reader.q.get_nowait()
+            except queue.Empty:
+                return
+
+
+class MarkLog:
+    """Incremental reader for the CANARIO_TIMING_FILE JSONL mark stream.
+
+    Every parsed mark is also retained in `history` — waiting helpers
+    consume marks opportunistically, but stage spans computed after the
+    fact still need the full sequence.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._offset = 0
+        self.history: list = []
+
+    def read_new(self) -> list:
+        marks = []
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return marks
+        if size <= self._offset:
+            return marks
+        with self.path.open("rb") as f:
+            f.seek(self._offset)
+            for raw in f:
+                line = raw.decode(errors="replace").strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    m = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(m, dict) and "stage" in m and "ts_ms" in m:
+                    m["t"] = m["ts_ms"] / 1000.0  # seconds, CLOCK_REALTIME
+                    marks.append(m)
+            self._offset = f.tell()
+        self.history.extend(marks)
+        return marks
+
+
+def wait_for_mark(marklog: MarkLog, pred, timeout: float = 60.0, poll: float = 0.004):
+    """Poll the mark file until a matching mark arrives (or timeout)."""
+    deadline = now() + timeout
+    while now() < deadline:
+        for m in marklog.read_new():
+            if pred(m):
+                return m
+        time.sleep(poll)
+    for m in marklog.read_new():
+        if pred(m):
+            return m
+    return None
+
+
+def wait_for_either_mark(marklog: MarkLog, stages: tuple[str, ...],
+                         timeout: float = 60.0, poll: float = 0.004):
+    """Poll until any of the given stage marks arrives; returns the mark."""
+    want = set(stages)
+    deadline = now() + timeout
+    while now() < deadline:
+        for m in marklog.read_new():
+            if m.get("stage") in want:
+                return m
+        time.sleep(poll)
+    for m in marklog.read_new():
+        if m.get("stage") in want:
+            return m
+    return None
+
+
+def speak_sentence(sentence: str, rate: int = 20):
+    """Best-effort TTS through the speakers so the mic has real speech.
+
+    Uses speech-dispatcher when present (rate -100..100). Failures are
+    silent: a quiet room simply yields empty transcripts (the pipeline
+    still decodes — on silence — and every timing mark still fires).
+    """
+    try:
+        subprocess.run(
+            ["spd-say", "-r", str(rate), sentence],
+            timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def mark_after(marks: list, stage: str, t_from: float | None = None):
+    # Small slack only: script-clock and mark-clock are the same
+    # CLOCK_REALTIME, so anything larger would bleed the previous
+    # iteration's marks into this one's window.
+    slack = 0.05
+    for m in marks:
+        if m.get("stage") == stage and (t_from is None or m["t"] >= t_from - slack):
+            return m
+    return None
+
+
+def span(marks: list, start: str, end: str, t_from: float | None = None) -> float | None:
+    a = mark_after(marks, start, t_from)
+    if a is None:
+        return None
+    # Pair with the first end-mark at or after the start — spans are
+    # causal, so an earlier end belongs to a previous iteration.
+    b = next((m for m in marks if m.get("stage") == end and m["t"] >= a["t"]), None)
+    return diff_ms(a["t"], b and b["t"])
+
+
+# ── host metadata ────────────────────────────────────────────────────────────
+
+
+def host_meta() -> dict:
+    cpu = ""
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        cpu = platform.processor() or "unknown"
+    mem_gb = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    mem_gb = round(int(line.split()[1]) / 1_048_576, 1)
+                    break
+    except OSError:
+        pass
+    git = ""
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except Exception:
+        pass
+    return {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "hostname": platform.node(),
+        "cpu": cpu,
+        "nproc": os.cpu_count(),
+        "mem_gb": mem_gb,
+        "kernel": platform.release(),
+        "session_type": os.environ.get("XDG_SESSION_TYPE", "unknown"),
+        "git": git or None,
+    }
+
+
+# ── sidecar process wrapper ──────────────────────────────────────────────────
+
+
+class Sidecar:
+    def __init__(self, binpath: Path, env_extra: dict):
+        env = dict(os.environ)
+        env.update(env_extra)
+        self.proc = subprocess.Popen(
+            [str(binpath)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,  # marks go to the file; logs rotate
+            env=env,
+        )
+        self.reader = LineReader(self.proc.stdout)
+        self.reader.start()
+        self.events = EventStream(self.reader)
+        self._id = 0
+        self.last_send_t: float | None = None
+
+    def send(self, cmd: str, **extra) -> str:
+        self._id += 1
+        cid = f"bench-{cmd}-{self._id}"
+        assert self.proc.stdin is not None
+        self.last_send_t = now()
+        self.proc.stdin.write((json.dumps({"id": cid, "cmd": cmd, **extra}) + "\n").encode())
+        self.proc.stdin.flush()
+        return cid
+
+    def command(self, cmd: str, timeout: float = 60.0, **extra):
+        """Send a command; return (send time, response object) or None."""
+        cid = self.send(cmd, **extra)
+        deadline = now() + timeout
+        while now() < deadline:
+            try:
+                ts, raw = self.reader.q.get(timeout=max(0.0, deadline - now()))
+            except queue.Empty:
+                break
+            line = raw.decode(errors="replace").strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("id") == cid and "ok" in ev:
+                if ev.get("event") != "AudioLevel":
+                    self.events.retained.append((ts, ev))
+                return self.last_send_t, ev
+            if ev.get("event") != "AudioLevel":
+                self.events.retained.append((ts, ev))
+        return None
+
+    def stop(self):
+        try:
+            if self.proc.stdin:
+                self.send("shutdown")
+                time.sleep(0.5)
+        except Exception:
+            pass
+        try:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        except Exception:
+            pass
+
+
+def find_binary(profile: str, name: str) -> Path:
+    p = REPO / "target" / profile / name
+    if p.exists():
+        return p
+    pkg = "canario-electron" if name == "canario-electron" else "canario-cli"
+    cmd = ["cargo", "build", "-p", pkg]
+    cmd += ["--release"] if profile == "release" else ["--profile", profile]
+    subprocess.run(cmd, check=True, cwd=str(REPO))
+    if not p.exists():
+        raise SystemExit(f"binary not found after build: {p}")
+    return p
+
+
+def hotkey_socket_path() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "canario-hotkey.sock"
+
+
+# ── backends ─────────────────────────────────────────────────────────────────
+
+
+def run_sidecar_backend(args, marklog: MarkLog) -> dict:
+    binpath = find_binary(args.profile, "canario-electron")
+    env_extra = {
+        "CANARIO_TIMING": "1",
+        "CANARIO_TIMING_FILE": str(marklog.path),
+    }
+    if args.cold:
+        env_extra["CANARIO_BENCH_DISABLE_PREWARM"] = "1"
+
+    side = Sidecar(binpath, env_extra)
+    original_sound_effects = None
+    bench_model_info: dict = {}
+    try:
+        pong = side.command("ping", timeout=180)  # includes process spawn
+        if pong is None or not pong[1].get("ok"):
+            raise RuntimeError("sidecar did not answer ping")
+
+        cfg = side.command("get_config")
+        original_sound_effects = bool(cfg[1]["data"].get("sound_effects", True))
+        bench_model_info = {
+            "model": cfg[1]["data"].get("model"),
+            "num_threads": cfg[1]["data"].get("num_threads"),
+        }
+
+        if args.sound_effects in ("on", "off"):
+            want = args.sound_effects == "on"
+            if want != original_sound_effects:
+                r = side.command("update_config", config={"sound_effects": want})
+                if r is None or not r[1].get("ok"):
+                    raise RuntimeError("could not set sound_effects")
+
+        if not args.cold:
+            # wait out the startup prewarm so iteration 1 is genuinely hot
+            w = wait_for_mark(marklog, lambda m: m["stage"] == "recognizer_load_done",
+                              timeout=60)
+            if w is None:
+                print("warning: no prewarm completion mark within 60s; iteration 1 "
+                      "may include the model load", file=sys.stderr)
+
+        iterations = []
+        for i in range(args.iterations):
+            side.events.drain()
+            marklog.read_new()
+
+            # ── press: toggle start ─────────────────────────────────
+            t_press = now()
+            side.send("toggle_recording")
+            got = side.events.wait("RecordingStarted", timeout=30)
+            if got is None:
+                raise RuntimeError(f"iter {i}: no RecordingStarted (mic missing? "
+                                   f"run `pactl info` / check default source)")
+            t_rec_started = got[0]
+
+            if args.speech:
+                speak_sentence(BENCH_SENTENCE)
+
+            time.sleep(args.hold_secs)
+
+            # ── release: toggle stop ────────────────────────────────
+            t_release = now()
+            side.send("toggle_recording")
+            # A quiet room decodes to "(no speech detected)": the core
+            # then emits RecordingStopped WITHOUT TranscriptionReady, so
+            # the iteration completes on whichever arrives first.
+            done = side.events.wait_either(
+                ("TranscriptionReady", "RecordingStopped"), timeout=120)
+            if done is None:
+                raise RuntimeError(f"iter {i}: neither transcript nor stop event")
+            t_transcript = done[1] if done[0] == "TranscriptionReady" else None
+            t_stopped = done[1]
+
+            marklog.read_new()
+            marks = marklog.history
+            t0 = t_press
+            it = {
+                "index": i,
+                "press_to_record_e2e_ms": diff_ms(t_press, t_rec_started),
+                "release_to_transcript_e2e_ms": diff_ms(t_release, t_transcript),
+                "release_to_stopped_e2e_ms": diff_ms(t_release, t_stopped),
+                "stages_ms": {
+                    # press side (mark to mark)
+                    "cmd_to_start_called": span(marks, "sidecar_cmd_toggle_recording",
+                                                "start_recording_called", t0),
+                    "thread_spawn": span(marks, "start_recording_called",
+                                         "recording_thread_start", t0),
+                    "mic_device_open": span(marks, "recording_thread_start",
+                                            "mic_device_opened", t0),
+                    "stream_play": span(marks, "mic_device_opened", "mic_stream_started", t0),
+                    "play_to_first_audio": span(marks, "mic_stream_started",
+                                                "first_audio", t0),
+                    "called_to_first_audio": span(marks, "start_recording_called",
+                                                  "first_audio", t0),
+                    # release side
+                    "stop_poll_wait": span(marks, "stop_recording_called",
+                                           "stop_observed", t0),
+                    "buffer_clone": span(marks, "stop_observed", "audio_cloned", t0),
+                    "mic_release": span(marks, "audio_cloned", "mic_released", t0),
+                    "beep_stop": span(marks, "beep_stop_start", "beep_stop_done", t0),
+                    "resample": span(marks, "resample_start", "resample_done", t0),
+                    "recognizer_load": span(marks, "recognizer_load_start",
+                                            "recognizer_load_done", t0),
+                    "decode": span(marks, "decode_start", "decode_end", t0),
+                    "stop_called_to_transcript": span(marks, "stop_recording_called",
+                                                      "transcript_ready", t0),
+                    "transcript_to_sidecar_out": span(marks, "transcript_ready",
+                                                      "sidecar_event_transcription_ready", t0),
+                },
+                "audio_secs": args.hold_secs,
+                "transcript_chars": len(done[2].get("text", "")) if t_transcript else 0,
+            }
+            iterations.append(it)
+            print(f"  iter {i + 1}/{args.iterations}: "
+                  f"p2r={it['press_to_record_e2e_ms']}ms "
+                  f"r2t={it['release_to_transcript_e2e_ms'] or it['release_to_stopped_e2e_ms']}ms",
+                  file=sys.stderr)
+    finally:
+        if original_sound_effects is not None and args.sound_effects in ("on", "off"):
+            if (args.sound_effects == "on") != original_sound_effects:
+                try:
+                    side.command("update_config",
+                                 config={"sound_effects": original_sound_effects},
+                                 timeout=10)
+                except Exception:
+                    pass
+        side.stop()
+
+    out = summarize(iterations)
+    out["model"] = bench_model_info
+    return out
+
+
+def run_cli_backend(args, marklog: MarkLog) -> dict:
+    binpath = find_binary(args.profile, "canario-cli")
+    env = dict(os.environ)
+    env.update({
+        "CANARIO_TIMING": "1",
+        "CANARIO_TIMING_FILE": str(marklog.path),
+    })
+    if args.cold:
+        env["CANARIO_BENCH_DISABLE_PREWARM"] = "1"
+
+    proc = subprocess.Popen(
+        [str(binpath), "--mic", "--toggle", "--paste"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    assert proc.stdin is not None
+
+    def line(bs: bytes):
+        proc.stdin.write(bs)
+        proc.stdin.flush()
+
+    if not args.cold:
+        wait_for_mark(marklog, lambda m: m["stage"] == "recognizer_load_done", timeout=60)
+
+    iterations = []
+    try:
+        for i in range(args.iterations):
+            marklog.read_new()
+            t_press = now()
+            line(b"\n")
+            m_fa = wait_for_mark(marklog, lambda m: m["stage"] == "first_audio", timeout=30)
+            if m_fa is None:
+                raise RuntimeError(f"iter {i}: no first_audio mark (mic missing?)")
+
+            if args.speech:
+                speak_sentence(BENCH_SENTENCE)
+
+            time.sleep(args.hold_secs)
+
+            t_release = now()
+            line(b"\n")
+            # transcript_ready is skipped when the room was quiet
+            # ("(no speech detected)") — either mark completes the cycle.
+            m_done = wait_for_either_mark(
+                marklog, ("transcript_ready", "recording_stopped"), timeout=120)
+            if m_done is None:
+                raise RuntimeError(f"iter {i}: neither transcript nor stop mark")
+            m_tr = (m_done if m_done["stage"] == "transcript_ready"
+                    else mark_after(marklog.history, "transcript_ready", t_press))
+
+            # Wake the CLI so it drains the event and pastes. A non-empty
+            # non-q line just prints help and drains; a bare newline would
+            # TOGGLE recording again.
+            line(b"x\n")
+            m_pd = wait_for_mark(marklog, lambda m: m["stage"] == "paste_done", timeout=60)
+
+            marklog.read_new()
+            marks = marklog.history
+            t0 = t_press
+            it = {
+                "index": i,
+                # script-clock anchors (CLOCK_REALTIME, comparable to marks)
+                "press_to_first_audio_ms": diff_ms(t_press, m_fa["t"]),
+                "release_to_transcript_ms": diff_ms(t_release, m_tr["t"]),
+                "transcript_to_paste_ms": diff_ms(m_tr["t"], m_pd and m_pd["t"]),
+                "stages_ms": {
+                    "stop_poll_wait": span(marks, "stop_recording_called",
+                                           "stop_observed", t0),
+                    "buffer_clone": span(marks, "stop_observed", "audio_cloned", t0),
+                    "mic_release": span(marks, "audio_cloned", "mic_released", t0),
+                    "beep_stop": span(marks, "beep_stop_start", "beep_stop_done", t0),
+                    "resample": span(marks, "resample_start", "resample_done", t0),
+                    "recognizer_load": span(marks, "recognizer_load_start",
+                                            "recognizer_load_done", t0),
+                    "decode": span(marks, "decode_start", "decode_end", t0),
+                    "stop_called_to_transcript": span(marks, "stop_recording_called",
+                                                      "transcript_ready", t0),
+                    "paste": span(marks, "paste_start", "paste_done", t0),
+                },
+                "audio_secs": args.hold_secs,
+                "note": ("transcript_to_paste includes a stdin-drain hop: the CLI "
+                         "only drains events on input lines"),
+            }
+            iterations.append(it)
+            print(f"  iter {i + 1}/{args.iterations}: "
+                  f"p2r={it['press_to_first_audio_ms']}ms "
+                  f"r2t={it['release_to_transcript_ms']}ms "
+                  f"t2p={it['transcript_to_paste_ms']}ms", file=sys.stderr)
+    finally:
+        try:
+            line(b"q\n")
+            time.sleep(0.5)
+        except Exception:
+            pass
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+
+    return summarize(iterations)
+
+
+def run_electron_backend(args, marklog: MarkLog) -> dict:
+    """The real app: drive it through the hotkey socket, read marks only.
+
+    The socket toggle is a stand-in for the physical hotkey: it exercises
+    sidecar -> Electron main -> renderer -> IPC -> sidecar command ->
+    canario-core, i.e. the full product path minus key detection. The
+    socket's own 50 ms poll is included in the reported numbers (and is
+    itself one of the measured polling leads).
+    """
+    cmd = args.electron_cmd or os.environ.get("CANARIO_BENCH_ELECTRON_CMD")
+    if not cmd:
+        raise SystemExit("--backend electron needs --electron-cmd or "
+                         "CANARIO_BENCH_ELECTRON_CMD (e.g. 'npm run dev')")
+    sock_path = hotkey_socket_path()
+
+    env = dict(os.environ)
+    env.update({
+        "CANARIO_TIMING": "1",
+        "CANARIO_TIMING_FILE": str(marklog.path),
+    })
+    if args.cold:
+        env["CANARIO_BENCH_DISABLE_PREWARM"] = "1"
+    if sock_path.exists():
+        sock_path.unlink()
+
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=str(REPO / "canario-app"), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = now() + 120
+        while now() < deadline and not sock_path.exists():
+            time.sleep(0.5)
+        if not sock_path.exists():
+            raise RuntimeError("electron app did not bind the hotkey socket")
+        wait_for_mark(marklog, lambda m: m["stage"] == "recognizer_load_done", timeout=60)
+        # Let the renderer finish mounting; then move focus off the Canario
+        # window (auto-paste refuses to paste into our own windows). Best
+        # effort: without ydotool the paste marks simply won't appear.
+        time.sleep(5)
+        try:
+            subprocess.run(["ydotool", "key", "56:1", "15:1", "15:0", "56:0"],
+                           timeout=5, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
+        except Exception:
+            pass
+
+        def toggle() -> float:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            t = now()
+            s.sendto(b"toggle", str(sock_path))
+            s.close()
+            return t
+
+        iterations = []
+        for i in range(args.iterations):
+            marklog.read_new()
+            t_press = toggle()
+            m_rs = wait_for_mark(
+                marklog, lambda m: m["stage"] == "recording_started_event", timeout=30)
+            if m_rs is None:
+                raise RuntimeError(f"iter {i}: app never started recording — is "
+                                   f"another Canario instance holding the socket?")
+            m_fa = wait_for_mark(marklog, lambda m: m["stage"] == "first_audio",
+                                 timeout=30)
+
+            time.sleep(args.hold_secs)
+
+            t_release = toggle()
+            m_done = wait_for_either_mark(
+                marklog,
+                ("sidecar_event_transcription_ready", "sidecar_event_recording_stopped"),
+                timeout=120)
+            if m_done is None:
+                raise RuntimeError(f"iter {i}: neither transcript nor stop mark")
+            m_tr = (m_done if m_done["stage"] == "sidecar_event_transcription_ready"
+                    else None)
+            m_paste = wait_for_mark(
+                marklog, lambda m: m["stage"] == "electron:paste_done", timeout=15)
+
+            marklog.read_new()
+            marks = marklog.history
+            t0 = t_press
+            m_hk_start = mark_after(marks, "hotkey_start_action", t0)
+            m_hk_stop = mark_after(marks, "hotkey_stop_action", t0)
+            it = {
+                "index": i,
+                "press_to_record_e2e_ms": diff_ms(t_press, m_rs["t"]),
+                "press_to_first_audio_ms": diff_ms(t_press, m_fa and m_fa["t"]),
+                "release_to_transcript_e2e_ms": diff_ms(t_release, m_tr and m_tr["t"]),
+                "transcript_to_paste_ms": diff_ms(m_tr and m_tr["t"],
+                                                  m_paste and m_paste["t"]),
+                "stages_ms": {
+                    "socket_poll_and_dispatch": diff_ms(t_press,
+                                                        m_hk_start and m_hk_start["t"]),
+                    "hotkey_to_sidecar_cmd": span(marks, "hotkey_start_action",
+                                                  "sidecar_cmd_toggle_recording", t0),
+                    "cmd_to_start_called": span(marks, "sidecar_cmd_toggle_recording",
+                                                "start_recording_called", t0),
+                    "stop_poll_and_dispatch": diff_ms(t_release,
+                                                      m_hk_stop and m_hk_stop["t"]),
+                    "core_stop_poll_wait": span(marks, "stop_recording_called",
+                                                "stop_observed", t0),
+                    "buffer_clone": span(marks, "stop_observed", "audio_cloned", t0),
+                    "beep_stop": span(marks, "beep_stop_start", "beep_stop_done", t0),
+                    "resample": span(marks, "resample_start", "resample_done", t0),
+                    "decode": span(marks, "decode_start", "decode_end", t0),
+                    "transcript_to_electron": span(marks, "transcript_ready",
+                                                   "electron:transcript_received", t0),
+                },
+                "audio_secs": args.hold_secs,
+                "note": ("trigger is the hotkey socket (50 ms poll), a stand-in "
+                         "for the physical key + evdev detection; focus a "
+                         "non-Canario window for paste marks"),
+            }
+            iterations.append(it)
+            print(f"  iter {i + 1}/{args.iterations}: "
+                  f"p2r={it['press_to_record_e2e_ms']}ms "
+                  f"r2t={it['release_to_transcript_e2e_ms']}ms "
+                  f"t2p={it['transcript_to_paste_ms']}ms", file=sys.stderr)
+        return summarize(iterations)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+
+def run_socket_only(args, marklog: MarkLog) -> dict:
+    """Hotkey-socket trigger latency: datagram -> HotkeyTriggered on stdout."""
+    binpath = find_binary(args.profile, "canario-electron")
+    side = Sidecar(binpath, {
+        "CANARIO_TIMING": "1",
+        "CANARIO_TIMING_FILE": str(marklog.path),
+    })
+    sock_path = hotkey_socket_path()
+    samples = []
+    try:
+        if side.command("ping", timeout=180) is None:
+            raise RuntimeError("sidecar did not answer ping")
+        r = side.command("start_hotkey")
+        if r is None or not r[1].get("ok"):
+            raise RuntimeError("start_hotkey failed (input group / evdev?)")
+        # The socket alternates StartRecording/StopRecording actions
+        # internally; both surface as HotkeyTriggered here (nobody answers
+        # the toggle in sidecar mode, so no recording actually runs).
+        for _ in range(args.iterations):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            t = now()
+            s.sendto(b"toggle", str(sock_path))
+            s.close()
+            got = side.events.wait("HotkeyTriggered", timeout=10)
+            if got is None:
+                raise RuntimeError("no HotkeyTriggered for socket toggle")
+            samples.append((got[0] - t) * 1000.0)
+            # Randomized gap: a fixed multiple of the socket's 50 ms poll
+            # period would phase-lock the samples and skew the latency
+            # distribution.
+            time.sleep(random.uniform(0.2, 0.7))
+    finally:
+        side.stop()
+    return {"socket_toggle_to_hotkey_triggered_ms": stats_ms(samples)}
+
+
+def summarize(iterations: list) -> dict:
+    if not iterations:
+        return {"iterations": [], "summary": {}}
+
+    def collect(key):
+        return stats_ms([it.get(key) for it in iterations])
+
+    stage_names = sorted({
+        name
+        for it in iterations
+        for name in it.get("stages_ms", {})
+    })
+    stages = {
+        name: stats_ms([
+            it["stages_ms"].get(name)
+            for it in iterations
+            if isinstance(it.get("stages_ms"), dict)
+        ])
+        for name in stage_names
+    }
+    top = {
+        key: collect(key)
+        for key in iterations[0]
+        if key.endswith("_ms") and key != "stages_ms"
+    }
+    return {"iterations": iterations, "summary": {**top, "stages_ms": stages}}
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--backend", choices=["sidecar", "cli", "electron"], default="sidecar")
+    ap.add_argument("--iterations", type=int, default=10)
+    ap.add_argument("--hold-secs", type=float, default=2.0,
+                    help="dictation length per iteration")
+    ap.add_argument("--cold", action="store_true",
+                    help="single iteration, recognizer prewarm disabled")
+    ap.add_argument("--sound-effects", choices=["keep", "on", "off"], default="keep",
+                    help="flip config sound_effects for the run (sidecar backend)")
+    ap.add_argument("--profile", choices=["release", "debug"], default="release")
+    ap.add_argument("--socket-only", action="store_true")
+    ap.add_argument("--speech", action="store_true",
+                    help="speak a sentence through the speakers during each "
+                         "hold (spd-say), so the mic decodes real speech")
+    ap.add_argument("--electron-cmd", default=None)
+    ap.add_argument("--out", default=None, help="write the JSON summary here")
+    args = ap.parse_args()
+
+    if args.cold:
+        args.iterations = 1
+
+    with tempfile.TemporaryDirectory(prefix="canario-bench-") as td:
+        marklog = MarkLog(Path(td) / "timing.jsonl")
+
+        result = {
+            "meta": host_meta(),
+            "config": {
+                "backend": args.backend,
+                "iterations": args.iterations,
+                "hold_secs": args.hold_secs,
+                "cold": args.cold,
+                "sound_effects": args.sound_effects,
+                "speech": args.speech,
+                "profile": args.profile,
+            },
+        }
+
+        if args.socket_only:
+            result["results"] = run_socket_only(args, marklog)
+        elif args.backend == "sidecar":
+            result["results"] = run_sidecar_backend(args, marklog)
+        elif args.backend == "cli":
+            result["results"] = run_cli_backend(args, marklog)
+        else:
+            result["results"] = run_electron_backend(args, marklog)
+
+        out = json.dumps(result, indent=2)
+        if args.out:
+            Path(args.out).write_text(out + "\n")
+            print(f"wrote {args.out}", file=sys.stderr)
+        print(out)
+
+
+if __name__ == "__main__":
+    main()

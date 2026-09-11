@@ -10,6 +10,10 @@ default = ["static", "gui"]
 static = ["canario-core/static"]
 shared = ["canario-core/shared"]
 gui = ["dep:gtk4", "dep:libadwaita", "dep:ksni", "dep:glib", "dep:gio"]
+# Wayland overlay placement for the recording indicator (canario-7ah.10).
+# Off by default: needs the system library (Debian/Ubuntu:
+# libgtk4-layer-shell-dev; pkg-config name gtk4-layer-shell-0).
+layer-shell = ["gui", "dep:gtk4-layer-shell"]
 
 [dependencies]
 canario-core = { path = "../canario-core" }
@@ -20,6 +24,14 @@ libadwaita = { version = "0.6", features = ["v1_5"], optional = true }
 ksni = { version = "0.3", features = ["blocking"], optional = true }
 glib = { version = "0.19", optional = true }
 gio = { version = "0.19", optional = true }
+# Pinned to 0.3: the newest release built against gtk4 ^0.8 / glib ^0.19
+# (verified against crates.io dependency metadata). 0.4.0+ require
+# gtk4 0.9+/glib 0.20+ and would compile a second, incompatible gtk4
+# copy into the workspace — the `&gtk4::Window` passed to
+# `init_layer_shell` would not be our gtk4 0.8 window type. Bump this
+# alongside the gtk4/glib stack (0.4 → gtk4 0.9, 0.5 → 0.9,
+# 0.6 → 0.10).
+gtk4-layer-shell = { version = "0.3", optional = true }
 
 # Logging
 tracing = "0.1"

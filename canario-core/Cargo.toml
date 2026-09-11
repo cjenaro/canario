@@ -49,6 +49,16 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Pipeline benchmarks (`cargo bench`). Not needed by `cargo test` runs of
+# the library itself.
+criterion = "0.5"
+
+# Pure-Rust pipeline stage benchmarks. Decode benches additionally need a
+# real model: set CANARIO_TEST_MODEL_DIR to a downloaded model directory
+# (they self-skip otherwise, like the ignored model tests).
+[[bench]]
+name = "pipeline"
+harness = false
 
 # Linux-only hotkey backends (enabled via the `x11` / `linux-input` features)
 [target.'cfg(target_os = "linux")'.dependencies]
