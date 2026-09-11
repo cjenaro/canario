@@ -5,8 +5,10 @@
 //! Hermetic by construction:
 //! - the child's HOME / XDG_CONFIG_HOME / XDG_DATA_HOME point at a temp
 //!   dir, so no $HOME pollution;
+//! - XDG_RUNTIME_DIR is overridden so the hotkey socket binds inside
+//!   the temp dir instead of clobbering a real canario-hotkey.sock;
 //! - no model download and no audio devices are touched (only
-//!   config/history/ping commands are exercised);
+//!   config/history/ping/hotkey-status commands are exercised);
 //! - every read has a timeout and the child is killed in a Drop guard.
 
 use std::io::{BufRead, BufReader, Write};
@@ -33,6 +35,12 @@ impl Sidecar {
     }
 
     fn spawn_with_home(tmp: tempfile::TempDir) -> Self {
+        // Keep the hotkey socket hermetic: without this, a start_hotkey
+        // test would remove + rebind the developer's real
+        // $XDG_RUNTIME_DIR/canario-hotkey.sock.
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
         let mut child = Command::new(env!("CARGO_BIN_EXE_canario-electron"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -40,6 +48,7 @@ impl Sidecar {
             .env("HOME", tmp.path())
             .env("XDG_CONFIG_HOME", tmp.path().join("config"))
             .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("XDG_RUNTIME_DIR", runtime_dir)
             // Keep tracing quiet even if the developer has RUST_LOG set.
             .env("RUST_LOG", "error")
             .spawn()
@@ -352,6 +361,58 @@ fn diagnostics_returns_versions_system_config_tools_and_logs() {
         "unexpected log dir {log_dir:?}"
     );
     assert!(data["logs"]["tail"].as_array().is_some());
+}
+
+#[test]
+fn hotkey_status_before_start_reports_not_started() {
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({ "cmd": "hotkey_status", "id": "hk-0" }));
+    let resp = sidecar.wait_for("hk-0");
+
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(resp["data"]["backend"], json!("not-started"));
+    assert_eq!(resp["data"]["permission_denied"], json!(false));
+    assert!(
+        resp["data"]["fix_command"].is_null(),
+        "unexpected fix_command: {resp}"
+    );
+}
+
+/// The evdev permission probe runs synchronously inside start_hotkey,
+/// so by the time the ok response arrives the status is settled —
+/// this is what lets the renderer query on mount without racing
+/// startup (the "not only in the logs" guarantee for the input-group
+/// failure).
+#[test]
+fn hotkey_status_after_start_settles_and_carries_fix_command() {
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({ "cmd": "start_hotkey", "id": "hk-start" }));
+    assert_eq!(sidecar.wait_for("hk-start")["ok"], json!(true));
+
+    sidecar.send(json!({ "cmd": "hotkey_status", "id": "hk-1" }));
+    let resp = sidecar.wait_for("hk-1");
+
+    assert_eq!(resp["ok"], json!(true));
+    let backend = resp["data"]["backend"].as_str().unwrap();
+    assert!(
+        ["evdev", "x11", "socket-fallback"].contains(&backend),
+        "unexpected backend {backend:?}: {resp}"
+    );
+
+    if resp["data"]["permission_denied"] == json!(true) {
+        let fix = resp["data"]["fix_command"].as_str().unwrap();
+        assert!(
+            fix.contains("usermod") && fix.contains("input"),
+            "fix_command should be a copy-pasteable usermod command: {fix:?}"
+        );
+    } else {
+        assert!(
+            resp["data"]["fix_command"].is_null(),
+            "fix_command must only ride along with a permissions failure: {resp}"
+        );
+    }
 }
 
 #[test]

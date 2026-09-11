@@ -10,7 +10,7 @@ use crate::audio::mute::MuteGuard;
 use crate::config::{AppConfig, AudioBehavior, ModelPaths, ModelVariant};
 use crate::event::Event;
 use crate::history::History;
-use crate::hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener};
+use crate::hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener, HotkeyStatus};
 use crate::recording::RecordingHandle;
 
 /// Lock a mutex, recovering from poisoning instead of panicking.
@@ -483,6 +483,20 @@ impl Canario {
         self.start_hotkey()
     }
 
+    /// Current health of the global hotkey backend.
+    ///
+    /// [`Self::start_hotkey`] runs the evdev `/dev/input` access probe
+    /// synchronously, so a query issued right after `start_hotkey()` /
+    /// `restart_hotkey()` returns cannot race the listener threads.
+    /// Frontends use this to surface the "user not in the input group"
+    /// failure (with its fix command) instead of leaving it in the logs.
+    pub fn hotkey_status(&self) -> HotkeyStatus {
+        match lock(&self.inner.hotkey).as_ref() {
+            Some(listener) => listener.status(),
+            None => HotkeyStatus::not_started(),
+        }
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────
 
     /// Shut down cleanly (stops recording + hotkey).
@@ -509,6 +523,18 @@ mod tests {
     fn recording_cancelled_serializes_with_event_tag() {
         let json = serde_json::to_string(&Event::RecordingCancelled).unwrap();
         assert_eq!(json, r#"{"event":"RecordingCancelled"}"#);
+    }
+
+    /// Before start_hotkey the status must read "not-started" so the
+    /// Electron renderer can distinguish "not yet attempted" from a
+    /// degraded backend when it queries on mount.
+    #[test]
+    fn hotkey_status_defaults_to_not_started() {
+        let (canario, _rx) = Canario::new().unwrap();
+        let status = canario.hotkey_status();
+        assert_eq!(status.backend, "not-started");
+        assert!(!status.permission_denied);
+        assert_eq!(status.fix_command, None);
     }
 
     /// Cancelling while idle must be a safe no-op: no panic, no events,

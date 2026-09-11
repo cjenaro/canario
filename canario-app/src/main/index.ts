@@ -317,6 +317,19 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     // Fetch config from sidecar (for auto-paste flag, tray visibility, etc.)
     await fetchConfig();
 
+    // Start the sidecar's hotkey listener on Linux BEFORE any renderer
+    // window exists. The /dev/input permission probe settles
+    // synchronously inside start_hotkey, so a renderer querying
+    // `hotkey_status` on mount can never race it — that's what keeps
+    // the permission-failure guidance from being lost to startup
+    // timing (events emitted now would out-run the renderer's
+    // subscription, but the status is pull-based).
+    if (process.platform === "linux") {
+      await sendCommand({ id: "init-hotkey", cmd: "start_hotkey" }).catch(() => {
+        console.warn("Failed to start hotkey listener (may need permissions)");
+      });
+    }
+
     createMainWindow();
     createOverlayWindow();
     setSettingsWindow(mainWindow);
@@ -332,13 +345,6 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     // Create tray (needs windows to exist) — respects the show_tray_icon config
     if (cachedConfig?.show_tray_icon !== false) {
       createTray();
-    }
-
-    // Start sidecar hotkey listener on Linux
-    if (process.platform === "linux") {
-      sendCommand({ id: "init-hotkey", cmd: "start_hotkey" }).catch(() => {
-        console.warn("Failed to start hotkey listener (may need permissions)");
-      });
     }
   });
 

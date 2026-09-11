@@ -61,6 +61,8 @@ enum Command {
     StopHotkey { id: String },
     #[serde(rename = "restart_hotkey")]
     RestartHotkey { id: String },
+    #[serde(rename = "hotkey_status")]
+    HotkeyStatus { id: String },
     #[serde(rename = "ping")]
     Ping { id: String },
     #[serde(rename = "diagnostics")]
@@ -328,6 +330,13 @@ fn handle_command(
             Ok(()) => write_json(&ok(&id)),
             Err(e) => write_json(&err(&id, e.to_string())),
         },
+        // Pull-based health query. `start_hotkey` settles the evdev
+        // permission probe synchronously, so the renderer can fetch
+        // this on mount (or after a restart) without racing startup.
+        Command::HotkeyStatus { id } => {
+            let status = canario.hotkey_status();
+            write_json(&ok_data(&id, serde_json::to_value(&status).unwrap()));
+        }
         Command::Ping { id } => {
             write_json(&ok_data(
                 &id,

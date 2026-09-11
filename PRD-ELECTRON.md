@@ -1107,6 +1107,7 @@ Full list of commands the sidecar accepts, with their parameters and responses:
 | `start_hotkey` | — | — | Emits `HotkeyTriggered` on hotkey |
 | `stop_hotkey` | — | — | Stops listener |
 | `restart_hotkey` | — | — | Reloads config + restarts |
+| `hotkey_status` | — | `HotkeyStatus` | Hotkey backend health; Linux evdev permission failures carry `fix_command` |
 | `ping` | — | `{ pong: true, version: "0.1.2" }` | Health check |
 | `diagnostics` | — | `Diagnostics` JSON (see below) | Reads log tail, probes tools |
 | `shutdown` | — | — | Stops recording + hotkey, exits |

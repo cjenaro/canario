@@ -5,10 +5,16 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import { useAppState } from "../state/context";
 import { createCanario } from "../primitives/createCanario";
 import { HotkeyCapture, toAccelerator } from "../components/HotkeyCapture";
+import { HotkeyPermissionNotice } from "../components/HotkeyPermissionNotice";
 import { WordRemapping } from "../components/WordRemapping";
 import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
 import { applyTheme } from "../theme";
+import {
+  parseHotkeyStatus,
+  shouldShowHotkeyPermissionNotice,
+  type HotkeyStatusInfo,
+} from "../primitives/hotkeyStatus";
 import {
   CUSTOM_MODEL_ID,
   customModelStatus,
@@ -55,6 +61,10 @@ export function AppPage() {
   const [remappings, setRemappings] = createSignal<{ from: string; to: string }[]>([]);
   const [removals, setRemovals] = createSignal<{ word: string }[]>([]);
   const [platform, setPlatform] = createSignal<{ isLinux: boolean; isMac: boolean; isWindows: boolean }>({ isLinux: true, isMac: false, isWindows: false });
+
+  // Hotkey backend health (Linux) — drives the persistent permission
+  // guidance in the Hotkey section.
+  const [hotkeyStatus, setHotkeyStatus] = createSignal<HotkeyStatusInfo | null>(null);
 
   // Track whether the initial model check is done
   const [initialModelCheck, setInitialModelCheck] = createSignal(false);
@@ -105,6 +115,16 @@ export function AppPage() {
     return !!(res?.ok) && res.data === true;
   }
 
+  // Pull the hotkey backend health from the sidecar. The main process
+  // awaits start_hotkey (which settles the /dev/input permission probe
+  // synchronously) before this window is created, so the query cannot
+  // race startup — a push event emitted that early would out-run the
+  // renderer's subscription, which is why this is a command.
+  async function refreshHotkeyStatus() {
+    const res = await canario.command("hotkey_status");
+    setHotkeyStatus(res?.ok ? parseHotkeyStatus(res.data) : null);
+  }
+
   // Apply theme
   createEffect(() => {
     applyTheme(theme());
@@ -138,6 +158,12 @@ export function AppPage() {
       // Platform info
       const p = await canario.getPlatform();
       if (p) setPlatform(p);
+
+      // Hotkey health — see refreshHotkeyStatus for why this is safe
+      // to query during mount.
+      if (p?.isLinux) {
+        void refreshHotkeyStatus();
+      }
 
       // Theme
       const savedTheme = await canario.getTheme();
@@ -287,6 +313,9 @@ export function AppPage() {
     // Restart hotkey listener with new config
     if (platform().isLinux) {
       await canario.restartHotkey();
+      // Re-check backend health: the restart re-runs the /dev/input
+      // probe, and the guidance must track the current truth.
+      await refreshHotkeyStatus();
     } else {
       // macOS/Windows: register via Electron API
       if (keys.length > 0) {
@@ -737,6 +766,11 @@ export function AppPage() {
             <p class="text-xs mt-2" style={{ color: "var(--text-secondary)" }}>
               Press-and-hold to record. Release to stop and transcribe.
             </p>
+            <Show when={shouldShowHotkeyPermissionNotice(hotkeyStatus(), platform().isLinux)}>
+              <div class="mt-3">
+                <HotkeyPermissionNotice status={hotkeyStatus()!} />
+              </div>
+            </Show>
           </section>
 
           {/* ── Behavior ──────────────────────────────────────────── */}

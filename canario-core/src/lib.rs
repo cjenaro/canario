@@ -43,7 +43,7 @@ pub use config::{AppConfig, AudioBehavior, ModelPaths, ModelVariant};
 pub use event::Event;
 pub use history::{History, HistoryEntry};
 pub use hotkey::hotkey_socket_path;
-pub use hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener};
+pub use hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener, HotkeyStatus};
 pub use inference::postprocess::{PostProcessor, WordRemapping, WordRemoval};
 pub use paste::paste_text;
 
