@@ -10,6 +10,7 @@ import { WordRemapping } from "../components/WordRemapping";
 import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
 import { AppearanceSection } from "../components/AppearanceSection";
+import { IndicatorSection } from "../components/IndicatorSection";
 import { MotionSection } from "../components/MotionSection";
 import { TransformSection } from "../components/TransformSection";
 import { MicSection } from "../components/MicSection";
@@ -31,6 +32,11 @@ import {
   type AccentColor,
   type ThemeMode,
 } from "../primitives/appearance";
+import {
+  overlayPresenceConfigPayload,
+  overlayPresenceFromConfig,
+  type OverlayPresence,
+} from "../primitives/overlayPresence";
 import {
   parseHotkeyStatus,
   shouldShowHotkeyPermissionNotice,
@@ -102,6 +108,12 @@ export function AppPage() {
   // The OS reduced-motion request force-disables via the resolver.
   const [animations, setAnimations] = createSignal<AnimationSettings>(readCachedAnimations());
   const [reducedMotion, setReducedMotion] = createSignal(false);
+
+  // Indicator presence (canario-aud.2): full overlay (default),
+  // minimal dot, or tray-only. AppConfig is the single source of
+  // truth; the main process live-applies the mode to the overlay
+  // window on every config refresh.
+  const [indicator, setIndicator] = createSignal<OverlayPresence>("full");
 
   // Track history items being animated out
   const [deletingIds, setDeletingIds] = createSignal<Set<string>>(new Set());
@@ -283,6 +295,7 @@ export function AppPage() {
         setShowTrayIcon((config.show_tray_icon as boolean) ?? true);
         setAudioBehavior((config.recording_audio_behavior as string) || "DoNothing");
         setInputDevice(inputDeviceFromConfig(config));
+        setIndicator(overlayPresenceFromConfig(config));
         setCustomPaths({
           encoder: (config.custom_encoder_path as string) || "",
           decoder: (config.custom_decoder_path as string) || "",
@@ -671,6 +684,21 @@ export function AppPage() {
     // FULL animations block so no sibling flag is dropped (see
     // animationsConfigPayload).
     await canario.updateConfig(animationsConfigPayload(next));
+  }
+
+  // Indicator style (canario-aud.2): persists via update_config and
+  // applies live — the main process reads the refreshed cache and
+  // re-gates the overlay window (pushing overlay:mode to the overlay
+  // page, hiding the window when "tray" is picked).
+  async function handleIndicatorChange(mode: OverlayPresence) {
+    const previous = indicator();
+    setIndicator(mode);
+    const ok = await canario.updateConfig(overlayPresenceConfigPayload(mode));
+    if (!ok) {
+      // Truthful ack (canario-dmp.7): keep showing what's persisted.
+      setIndicator(previous);
+      showToast("Could not save indicator setting.", "warning");
+    }
   }
 
   // Re-run the onboarding wizard (PRD §5.1): clear the persisted flag and
@@ -1324,6 +1352,16 @@ export function AppPage() {
               onModeChange={handleModeChange}
               onAccentChange={handleAccentChange}
             />
+
+            {/* Indicator style (canario-aud.2) — same Appearance area:
+                which on-screen indicator to show while dictating. */}
+            <div class="mt-6">
+              <p class="text-sm font-medium">Indicator</p>
+              <p class="text-xs mb-2.5" style={{ color: "var(--text-secondary)" }}>
+                What appears on screen while you dictate
+              </p>
+              <IndicatorSection mode={indicator()} onChange={handleIndicatorChange} />
+            </div>
           </section>
 
           {/* ── Motion ────────────────────────────────────────────── */}

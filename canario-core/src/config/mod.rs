@@ -115,6 +115,19 @@ pub struct AppConfig {
     /// GTK app keeps its fixed placement (see canario-aud.1).
     pub overlay_offsets: BTreeMap<String, OverlayOffset>,
 
+    /// On-screen indicator presence while dictating (canario-aud.2):
+    /// "full" — the recording island (pill, timer, live captions,
+    ///          transcribing/transforming phases; the default and the
+    ///          pre-setting behavior),
+    /// "dot"  — a minimal pulsing dot while recording only,
+    /// "tray" — no on-screen indicator at all; the tray icon's state
+    ///          carries the signal.
+    /// Stored as a raw string (input_device pattern) so unknown values
+    /// degrade to the default instead of quarantining the whole config:
+    /// the deserializer normalizes anything unrecognised to "full".
+    #[serde(deserialize_with = "deserialize_overlay_presence")]
+    pub overlay_presence: String,
+
     /// Animation preferences (Settings → Appearance → Motion, PRD §8.4).
     /// The Electron renderer resolves this block together with the OS
     /// `prefers-reduced-motion` media query into `data-animations` /
@@ -334,6 +347,31 @@ impl ModelPaths {
     }
 }
 
+/// Normalize a raw `overlay_presence` value (canario-aud.2): the two
+/// non-default modes pass through, everything else — missing, empty, a
+/// typo, a value written by a newer build — reads as "full", the
+/// default. Used by the config deserializer so a hand-edited or
+/// forward-written config loads instead of quarantining.
+fn normalize_overlay_presence(value: &str) -> String {
+    match value {
+        "dot" | "tray" => value.to_string(),
+        _ => "full".to_string(),
+    }
+}
+
+/// `deserialize_with` for [`AppConfig::overlay_presence`]: parse the
+/// wire string, then normalize unknown values to "full" (see
+/// [`normalize_overlay_presence`]). A non-string value still fails the
+/// field — and therefore quarantines the config — matching how every
+/// other wrong-typed field behaves.
+fn deserialize_overlay_presence<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(normalize_overlay_presence(&raw))
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -362,6 +400,7 @@ impl Default for AppConfig {
             theme: ThemeMode::Dark,
             accent_color: None,
             overlay_offsets: BTreeMap::new(),
+            overlay_presence: "full".to_string(),
             animations: AnimationSettings::default(),
             onboarding_completed: false,
             transform: TransformSettings::default(),
@@ -619,6 +658,8 @@ mod tests {
         assert_eq!(config.accent_color, None);
         // Overlay placement defaults to "not user-positioned yet"
         assert!(config.overlay_offsets.is_empty());
+        // Indicator presence defaults to the full overlay (canario-aud.2)
+        assert_eq!(config.overlay_presence, "full");
         // Animations default to fully on (existing behavior)
         assert_eq!(config.animations, AnimationSettings::default());
         // Onboarding defaults to not completed → old configs re-run the wizard
@@ -720,6 +761,7 @@ mod tests {
         assert_eq!(loaded.theme, config.theme);
         assert_eq!(loaded.accent_color, config.accent_color);
         assert_eq!(loaded.overlay_offsets, config.overlay_offsets);
+        assert_eq!(loaded.overlay_presence, config.overlay_presence);
         assert_eq!(loaded.animations, config.animations);
         assert_eq!(loaded.onboarding_completed, config.onboarding_completed);
         assert_eq!(loaded.transform, config.transform);
@@ -842,6 +884,53 @@ mod tests {
         cleared["overlay_offsets"] = serde_json::json!({});
         let cleared: AppConfig = serde_json::from_value(cleared).unwrap();
         assert!(cleared.overlay_offsets.is_empty());
+    }
+
+    #[test]
+    fn overlay_presence_defaults_to_full_and_round_trips() {
+        // Old configs (and `{}`) have no overlay_presence key — the full
+        // overlay stays on, byte-identical to the pre-setting behavior.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.overlay_presence, "full");
+        // Explicit values parse and survive a save/load round trip…
+        for mode in ["full", "dot", "tray"] {
+            let config: AppConfig =
+                serde_json::from_str(&format!(r#"{{ "overlay_presence": "{mode}" }}"#)).unwrap();
+            assert_eq!(config.overlay_presence, mode);
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(&format!(r#""overlay_presence":"{mode}""#)));
+            let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded.overlay_presence, mode);
+        }
+        // Untouched fields fall back to defaults
+        let config: AppConfig = serde_json::from_str(r#"{ "overlay_presence": "dot" }"#).unwrap();
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+        // The default config serializes the field explicitly (pattern of
+        // overlay_offsets) — the wire shape the Electron renderer reads.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(r#""overlay_presence":"full""#));
+    }
+
+    #[test]
+    fn overlay_presence_unknown_values_deserialize_to_full() {
+        // A hand-edited or newer-build value degrades to the default
+        // instead of quarantining the config (String field, input_device
+        // pattern — unlike the theme enum, which would quarantine).
+        for unknown in ["banana", "FULL", "Dot", "", "minimal", "none"] {
+            let config: AppConfig =
+                serde_json::from_str(&format!(r#"{{ "overlay_presence": "{unknown}" }}"#))
+                    .unwrap_or_else(|e| panic!("value {unknown:?} must load: {e}"));
+            assert_eq!(config.overlay_presence, "full", "value: {unknown:?}");
+            // The normalization is sticky: a save/load round trip writes
+            // the DEFAULT back, not the unknown value.
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(r#""overlay_presence":"full""#));
+        }
+        // Null/absent both read as the default: an ABSENT key uses the
+        // container-level serde(default); null is a wrong type for the
+        // String field and quarantines, like every other field.
+        let config: AppConfig = serde_json::from_str(r#"{ "auto_paste": false }"#).unwrap();
+        assert_eq!(config.overlay_presence, "full");
     }
 
     #[test]

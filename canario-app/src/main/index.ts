@@ -13,7 +13,8 @@ import { parseLegacyOnboardingFile } from "./onboarding.js";
 import { parseLegacyThemeFile } from "./legacyTheme.js";
 import { decideHotkeyRouting } from "./hotkeyRouting.js";
 import { initTransformCredential, saveTransformCredential } from "./transformCredential.js";
-import { overlayStatusForStop } from "./overlayStatus.js";
+import { overlayStatusForStop, type OverlayStatusPush } from "./overlayStatus.js";
+import { overlayPresenceFromConfig, type OverlayPresence } from "./overlayPresence.js";
 import {
   legacyMonitorRefs,
   migrateLegacyOverlayOffsetKeys,
@@ -258,6 +259,13 @@ ipcMain.handle("sidecar:command", async (_e, cmd: Record<string, unknown>) => {
 
 // Show/hide overlay
 ipcMain.handle("overlay:show", () => {
+  // Tray mode (canario-aud.2): no on-screen indicator at all — the
+  // show path is suppressed entirely, so the window (and its
+  // overlay:display push in positionOverlayWindow) never surfaces.
+  // The renderer keeps issuing overlay:show/hide on every recording
+  // transition; in tray mode the show is simply a no-op. Dot mode
+  // shows the SAME window — the renderer paints only the dot.
+  if (overlayMode === "tray") return;
   // Full-screen overlay — re-position onto the display with the cursor each
   // time it's shown (multi-monitor), CSS handles placement within it.
   positionOverlayWindow();
@@ -503,7 +511,7 @@ app.whenReady().then(async () => {
     // event covers every other stop path (CLI/GTK frontend) — the
     // event is the robust one.
     if (event.event === "TranscriptionStarted") {
-      overlayWindow?.webContents.send("overlay:status", overlayStatusForStop(cachedConfig));
+      pushOverlayStatus(overlayStatusForStop(cachedConfig));
     }
 
     // ConfigChanged (canario-dmp.20): config.json was written by this
@@ -544,7 +552,7 @@ app.whenReady().then(async () => {
       // in the core and is invisible here, so the whole window is
       // labelled "Transforming…"; the terminal events dismiss the
       // overlay exactly as they do for "transcribing".
-      overlayWindow?.webContents.send("overlay:status", overlayStatusForStop(cachedConfig));
+      pushOverlayStatus(overlayStatusForStop(cachedConfig));
     }
   });
 
@@ -644,11 +652,62 @@ function timingMark(stage: string): void {
 // Cache sidecar config so the main process can check auto_paste, etc.
 let cachedConfig: Record<string, unknown> | null = null;
 
+// ── Indicator presence (canario-aud.2) ─────────────────────────────────
+// Which indicator style the AppConfig's overlay_presence selects. Read
+// from every config refresh (fetchConfig) and every renderer cache
+// merge (config:update-cache) via applyOverlayMode(). "tray" suppresses
+// the overlay window's show path and its overlay:status pushes — the
+// tray icon's state (updateTrayState: "● Recording" / "⟳ Transcribing…"
+// / "● Ready") carries the signal instead. "dot" reuses the SAME
+// BrowserWindow; the renderer re-gates what it paints from the
+// overlay:mode pushes. Other overlayWindow channels are untouched by
+// design: sidecar:event and hotkey:triggered still flow (the hidden
+// window's page simply renders nothing — and it registers no hotkey
+// listener anyway; see hotkeyRouting.ts), so recording, mic-permission
+// and hotkey flows never depended on the overlay being visible.
+// Mic-permission guidance lives in the settings window
+// (HotkeyPermissionNotice) and the macOS accessibility prompt is a
+// main-process dialog — neither routes through the overlay.
+let overlayMode: OverlayPresence = "full";
+
+/**
+ * Re-read the presence mode from the config cache and live-apply it:
+ * push the mode to the overlay page, and take the window down when the
+ * user switches to "tray" while an indicator is up (a mid-recording
+ * settings change). Switching AWAY from tray mid-recording keeps the
+ * window hidden until the next show — the mode applies to the next
+ * recording, never retroactively.
+ */
+function applyOverlayMode() {
+  const next = overlayPresenceFromConfig(cachedConfig);
+  if (next === overlayMode) return;
+  overlayMode = next;
+  // Keep the overlay page's paint gating fresh (it also pulls the mode
+  // from get_config on mount — that pull covers pushes that raced page
+  // load at boot, this push covers every later change).
+  overlayWindow?.webContents.send("overlay:mode", overlayMode);
+  if (overlayMode === "tray") {
+    setOverlayInteractive(false);
+    stopOverlayPolling();
+    overlayWindow?.hide();
+  }
+}
+
+/**
+ * Push a busy-phase label to the overlay page — suppressed in tray
+ * mode, where the window must stay entirely quiet (canario-aud.2).
+ */
+function pushOverlayStatus(status: OverlayStatusPush) {
+  if (overlayMode === "tray") return;
+  overlayWindow?.webContents.send("overlay:status", status);
+}
+
 async function fetchConfig() {
   try {
     const res = await sendCommand({ cmd: "get_config" });
     if (res?.ok && res.data) {
       cachedConfig = res.data as Record<string, unknown>;
+      applyOverlayMode();
     }
   } catch {
     // Config fetch is non-critical
@@ -769,6 +828,9 @@ ipcMain.handle("config:update-cache", (_e, config: Record<string, unknown>) => {
   if ("show_tray_icon" in config) {
     setTrayVisible(config.show_tray_icon !== false);
   }
+  // Live-apply the indicator mode (canario-aud.2): pushes overlay:mode
+  // to the overlay page and hides the window on a switch to "tray".
+  applyOverlayMode();
 });
 
 // Tray state updates from sidecar events

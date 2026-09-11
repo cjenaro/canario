@@ -31,6 +31,17 @@ import {
   overlayStatusFromEvent,
   type OverlayStatus,
 } from "../primitives/overlayStatus";
+// Indicator presence modes + the pure mode×status render-gating table
+// (canario-aud.2): "full" paints the island below, "dot" a minimal
+// pulsing dot while recording, "tray" nothing (the main process keeps
+// the window hidden in that mode — this is the renderer's half).
+import {
+  DOT_SIZE,
+  normalizeOverlayPresence,
+  overlayContentFor,
+  overlayPresenceFromConfig,
+  type OverlayPresence,
+} from "../primitives/overlayPresence";
 
 /** Island rect in window-relative client coords, reported to the main process. */
 type IslandRect = { x: number; y: number; width: number; height: number };
@@ -47,6 +58,12 @@ export function OverlayPage() {
   const [tick, setTick] = createSignal(0);
   // Live caption preview for long recordings — the latest PartialTranscript
   const [captions, setCaptions] = createSignal<string | null>(null);
+
+  // ── Indicator presence (canario-aud.2) ────────────────────────────
+  // Which indicator to paint: pulled from get_config at mount, then
+  // kept current by the main process's overlay:mode pushes (settings
+  // changes apply live). See overlayContentFor for the gating table.
+  const [presence, setPresence] = createSignal<OverlayPresence>("full");
 
   // ── Island geometry ───────────────────────────────────────────────
   // The island's width/height/border-radius are spring-driven via
@@ -136,6 +153,7 @@ export function OverlayPage() {
     setOverlayIslandRect: (rect: IslandRect | null) => void;
     onOverlayDisplay: (cb: (info: { key: string }) => void) => () => void;
     onOverlayInteractive: (cb: (interactive: boolean) => void) => () => void;
+    onOverlayMode: (cb: (mode: string) => void) => () => void;
   } | undefined;
 
   // ── Island placement (canario-aud.1) ──────────────────────────────
@@ -179,12 +197,33 @@ export function OverlayPage() {
     return clampOverlayPosition(base, { width: vw(), height: vh() }, { width: islandW(), height: islandH() });
   });
 
+  // Minimal dot placement (canario-aud.2): the SAME per-monitor stored
+  // offsets and default top-center as the island — the map is shared,
+  // so a monitor dragged in full mode anchors the dot near that spot —
+  // resolved/clamped for the dot's tiny fixed size. The dot itself is
+  // NOT draggable: the hover-hysteresis drag affordance is sized for
+  // the island (24px exit margin vs a 10px target), so dot mode fixes
+  // the position; reposition by switching to (or via) the full overlay,
+  // whose drags persist into the shared map.
+  const dotPos = createMemo<OverlayOffset>(() => {
+    const stored = storedOffsets()[monitorKey() ?? ""];
+    const base = resolveOverlayPosition(stored, vw(), DOT_SIZE);
+    return clampOverlayPosition(base, { width: vw(), height: vh() }, { width: DOT_SIZE, height: DOT_SIZE });
+  });
+
+  // What to paint for the current mode × status (canario-aud.2). "full"
+  // keeps today's island behavior; "dot" paints the recording-only dot;
+  // "tray" paints nothing (the main process also keeps the window
+  // hidden there — belt and braces on both sides of the bridge).
+  const content = createMemo(() => overlayContentFor(presence(), status()));
+
   // Report the island's rect whenever it moves or resizes — the main
   // process hit-tests the cursor against it to toggle interactivity.
-  // null while the island is hidden stops that polling entirely.
+  // null while the island is hidden stops that polling entirely (the
+  // dot mode has no drag affordance, so it reports nothing).
   createEffect(() => {
     const rect: IslandRect | null =
-      isVisible() && measured()
+      content().island && isVisible() && measured()
         ? { x: pos().x, y: pos().y, width: islandW(), height: islandH() }
         : null;
     api?.setOverlayIslandRect?.(rect);
@@ -232,12 +271,18 @@ export function OverlayPage() {
 
   // ── Placement listeners ───────────────────────────────────────────
   onMount(() => {
-    // Load persisted placements once; drag/reset keep the map current
-    // locally so consecutive updates never read back stale config.
+    // Load persisted placements and the indicator mode once; drag/reset
+    // keep the map current locally so consecutive updates never read
+    // back stale config.
     api
       ?.sendCommand({ id: "overlay-config", cmd: "get_config" })
       .then((res) => {
-        if (res?.ok && res.data) setStoredOffsets(overlayOffsetsFromConfig(res.data));
+        if (res?.ok && res.data) {
+          setStoredOffsets(overlayOffsetsFromConfig(res.data));
+          // The pull covers mode pushes that raced this page's load
+          // (main refreshes its config cache before the window loads).
+          setPresence(overlayPresenceFromConfig(res.data));
+        }
       })
       .catch(() => {});
 
@@ -251,6 +296,9 @@ export function OverlayPage() {
       // settle where the island is rather than reverting.
       if (!i) endDrag();
     });
+    // Indicator mode changes (settings writes / external config edits)
+    // pushed live by the main process
+    const unsubMode = api?.onOverlayMode?.((m) => setPresence(normalizeOverlayPresence(m)));
 
     const onResize = () => {
       setVw(window.innerWidth);
@@ -261,6 +309,7 @@ export function OverlayPage() {
     onCleanup(() => {
       unsubDisplay?.();
       unsubInteractive?.();
+      unsubMode?.();
       window.removeEventListener("resize", onResize);
       api?.setOverlayIslandRect?.(null);
     });
@@ -403,8 +452,11 @@ export function OverlayPage() {
   const captionWords = () => (captions() ?? "").split(/\s+/).filter(Boolean);
 
   return (
-    <Show when={isVisible()}>
+    <Show when={content().island || content().dot}>
       <div class="fixed inset-0 pointer-events-none">
+        {/* ── Full island (mode "full", canario-aud.2) ───────────────
+            Unchanged behavior: visible for every non-hidden status. */}
+        <Show when={content().island}>
         {/* Placement wrapper: absolute left/top from the pos() memo —
             default top-center, the stored per-monitor offset, or the
             live drag position. Keeping positioning here leaves the
@@ -546,6 +598,33 @@ export function OverlayPage() {
           </div>
           </div>
         </div>
+        </Show>
+
+        {/* ── Minimal recording dot (mode "dot", canario-aud.2) ──────
+            A tiny pulsing dot at the shared placement anchor —
+            recording state ONLY: no captions, no timer, no
+            transcribing/transforming phases (overlayContentFor gates
+            it). Fixed position (see dotPos above for why it isn't
+            draggable); pointer-events stay off — the window is
+            click-through everywhere in this mode. The pulse reuses
+            animate-pulse-dot, so the Motion section's recording-dot
+            toggle and the OS reduced-motion request gate it too. */}
+        <Show when={content().dot}>
+          <div
+            style={{
+              position: "absolute",
+              left: `${dotPos().x}px`,
+              top: `${dotPos().y}px`,
+              width: `${DOT_SIZE}px`,
+              height: `${DOT_SIZE}px`,
+            }}
+          >
+            <div
+              class="w-full h-full rounded-full animate-pulse-dot shadow-lg"
+              style={{ "background-color": "var(--recording-dot)" }}
+            />
+          </div>
+        </Show>
       </div>
     </Show>
   );

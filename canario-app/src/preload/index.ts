@@ -66,6 +66,19 @@ const api = {
     return () => ipcRenderer.removeListener("overlay:interactive", handler);
   },
 
+  // ── Indicator presence mode (canario-aud.2) ─────────────────────────────
+  // Pushed whenever the AppConfig overlay_presence mode changes ("full" |
+  // "dot" | "tray") so the overlay page can re-gate what it paints live.
+  // The page ALSO pulls the mode from get_config on mount — pushes that
+  // race page load (fetchConfig runs before the window is created) are
+  // covered by that pull; this channel covers changes made afterwards
+  // from the settings UI or an external config edit.
+  onOverlayMode: (callback: (mode: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, mode: string) => callback(mode);
+    ipcRenderer.on("overlay:mode", handler);
+    return () => ipcRenderer.removeListener("overlay:mode", handler);
+  },
+
   // Window control
   showSettings: () => ipcRenderer.invoke("window:showSettings"),
   hideSettings: () => ipcRenderer.invoke("window:hideSettings"),
