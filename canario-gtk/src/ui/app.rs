@@ -18,6 +18,15 @@ use crate::ui::tray::{CanarioTray, TrayAction};
 
 type TrayHandle = ksni::blocking::Handle<CanarioTray>;
 
+thread_local! {
+    /// Keep-alive hold on the Application, stored for the life of the main
+    /// thread so the use-count never reaches zero (see `setup_signals`).
+    /// GTK signals run on the main thread, so a thread-local avoids any
+    /// Send/Sync wrapper around `glib::HoldGuard`.
+    static APP_HOLD_GUARD: std::cell::RefCell<Option<gio::ApplicationHoldGuard>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub struct CanarioGtkApp {
     app: adw::Application,
     canario: Canario,
@@ -84,12 +93,12 @@ impl CanarioGtkApp {
             //
             // Canario is a tray app: most of the time it has NO windows open,
             // and GTK exits the main loop when the last window closes. Holding
-            // a use-count on the Application prevents that. The hold is
-            // intentionally never released — the guard lives until process
-            // exit, when the OS reclaims it. `std::mem::forget` just makes
-            // that "leak on purpose" explicit; there is no cleaner GTK idiom
-            // for "run forever with zero windows".
-            std::mem::forget(app.hold());
+            // a use-count on the Application prevents that. The guard is
+            // stored in a thread-local so the hold is never released while
+            // the main loop runs; it drops naturally when the main thread
+            // exits (after `run_with_args` returns), releasing the use-count
+            // the OS is about to reclaim anyway.
+            APP_HOLD_GUARD.with(|hold| *hold.borrow_mut() = Some(app.hold()));
         });
 
         // On first launch (no model downloaded yet), open Settings so the

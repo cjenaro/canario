@@ -262,13 +262,6 @@ impl HotkeyProcessor {
         }
     }
 
-    /// Reset the processor to idle state.
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.state = ProcessorState::Idle;
-        self.recording = false;
-    }
-
     /// Is the processor currently in a recording state?
     pub fn is_recording(&self) -> bool {
         self.recording

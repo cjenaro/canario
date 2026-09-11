@@ -114,12 +114,9 @@ fn err(id: impl Into<String>, msg: impl Into<String>) -> ErrResponse {
 
 // ── Event forwarding ────────────────────────────────────────────────────────
 
-/// Serialize a canario-core Event to JSON manually.
-/// This works because Event has #[derive(serde::Serialize)].
-fn serialize_event(event: &canario_core::Event) -> String {
-    serde_json::to_string(event).unwrap()
-}
-
+/// Serialize `val` as a single JSON line on stdout. Used for both responses
+/// and forwarded canario-core events — the wire format is identical either
+/// way (`Event` derives `serde::Serialize`).
 fn write_json<T: Serialize>(val: &T) {
     let mut stdout = std::io::stdout().lock();
     match serde_json::to_string(val) {
@@ -161,10 +158,7 @@ fn main() -> anyhow::Result<()> {
             {
                 event_tx_canario.add_history(text.clone(), duration_secs, None);
             }
-            let json = serialize_event(&event);
-            let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(stdout, "{}", json);
-            let _ = stdout.flush();
+            write_json(&event);
         }
         info!("Event channel closed, sidecar exiting");
         std::process::exit(0);
