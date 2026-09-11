@@ -8,32 +8,37 @@ Inspired by [Hex](https://github.com/kitlangton/Hex) for macOS, powered by [NVID
 
 ## Download
 
-### Linux
-
-> **Note:** The release pipeline is currently being rebuilt, so prebuilt
-> installers are not available yet. For now, [build from source](#build-from-source)
-> (it's quick — see below).
-
-Once releases are published again, you'll be able to grab an installer from
-the [latest release](https://github.com/cjenaro/canario/releases/latest):
+Grab an installer from the [releases page](https://github.com/cjenaro/canario/releases):
 
 | File | Notes |
 |------|-------|
-| `Canario-*.AppImage` | Self-contained, no dependencies |
-| `Canario-*.deb` | Debian/Ubuntu package |
+| `Canario-*.AppImage` | Linux, self-contained, no dependencies |
+| `Canario-*_amd64.deb` | Debian/Ubuntu package |
+| `Canario-*.dmg` | macOS (arm64 + x64) — unsigned, see below |
+| `Canario-Setup-*.exe` | Windows (x64) |
 
 On first launch, you'll be prompted to download the ASR model (~640MB). Everything runs locally — nothing leaves your machine.
 
 ### Auto-update
 
-The Electron app includes auto-update support (checks GitHub Releases every
-4 hours and notifies when a new version is ready), but it only works with
-published releases — which are not currently available while the release
-pipeline is being fixed.
+The Electron app auto-updates: it checks GitHub Releases every 4 hours,
+downloads in the background, and installs on quit. Note that prerelease
+builds (e.g. `-rc` versions) only see newer prereleases, so stable installs
+are never upgraded to an `-rc`.
 
-### macOS / Windows
+### macOS
 
-Not yet available. `canario-core` depends on Linux-specific libraries (evdev, X11). Cross-platform support requires adding `#[cfg(target_os)]` guards — tracked in the PRD as future work.
+macOS builds are **unsigned** (no Apple Developer certificate), so Gatekeeper
+will block them on first launch. To open:
+
+1. Move `Canario.app` to `/Applications`.
+2. Right-click `Canario.app` → **Open** → **Open** in the dialog
+   (a plain double-click only offers "Move to Trash").
+
+Or from a terminal: `xattr -cr /Applications/Canario.app`
+
+You'll also need to grant **Accessibility** permission
+(System Settings → Privacy & Security → Accessibility) for Cmd+V paste to work.
 
 ### Build from source
 

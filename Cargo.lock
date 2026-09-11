@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "canario-cli"
-version = "0.1.2"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "canario-core",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "canario-core"
-version = "0.1.2"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "canario-electron"
-version = "0.1.2"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "canario-core",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "canario-gtk"
-version = "0.1.2"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "arboard",
