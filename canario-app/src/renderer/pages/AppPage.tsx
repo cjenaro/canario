@@ -47,6 +47,7 @@ export function AppPage() {
   const [hotkey, setHotkey] = createSignal<string[]>([]);
   const [autoPaste, setAutoPaste] = createSignal(true);
   const [soundEffects, setSoundEffects] = createSignal(true);
+  const [liveCaptions, setLiveCaptions] = createSignal(true);
   const [autostart, setAutostart] = createSignal(false);
   const [showTrayIcon, setShowTrayIcon] = createSignal(true);
   const [audioBehavior, setAudioBehavior] = createSignal<string>("DoNothing");
@@ -132,6 +133,7 @@ export function AppPage() {
         setHotkey((config.hotkey as string[]) || []);
         setAutoPaste((config.auto_paste as boolean) ?? true);
         setSoundEffects((config.sound_effects as boolean) ?? true);
+        setLiveCaptions((config.live_captions as boolean) ?? true);
         setAutostart((config.autostart as boolean) ?? false);
         setShowTrayIcon((config.show_tray_icon as boolean) ?? true);
         setAudioBehavior((config.recording_audio_behavior as string) || "DoNothing");
@@ -278,6 +280,7 @@ export function AppPage() {
     await canario.updateConfig({ [field]: value });
     if (field === "auto_paste") setAutoPaste(value);
     if (field === "sound_effects") setSoundEffects(value);
+    if (field === "live_captions") setLiveCaptions(value);
     if (field === "show_tray_icon") {
       setShowTrayIcon(value);
       if (!value) {
@@ -737,6 +740,15 @@ export function AppPage() {
                   <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Play sounds on recording start/stop</p>
                 </div>
                 <Toggle checked={soundEffects()} onChange={(v) => handleConfigToggle("sound_effects", v)} />
+              </div>
+
+              {/* Live captions */}
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium">Live captions</p>
+                  <p class="text-xs" style={{ color: "var(--text-secondary)" }}>Stream a text preview in the overlay during long recordings</p>
+                </div>
+                <Toggle checked={liveCaptions()} onChange={(v) => handleConfigToggle("live_captions", v)} />
               </div>
 
               <div class="flex items-center justify-between">

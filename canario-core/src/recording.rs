@@ -163,6 +163,22 @@ fn recording_loop(
 
     stream.play()?;
 
+    // ── Live captions for long sessions ─────────────────────────────
+    // Detached worker: decodes a sliding window of the buffer and emits
+    // PartialTranscript events once the recording passes the config
+    // threshold. Self-terminates when `stop` is set (stop or cancel);
+    // decodes share the recognizer cache with the final decode, whose
+    // lock serializes the two so they never overlap.
+    spawn_live_captions_worker(
+        audio_buf.clone(),
+        mic_sr,
+        stop.clone(),
+        tx.clone(),
+        model_paths.clone(),
+        post_processor.clone(),
+        num_threads,
+    );
+
     // ── Wait for stop signal ────────────────────────────────────────
     let mut log_timer = std::time::Instant::now();
     while !stop.load(Ordering::SeqCst) {
@@ -275,6 +291,186 @@ fn recording_loop(
 
     let _ = tx.send(Event::RecordingStopped);
     Ok(())
+}
+
+// ── Live captions ────────────────────────────────────────────────────
+// Long recordings get a live text preview: a worker thread re-decodes a
+// sliding window of the captured buffer and emits `PartialTranscript`
+// events. The final full-buffer decode (and the pasted/stored result)
+// is unchanged — partials are preview-only and never reach history.
+
+/// How much audio each partial decode sees, at most. Caps decode cost
+/// so long rambling sessions stay roughly realtime instead of falling
+/// further behind as the buffer grows.
+const LIVE_WINDOW_SECS: f64 = 20.0;
+
+/// Pause between partial decodes, counted after a decode finishes.
+const LIVE_INTERVAL_MS: u64 = 1200;
+
+/// Sleep granularity while waiting out the cadence — keeps the worker
+/// responsive to `stop` instead of blocking a full interval.
+const LIVE_POLL_MS: u64 = 150;
+
+/// Sample range of the buffer a partial decode should cover: the whole
+/// buffer while it fits in `window_secs`, else its trailing window.
+fn live_window_range(buf_len: usize, mic_sr: u32, window_secs: f64) -> std::ops::Range<usize> {
+    let window_samples = (window_secs.max(0.0) * mic_sr as f64) as usize;
+    if buf_len <= window_samples {
+        0..buf_len
+    } else {
+        buf_len - window_samples..buf_len
+    }
+}
+
+/// Everything the live-captions worker needs, bundled to keep the
+/// loop signature small.
+struct LiveCaptionsCtx {
+    audio_buf: Arc<parking_lot::Mutex<Vec<f32>>>,
+    mic_sr: u32,
+    stop: Arc<AtomicBool>,
+    tx: std::sync::mpsc::Sender<Event>,
+    model_paths: ModelPaths,
+    post_processor: PostProcessor,
+    num_threads: i32,
+    threshold_secs: f64,
+}
+
+/// Spawn the live-captions worker for an in-flight recording. No-op
+/// (returns) when disabled by config. Reads config from disk, matching
+/// `configured_num_threads` — the same on-disk source the final decode
+/// uses, so a mid-session config change can't split behavior.
+fn spawn_live_captions_worker(
+    audio_buf: Arc<parking_lot::Mutex<Vec<f32>>>,
+    mic_sr: u32,
+    stop: Arc<AtomicBool>,
+    tx: std::sync::mpsc::Sender<Event>,
+    model_paths: ModelPaths,
+    post_processor: PostProcessor,
+    num_threads: i32,
+) {
+    let (enabled, threshold_secs) = crate::config::AppConfig::load()
+        .map(|c| (c.live_captions, c.live_captions_threshold_secs))
+        .unwrap_or((true, 8.0));
+    if !enabled {
+        tracing::debug!("Live captions disabled in config");
+        return;
+    }
+    tracing::debug!(
+        "Live captions armed: threshold {:.1}s, window {:.0}s, interval {}ms",
+        threshold_secs,
+        LIVE_WINDOW_SECS,
+        LIVE_INTERVAL_MS
+    );
+
+    let ctx = LiveCaptionsCtx {
+        audio_buf,
+        mic_sr,
+        stop,
+        tx,
+        model_paths,
+        post_processor,
+        num_threads,
+        threshold_secs,
+    };
+    let spawned = std::thread::Builder::new()
+        .name("live-captions".to_string())
+        .spawn(move || live_captions_loop(ctx));
+    if let Err(e) = spawned {
+        // Preview only — recording works fine without it.
+        tracing::warn!("Could not spawn live-captions worker: {}", e);
+    }
+}
+
+/// The live-captions worker loop. Emits `PartialTranscript` events for
+/// the trailing window of the buffer once it grows past the threshold.
+fn live_captions_loop(ctx: LiveCaptionsCtx) {
+    let LiveCaptionsCtx {
+        audio_buf,
+        mic_sr,
+        stop,
+        tx,
+        model_paths,
+        post_processor,
+        num_threads,
+        threshold_secs,
+    } = ctx;
+
+    let threshold_samples = (threshold_secs.max(0.0) * mic_sr as f64) as usize;
+    let mut last_text = String::new();
+
+    loop {
+        // Wait out the cadence in small slices so `stop` (or cancel)
+        // interrupts within one poll instead of a full interval.
+        let mut waited_ms = 0;
+        while waited_ms < LIVE_INTERVAL_MS && !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(LIVE_POLL_MS));
+            waited_ms += LIVE_POLL_MS;
+        }
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Only long sessions get captions — short dictations never pay
+        // a partial decode.
+        let window = {
+            let buf = audio_buf.lock();
+            if buf.len() < threshold_samples {
+                continue;
+            }
+            let range = live_window_range(buf.len(), mic_sr, LIVE_WINDOW_SECS);
+            buf[range].to_vec()
+        };
+        if window.is_empty() {
+            continue;
+        }
+
+        let audio_16k = if mic_sr != 16000 {
+            match crate::inference::resample::resample(&window, mic_sr, 16000) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("Live captions stopping (resample failed): {}", e);
+                    return;
+                }
+            }
+        } else {
+            window
+        };
+
+        // Shares the recognizer cache with the final decode; the cache
+        // lock serializes the two, so a stop at most waits out this
+        // decode instead of racing it.
+        let decoded = with_recognizer(&model_paths, num_threads, |recognizer| {
+            let rec_stream = recognizer.create_stream();
+            rec_stream.accept_waveform(16000, &audio_16k);
+            recognizer.decode(&rec_stream);
+            rec_stream.get_result().map(|r| r.text.trim().to_string())
+        });
+
+        match decoded {
+            Ok(Some(raw_text)) if !raw_text.is_empty() => {
+                let text = post_processor.process(&raw_text);
+                // Emit only fresh text, and never after stop: a late
+                // partial must not re-show captions that the final
+                // result (or RecordingStopped) already cleared.
+                if !stop.load(Ordering::SeqCst) && !text.is_empty() && text != last_text {
+                    tracing::debug!(
+                        "Live caption ({} chars, {:.1}s window)",
+                        text.chars().count(),
+                        audio_16k.len() as f64 / 16000.0
+                    );
+                    last_text = text.clone();
+                    let _ = tx.send(Event::PartialTranscript { text });
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // E.g. model files missing — the final decode surfaces
+                // the real, actionable error. Previewing is best-effort.
+                tracing::warn!("Live captions stopping: {}", e);
+                return;
+            }
+        }
+    }
 }
 
 /// Cached recognizer entry — keyed by model paths + thread count so a
@@ -626,5 +822,35 @@ mod tests {
         let valid = dir.path().join("tokens.txt");
         std::fs::write(&valid, "▁t 0\n▁h 1\n").unwrap();
         assert!(tokens_looks_valid(&valid));
+    }
+
+    /// A buffer shorter than the window decodes in full — early in a
+    /// session there is nothing to slide over.
+    #[test]
+    fn live_window_covers_short_buffers_entirely() {
+        assert_eq!(live_window_range(1_000, 16_000, 20.0), 0..1_000);
+        assert_eq!(live_window_range(0, 48_000, 20.0), 0..0);
+    }
+
+    /// Once the buffer outgrows the window, decodes see exactly the
+    /// trailing window (here: 30s of 16kHz audio, 20s window → the
+    /// last 320_000 samples).
+    #[test]
+    fn live_window_returns_tail_for_long_buffers() {
+        assert_eq!(live_window_range(480_000, 16_000, 20.0), 160_000..480_000);
+        // Window size is respected at non-16k rates too.
+        assert_eq!(
+            live_window_range(1_440_000, 48_000, 20.0),
+            480_000..1_440_000
+        );
+    }
+
+    /// A zero-second window must degenerate to an empty tail, never a
+    /// underflow/panic on `buf_len - window_samples`.
+    #[test]
+    fn live_window_zero_secs_yields_empty_tail() {
+        let range = live_window_range(480_000, 16_000, 0.0);
+        assert_eq!(range, 480_000..480_000);
+        assert!(range.is_empty());
     }
 }

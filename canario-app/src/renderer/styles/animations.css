@@ -40,6 +40,85 @@
   animation: fade-out 100ms ease-in forwards;
 }
 
+/* ── Live caption words ─────────────────────────────────── */
+/* Each word of a live partial fades/slides in once; words that
+   persist across partial updates keep their DOM (keyed <For>) and
+   do not re-animate. */
+@keyframes word-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.caption-word {
+  display: inline-block;
+  margin-right: 0.28em;
+  animation: word-in 220ms ease-out both;
+}
+
+/* ── Recording island (pill ↔ caption morph) ────────────── */
+/* One glassy island: collapsed it is the recording pill; live captions
+   spring it open into a wider, taller card. The morph itself is driven
+   by solid-motionone (see OverlayPage) which animates width/height/
+   border-radius with real spring physics; CSS only holds the look.
+   NOTE: keep geometry OUT of a reactive style prop on the Motion
+   element — solid-motionone re-merges a stale snapshot of the initial
+   animate targets into the style on every change, which stomps the
+   running spring. */
+
+.island {
+  padding: 6px 12px;
+  border-radius: 9999px; /* pre-spring look; Motion animates inline */
+  overflow: hidden; /* clips the caption text as the island springs */
+  background-color: rgba(26, 26, 46, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(233, 69, 96, 0.3);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  transition: box-shadow 200ms ease;
+}
+
+/* Glow while speech is detected (toggled as a class — NOT a reactive
+   inline style — see the note above) */
+.island-live {
+  box-shadow: 0 0 12px rgba(233, 69, 96, 0.25);
+}
+
+/* Indicator row (dot/waveform/timer, or the transcribing spinner).
+   fit-content keeps offsetWidth at the row's real content width —
+   block stretch would make pill measurements self-fulfilling — and
+   auto margins center it when the island is wide. */
+.island-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-inline: auto;
+}
+
+/* Caption text: fixed width keeps wrapping stable while the island is
+   mid-spring; bottom-anchored so only the newest lines stay visible;
+   auto margins center it once the island is wide enough. */
+.caption-text {
+  width: 536px;
+  margin: 6px auto 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+  max-height: 60px; /* ~3 lines at 13px/1.5 */
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+  color: rgba(232, 232, 240, 0.9);
+  word-break: break-word;
+}
+
+
 /* ── Spinning indicator ─────────────────────────────────── */
 @keyframes spin {
   from { transform: rotate(0deg); }

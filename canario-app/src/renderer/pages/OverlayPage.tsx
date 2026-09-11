@@ -1,6 +1,13 @@
 // Overlay page — loaded in the overlay BrowserWindow
 // Self-contained: listens to sidecar events directly, no state machine needed.
-import { createSignal, onCleanup, onMount, Show, For } from "solid-js";
+import { createSignal, onCleanup, onMount, Show, For, createEffect } from "solid-js";
+// Imperative Motion One core, NOT the <Motion> component wrapper: the
+// wrapper bakes a stale snapshot of the initial animate targets into the
+// element's reactive style (combineStyle(props.style, createStyles(
+// getTarget()))) and re-applies it on every update, stomping running
+// geometry springs. Driving animate() directly from the measurement
+// effect avoids that entirely.
+import { animate, spring } from "@motionone/dom";
 
 type OverlayStatus = "hidden" | "recording" | "transcribing";
 
@@ -10,6 +17,83 @@ export function OverlayPage() {
   const [elapsed, setElapsed] = createSignal("0:00");
   const [startedAt, setStartedAt] = createSignal(0);
   const [tick, setTick] = createSignal(0);
+  // Live caption preview for long recordings — the latest PartialTranscript
+  const [captions, setCaptions] = createSignal<string | null>(null);
+
+  // ── Island geometry ───────────────────────────────────────────────
+  // The island's width/height/border-radius are spring-driven via
+  // imperative Motion One animate() calls. Targets are measured from the
+  // real DOM: the pill hugs the indicator row; the caption card fits the
+  // text, capped at 3 lines. The island stays hidden until its first
+  // measurement so it never paints at a stale or guessed size.
+  const [islandW, setIslandW] = createSignal(120);
+  const [islandH, setIslandH] = createSignal(28);
+  const [measured, setMeasured] = createSignal(false);
+  let islandRef: HTMLDivElement | undefined;
+  let rowRef: HTMLDivElement | undefined;
+  let captionRef: HTMLDivElement | undefined;
+  let islandControls: ReturnType<typeof animate> | undefined;
+
+  // Measure after render. Re-runs as captions grow (retargeting the
+  // spring) and as the timer text widens the collapsed pill.
+  createEffect(() => {
+    const text = captions();
+    void elapsed(); // dep: re-measure the pill when the timer ticks over
+    void startedAt(); // dep: re-measure every time a recording starts
+    void status(); // dep: the island (re)mounts on status changes
+
+    // Measure in a microtask: this effect is created BEFORE the caption
+    // <For> below, so it would otherwise run before the words reach the
+    // DOM (and before <Show> mounts the island) and read empty boxes.
+    queueMicrotask(() => {
+      // Skip detached nodes from a previous mount — nothing to size.
+      if (!rowRef || !rowRef.isConnected || !islandRef) {
+        setMeasured(false);
+        return;
+      }
+
+      let w: number, h: number;
+      if (!text) {
+        // Collapsed pill: row content + horizontal chrome (padding 12*2
+        // + border 1*2) + vertical chrome (padding 6*2 + border 1*2)
+        w = rowRef.offsetWidth + 26;
+        h = rowRef.offsetHeight + 14;
+      } else {
+        // Caption card: fixed 560 wide (536 text + chrome), height fits
+        // the text capped at 60px (3 lines) below the indicator row.
+        const textH = captionRef ? Math.min(captionRef.offsetHeight, 60) : 0;
+        w = 560;
+        h = rowRef.offsetHeight + 14 + 6 + textH;
+      }
+
+      // Ignore sub-pixel drift so identical re-measures don't re-trigger
+      // the animation.
+      const wChanged = Math.abs(islandW() - w) >= 1;
+      const hChanged = Math.abs(islandH() - h) >= 1;
+      if (!wChanged && !hChanged) return;
+      setIslandW(w);
+      setIslandH(h);
+
+      const radius = text ? "20px" : "9999px";
+      if (!measured()) {
+        // First sizing after (re)mount: apply instantly while hidden —
+        // never spring from a guess or a stale value.
+        islandRef.style.width = `${w}px`;
+        islandRef.style.height = `${h}px`;
+        islandRef.style.borderRadius = radius;
+        setMeasured(true);
+        return;
+      }
+
+      // Stop any in-flight spring, then spring to the new targets.
+      islandControls?.stop();
+      islandControls = animate(
+        islandRef,
+        { width: `${w}px`, height: `${h}px`, borderRadius: radius },
+        { easing: spring({ stiffness: 180, damping: 22 }) }
+      );
+    });
+  });
 
   // Force transparent background on the overlay window
   onMount(() => {
@@ -33,6 +117,10 @@ export function OverlayPage() {
           setStatus("recording");
           setStartedAt(Date.now());
           setElapsed("0:00");
+          setCaptions(null);
+          // Hide until re-measured — never paint a stale island size
+          // (e.g. the caption-card width from the previous recording).
+          setMeasured(false);
           break;
         // NOTE: the sidecar transcribes in its recording thread and only
         // emits TranscriptionReady (then RecordingStopped) once it's done.
@@ -44,9 +132,16 @@ export function OverlayPage() {
         case "RecordingCancelled":
         case "Error":
           setStatus("hidden");
+          setCaptions(null);
           break;
         case "AudioLevel":
           setAudioLevel(event.level as number);
+          break;
+        // Live preview of a long recording — replaces the whole caption
+        // text each time (the core dedupes identical updates). Preview
+        // only: the authoritative text arrives via TranscriptionReady.
+        case "PartialTranscript":
+          setCaptions(event.text as string);
           break;
       }
     });
@@ -123,68 +218,93 @@ export function OverlayPage() {
   const isTranscribing = () => status() === "transcribing";
   const isVisible = () => status() !== "hidden";
 
+  // Caption preview as word tokens — <For> keys by word, so words that
+  // persist across partial updates keep their DOM and don't re-animate;
+  // only newly spoken words fade in.
+  const captionWords = () => (captions() ?? "").split(/\s+/).filter(Boolean);
+
   return (
     <Show when={isVisible()}>
       <div class="fixed inset-0 flex items-start justify-center pt-3 pointer-events-none">
+        {/* One island, spring-morphed by Motion One's imperative
+            animate() (see the measurement effect): collapsed it's the
+            recording pill; live captions spring it open into a wider,
+            taller card. Geometry is written only by the animate calls —
+            keep it out of this element's reactive style. */}
         <div
-          class="flex items-center gap-2 px-3 py-1.5 rounded-full shadow-2xl no-select animate-slide-down"
+          ref={islandRef}
+          class="island no-select shadow-2xl"
+          classList={{
+            "animate-slide-down": measured(),
+            "island-live": hasAudio(),
+          }}
           style={{
-            "background-color": "rgba(26, 26, 46, 0.92)",
-            "backdrop-filter": "blur(12px)",
-            border: "1px solid rgba(233, 69, 96, 0.3)",
-            "box-shadow": hasAudio()
-              ? "0 0 12px rgba(233, 69, 96, 0.25)"
-              : "0 4px 20px rgba(0, 0, 0, 0.3)",
-            transition: "box-shadow 200ms ease",
+            // Hidden until the first real measurement lands. This is the
+            // ONLY reactive key — it flips while the island is invisible.
+            visibility: measured() ? "visible" : "hidden",
           }}
         >
-          <Show when={isRecording()}>
-            {/* Recording dot */}
-            <div
-              class="w-2 h-2 rounded-full animate-pulse-dot flex-shrink-0"
-              style={{ "background-color": "var(--recording-dot)" }}
-            />
+          <div class="island-row" ref={rowRef}>
+            <Show when={isRecording()}>
+              {/* Recording dot */}
+              <div
+                class="w-2 h-2 rounded-full animate-pulse-dot flex-shrink-0"
+                style={{ "background-color": "var(--recording-dot)" }}
+              />
 
-            {/* Waveform bars */}
-            <div class="flex items-center gap-[2px] h-4">
-              <For each={bars()}>
-                {(height) => (
-                  <div
-                    class="rounded-full"
-                    style={{
-                      width: "3px",
-                      height: `${height}px`,
-                      "background-color": hasAudio()
-                        ? "var(--accent)"
-                        : "rgba(233, 69, 96, 0.35)",
-                      transition: "height 80ms ease-out, background-color 200ms ease",
-                    }}
-                  />
-                )}
+              {/* Waveform bars */}
+              <div class="flex items-center gap-[2px] h-4">
+                <For each={bars()}>
+                  {(height) => (
+                    <div
+                      class="rounded-full"
+                      style={{
+                        width: "3px",
+                        height: `${height}px`,
+                        "background-color": hasAudio()
+                          ? "var(--accent)"
+                          : "rgba(233, 69, 96, 0.35)",
+                        transition: "height 80ms ease-out, background-color 200ms ease",
+                      }}
+                    />
+                  )}
+                </For>
+              </div>
+
+              <span
+                class="text-[11px] font-medium tabular-nums flex-shrink-0"
+                style={{ color: "rgba(232, 232, 240, 0.9)" }}
+              >
+                {elapsed()}
+              </span>
+            </Show>
+
+            <Show when={isTranscribing()}>
+              {/* Spinner — same accent treatment as the recording dot */}
+              <div
+                class="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0"
+                style={{ "border-color": "rgba(233, 69, 96, 0.35)", "border-top-color": "var(--accent)" }}
+              />
+              <span
+                class="text-[11px] font-medium flex-shrink-0"
+                style={{ color: "rgba(232, 232, 240, 0.9)" }}
+              >
+                Transcribing…
+              </span>
+            </Show>
+          </div>
+
+          {/* Live caption preview — always mounted so it can be measured
+              and clipped by the island's spring-animated box. Springs
+              open with the island and stays up through the "transcribing"
+              phase; clears with the final result. */}
+          <div class="caption-text" ref={captionRef}>
+            <div>
+              <For each={captionWords()}>
+                {(word) => <span class="caption-word">{word}</span>}
               </For>
             </div>
-
-            <span
-              class="text-[11px] font-medium tabular-nums flex-shrink-0"
-              style={{ color: "rgba(232, 232, 240, 0.9)" }}
-            >
-              {elapsed()}
-            </span>
-          </Show>
-
-          <Show when={isTranscribing()}>
-            {/* Spinner — same accent treatment as the recording dot */}
-            <div
-              class="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0"
-              style={{ "border-color": "rgba(233, 69, 96, 0.35)", "border-top-color": "var(--accent)" }}
-            />
-            <span
-              class="text-[11px] font-medium flex-shrink-0"
-              style={{ color: "rgba(232, 232, 240, 0.9)" }}
-            >
-              Transcribing…
-            </span>
-          </Show>
+          </div>
         </div>
       </div>
     </Show>

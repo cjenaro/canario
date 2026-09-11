@@ -57,6 +57,14 @@ pub struct AppConfig {
 
     /// Play sound effects on recording start/stop
     pub sound_effects: bool,
+
+    /// Stream live caption previews (PartialTranscript events) in the
+    /// overlay during long recordings
+    pub live_captions: bool,
+
+    /// Seconds of continuous recording before live captions kick in.
+    /// Shorter recordings stay silent (no partial decodes).
+    pub live_captions_threshold_secs: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -118,6 +126,8 @@ impl Default for AppConfig {
             post_processor: PostProcessor::default(),
             autostart: false,
             sound_effects: true,
+            live_captions: true,
+            live_captions_threshold_secs: 8.0,
         }
     }
 }
@@ -264,6 +274,9 @@ mod tests {
         assert_eq!(config.num_threads, 4);
         assert!(!config.autostart);
         assert!(config.sound_effects);
+        // Live captions default to on with the long-session threshold
+        assert!(config.live_captions);
+        assert_eq!(config.live_captions_threshold_secs, 8.0);
         assert!(config.custom_encoder_path.is_none());
     }
 
@@ -291,6 +304,11 @@ mod tests {
         assert_eq!(loaded.num_threads, config.num_threads);
         assert_eq!(loaded.auto_paste, config.auto_paste);
         assert_eq!(loaded.sound_effects, config.sound_effects);
+        assert_eq!(loaded.live_captions, config.live_captions);
+        assert_eq!(
+            loaded.live_captions_threshold_secs,
+            config.live_captions_threshold_secs
+        );
     }
 
     #[test]

@@ -239,6 +239,13 @@ fn handle_event(
             RecordingIndicator::update_level(app, level);
         }
 
+        // Live caption preview for long recordings — rendered by the
+        // Electron overlay. The GTK indicator shows no text yet, so the
+        // partial is only logged (follow-up: caption view in GTK).
+        Event::PartialTranscript { text } => {
+            tracing::debug!("Live partial transcript: {}", text);
+        }
+
         // Model download events are routed straight to the settings window's
         // registered download-status widgets (see model_manager.rs).
         Event::ModelDownloadProgress { progress: p } => {
