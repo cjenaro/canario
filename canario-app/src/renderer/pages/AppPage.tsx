@@ -10,7 +10,20 @@ import { WordRemapping } from "../components/WordRemapping";
 import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
 import { AppearanceSection } from "../components/AppearanceSection";
+import { MotionSection } from "../components/MotionSection";
 import { applyAppearance, cacheAppearanceForNextBoot, readCachedAppearance } from "../theme";
+import {
+  applyAnimations,
+  cacheAnimationsForNextBoot,
+  readCachedAnimations,
+  watchPrefersReducedMotion,
+} from "../motion";
+import {
+  animationsConfigPayload,
+  animationsFromConfig,
+  resolveAnimations,
+  type AnimationSettings,
+} from "../primitives/animations";
 import {
   appearanceFromConfig,
   resolveThemeMode,
@@ -58,6 +71,12 @@ export function AppPage() {
   const cachedAppearance = readCachedAppearance();
   const [themeMode, setThemeMode] = createSignal<ThemeMode>(cachedAppearance?.mode ?? "dark");
   const [accent, setAccent] = createSignal<AccentColor>(cachedAppearance?.accent ?? null);
+
+  // Animation preferences — same pattern (see index.html / motion.ts):
+  // seeded from the pre-paint cache, then AppConfig takes over below.
+  // The OS reduced-motion request force-disables via the resolver.
+  const [animations, setAnimations] = createSignal<AnimationSettings>(readCachedAnimations());
+  const [reducedMotion, setReducedMotion] = createSignal(false);
 
   // Track history items being animated out
   const [deletingIds, setDeletingIds] = createSignal<Set<string>>(new Set());
@@ -143,6 +162,20 @@ export function AppPage() {
     applyAppearance(themeMode(), accent());
   });
 
+  // Apply animation gating live (master + per-effect toggles + the OS
+  // reduced-motion override — resolved in primitives/animations.ts and
+  // matched by the root attributes in styles/animations.css)
+  createEffect(() => {
+    applyAnimations(resolveAnimations(animations(), reducedMotion()));
+  });
+
+  // Track the OS reduced-motion request live; it force-disables
+  // animations independent of the stored toggle.
+  onMount(() => {
+    const unwatch = watchPrefersReducedMotion(setReducedMotion);
+    onCleanup(unwatch);
+  });
+
   // Clear error after it's been shown
   createEffect(() => {
     const err = context().lastError;
@@ -222,6 +255,13 @@ export function AppPage() {
       setThemeMode(appearance.mode);
       setAccent(appearance.accent);
       cacheAppearanceForNextBoot(appearance);
+
+      // Animations — AppConfig (`animations`) is the source of truth;
+      // the effect above applies it and the cache covers the next
+      // boot's pre-paint script (plus the overlay window's sync).
+      const animationSettings = animationsFromConfig(cfg);
+      setAnimations(animationSettings);
+      cacheAnimationsForNextBoot(animationSettings);
 
       // 2. Check which models are downloaded
       for (const m of MODELS) {
@@ -420,6 +460,15 @@ export function AppPage() {
     setAccent(next);
     cacheAppearanceForNextBoot({ mode: themeMode(), accent: next });
     await canario.updateConfig({ accent_color: next });
+  }
+
+  async function handleAnimationsChange(next: AnimationSettings) {
+    setAnimations(next);
+    cacheAnimationsForNextBoot(next);
+    // update_config merges top-level keys wholesale — always send the
+    // FULL animations block so no sibling flag is dropped (see
+    // animationsConfigPayload).
+    await canario.updateConfig(animationsConfigPayload(next));
   }
 
   // Re-run the onboarding wizard (PRD §5.1): clear the persisted flag and
@@ -919,6 +968,16 @@ export function AppPage() {
               accent={accent()}
               onModeChange={handleModeChange}
               onAccentChange={handleAccentChange}
+            />
+          </section>
+
+          {/* ── Motion ────────────────────────────────────────────── */}
+          <section class="rounded-xl border p-5" style={sectionStyle}>
+            <h2 class={sectionHeader} style={sectionHeaderStyle}>Motion</h2>
+            <MotionSection
+              settings={animations()}
+              reducedMotion={reducedMotion()}
+              onChange={handleAnimationsChange}
             />
           </section>
 

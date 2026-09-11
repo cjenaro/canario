@@ -37,6 +37,48 @@
       }
     } catch (err) { /* ignore — the bundle re-applies after boot */ }
   </script>
+  <script>
+    // Pre-paint animation gating (master + per-effect toggles, PRD §8.4)
+    // from the last session's localStorage cache, with the OS
+    // prefers-reduced-motion request force-disabling everything
+    // independent of the stored toggles. Non-authoritative: the app
+    // bundle re-applies the AppConfig values after boot.
+    // Keep in sync with src/renderer/motion.ts (applyAnimations) and
+    // primitives/animations.ts (ANIMATIONS_CACHE_KEY + resolution).
+    try {
+      var ANIM_KEYS = ["enabled", "overlay_slide", "recording_dot_pulse", "toggle_slide", "delete_slide", "window_fade"];
+      var reducedMotion = false;
+      try { reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) {}
+      var animSettings = {};
+      function applyAnimAttrs() {
+        var root = document.documentElement;
+        var enabled = animSettings.enabled !== false && !reducedMotion;
+        root.setAttribute("data-animations", enabled ? "on" : "off");
+        for (var i = 1; i < ANIM_KEYS.length; i++) { // index 0 is the master flag
+          var key = ANIM_KEYS[i];
+          var on = animSettings[key] !== false; // lenient: only an explicit false disables
+          root.setAttribute("data-anim-" + key.replace(/_/g, "-"), enabled && on ? "on" : "off");
+        }
+      }
+      try { animSettings = JSON.parse(localStorage.getItem("canario.animations") || "{}") || {}; } catch (e) {}
+      if (!animSettings || typeof animSettings !== "object") animSettings = {};
+      applyAnimAttrs();
+      // Other same-origin windows (the overlay shares this file) re-apply
+      // when the settings window writes a new cache — storage events fire
+      // in every OTHER window.
+      window.addEventListener("storage", function (e) {
+        if (e.key !== "canario.animations") return;
+        try { animSettings = JSON.parse(e.newValue || "{}") || {}; } catch (err) { animSettings = {}; }
+        if (!animSettings || typeof animSettings !== "object") animSettings = {};
+        applyAnimAttrs();
+      });
+      // OS-level reduced-motion changes apply live too.
+      window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", function (e) {
+        reducedMotion = e.matches;
+        applyAnimAttrs();
+      });
+    } catch (err) { /* ignore — the bundle re-applies after boot */ }
+  </script>
 </head>
 <body>
   <div id="root"></div>

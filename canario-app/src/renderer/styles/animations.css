@@ -1,3 +1,41 @@
+/* ── Animation gating (Settings → Appearance → Motion) ──── */
+/* The document root carries attributes that gate every effect below:
+   • data-animations="off" — the master toggle is off, or the OS
+     requested reduced motion (primitives/animations.ts resolves it;
+     motion.ts and the index.html boot script apply it pre-paint).
+     Kills every animation in this file plus the toggle transitions.
+   • data-anim-overlay-slide / -recording-dot-pulse / -toggle-slide /
+     -delete-slide / -window-fade = "off" — one PRD §8.4 effect is
+     disabled while the master is on.
+   Disabled elements snap to their final state: every keyframe set
+   here ends at the element's natural styles, and the toggle
+   transitions simply jump. */
+html[data-animations="off"] .animate-pulse-dot,
+html[data-animations="off"] .animate-slide-down,
+html[data-animations="off"] .animate-fade-out,
+html[data-animations="off"] .caption-word,
+html[data-animations="off"] .animate-spin,
+html[data-animations="off"] .animate-slide-left,
+html[data-animations="off"] .animate-window-appear,
+html[data-animations="off"] .animate-toast-in,
+html[data-animations="off"] .animate-toast-out,
+html[data-animations="off"] .animate-error-shake,
+html[data-animations="off"] .animate-fade-in-up,
+html[data-anim-overlay-slide="off"] .animate-slide-down,
+html[data-anim-recording-dot-pulse="off"] .animate-pulse-dot,
+html[data-anim-delete-slide="off"] .animate-slide-left,
+html[data-anim-window-fade="off"] .animate-window-appear {
+  animation: none;
+}
+
+/* The toggle switch slide + color change (PRD §8.4) is a transition */
+html[data-animations="off"] .toggle-switch,
+html[data-animations="off"] .toggle-thumb,
+html[data-anim-toggle-slide="off"] .toggle-switch,
+html[data-anim-toggle-slide="off"] .toggle-thumb {
+  transition: none;
+}
+
 /* ── Recording dot pulse ─────────────────────────────────── */
 @keyframes pulse-dot {
   0%, 100% {

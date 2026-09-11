@@ -84,6 +84,15 @@ pub struct AppConfig {
     /// default top-center placement. Electron-side only for now — the
     /// GTK app keeps its fixed placement (see canario-aud.1).
     pub overlay_offsets: BTreeMap<String, OverlayOffset>,
+
+    /// Animation preferences (Settings → Appearance → Motion, PRD §8.4).
+    /// The Electron renderer resolves this block together with the OS
+    /// `prefers-reduced-motion` media query into `data-animations` /
+    /// `data-anim-*` attributes on the document root — see
+    /// canario-app/src/renderer/primitives/animations.ts (resolution),
+    /// motion.ts (application) and styles/animations.css (gating).
+    /// Defaults keep every effect on (the pre-existing behavior).
+    pub animations: AnimationSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -123,6 +132,46 @@ pub enum ThemeMode {
     Dark,
     Light,
     System,
+}
+
+/// Animation preferences (Settings → Appearance → Motion). `enabled` is
+/// the master switch; each flag gates one PRD §8.4 effect — the
+/// recording overlay slide-in (`overlay_slide`), the pulsing recording
+/// dot (`recording_dot_pulse`), the toggle-switch slide + color change
+/// (`toggle_slide`), the history-item delete slide-out (`delete_slide`)
+/// and the window-open fade + scale (`window_fade`).
+///
+/// The OS `prefers-reduced-motion` request overrides all of it in the
+/// renderer (force-disable, independent of the stored toggles). All
+/// flags default to true so old configs keep every effect running.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AnimationSettings {
+    /// Master switch — off disables every effect.
+    pub enabled: bool,
+    /// Recording overlay slide-down + fade on appear.
+    pub overlay_slide: bool,
+    /// Pulsing red recording dot.
+    pub recording_dot_pulse: bool,
+    /// Toggle-switch slide + color change.
+    pub toggle_slide: bool,
+    /// History-item slide-left + fade on delete.
+    pub delete_slide: bool,
+    /// Window-open fade + scale.
+    pub window_fade: bool,
+}
+
+impl Default for AnimationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            overlay_slide: true,
+            recording_dot_pulse: true,
+            toggle_slide: true,
+            delete_slide: true,
+            window_fade: true,
+        }
+    }
 }
 
 /// Resolved filesystem paths to the four sherpa-onnx model files.
@@ -171,6 +220,7 @@ impl Default for AppConfig {
             theme: ThemeMode::Dark,
             accent_color: None,
             overlay_offsets: BTreeMap::new(),
+            animations: AnimationSettings::default(),
         }
     }
 }
@@ -326,6 +376,8 @@ mod tests {
         assert_eq!(config.accent_color, None);
         // Overlay placement defaults to "not user-positioned yet"
         assert!(config.overlay_offsets.is_empty());
+        // Animations default to fully on (existing behavior)
+        assert_eq!(config.animations, AnimationSettings::default());
     }
 
     #[test]
@@ -360,6 +412,7 @@ mod tests {
         assert_eq!(loaded.theme, config.theme);
         assert_eq!(loaded.accent_color, config.accent_color);
         assert_eq!(loaded.overlay_offsets, config.overlay_offsets);
+        assert_eq!(loaded.animations, config.animations);
     }
 
     #[test]
@@ -478,6 +531,126 @@ mod tests {
         cleared["overlay_offsets"] = serde_json::json!({});
         let cleared: AppConfig = serde_json::from_value(cleared).unwrap();
         assert!(cleared.overlay_offsets.is_empty());
+    }
+
+    #[test]
+    fn animations_default_to_all_on() {
+        // Old configs (and `{}`) have no animations key — the master
+        // switch stays on and every effect keeps running.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.animations, AnimationSettings::default());
+        assert!(config.animations.enabled);
+        assert!(config.animations.overlay_slide);
+        assert!(config.animations.recording_dot_pulse);
+        assert!(config.animations.toggle_slide);
+        assert!(config.animations.delete_slide);
+        assert!(config.animations.window_fade);
+        // The default config serializes the full block explicitly —
+        // the wire shape the Electron renderer reads and writes.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(
+            r#""animations":{"enabled":true,"overlay_slide":true,"recording_dot_pulse":true,"toggle_slide":true,"delete_slide":true,"window_fade":true}"#
+        ));
+    }
+
+    #[test]
+    fn parses_animations() {
+        let json = r#"{
+            "animations": {
+                "enabled": false,
+                "overlay_slide": true,
+                "recording_dot_pulse": false,
+                "toggle_slide": true,
+                "delete_slide": false,
+                "window_fade": true
+            }
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.animations.enabled);
+        assert!(config.animations.overlay_slide);
+        assert!(!config.animations.recording_dot_pulse);
+        assert!(config.animations.toggle_slide);
+        assert!(!config.animations.delete_slide);
+        assert!(config.animations.window_fade);
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+    }
+
+    #[test]
+    fn animations_partial_block_uses_defaults() {
+        // serde(default) on the block: subfields missing from the wire
+        // (e.g. written by a NEWER version) keep their defaults.
+        let config: AppConfig =
+            serde_json::from_str(r#"{"animations":{"enabled":false}}"#).unwrap();
+        assert!(!config.animations.enabled);
+        assert!(config.animations.overlay_slide);
+        assert!(config.animations.recording_dot_pulse);
+        assert!(config.animations.toggle_slide);
+        assert!(config.animations.delete_slide);
+        assert!(config.animations.window_fade);
+    }
+
+    #[test]
+    fn animations_round_trip() {
+        let config = AppConfig {
+            animations: AnimationSettings {
+                enabled: true,
+                overlay_slide: true,
+                recording_dot_pulse: false,
+                toggle_slide: false,
+                delete_slide: true,
+                window_fade: false,
+            },
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        // Serialized with the snake_case keys the renderer's
+        // primitives/animations.ts mirrors.
+        assert!(json.contains(r#""recording_dot_pulse":false"#));
+        assert!(json.contains(r#""window_fade":false"#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.animations, config.animations);
+    }
+
+    #[test]
+    fn animations_apply_as_a_whole_key() {
+        // update_config merges top-level keys wholesale: the renderer
+        // always sends the FULL block (existing flags merged client-side
+        // plus the change), so sibling toggles survive an update. Model
+        // that merge here.
+        let current_json = serde_json::to_value(&AppConfig {
+            animations: AnimationSettings {
+                enabled: true,
+                overlay_slide: true,
+                recording_dot_pulse: false,
+                toggle_slide: true,
+                delete_slide: true,
+                window_fade: true,
+            },
+            ..AppConfig::default()
+        })
+        .unwrap();
+        let mut merged = current_json.clone();
+        merged["animations"] = serde_json::json!({
+            "enabled": true,
+            "overlay_slide": true,
+            "recording_dot_pulse": false,
+            "toggle_slide": false,
+            "delete_slide": true,
+            "window_fade": true
+        });
+        let merged: AppConfig = serde_json::from_value(merged).unwrap();
+        assert!(!merged.animations.toggle_slide);
+        // The sibling flag survived the whole-key replacement.
+        assert!(!merged.animations.recording_dot_pulse);
+        // A PARTIAL block resets unmentioned flags to defaults instead
+        // of keeping them — which is why the renderer always sends
+        // every key (animationsConfigPayload).
+        let mut partial = current_json;
+        partial["animations"] = serde_json::json!({ "enabled": false });
+        let partial: AppConfig = serde_json::from_value(partial).unwrap();
+        assert!(!partial.animations.enabled);
+        assert!(partial.animations.recording_dot_pulse);
     }
 
     #[test]
