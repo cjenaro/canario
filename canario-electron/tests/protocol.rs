@@ -471,6 +471,143 @@ fn hotkey_status_after_start_settles_and_carries_fix_command() {
     }
 }
 
+/// A pre-unification Electron login entry (the contents the deleted
+/// canario-app autostart.ts writer used to emit).
+const LEGACY_AUTOSTART_ENTRY: &str = "\
+[Desktop Entry]
+Type=Application
+Name=Canario
+Comment=Voice-to-text
+Exec=/opt/Canario/canario-electron
+Icon=com.canario.Canario
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+Hidden=false
+";
+
+#[test]
+fn set_autostart_with_exec_writes_regular_entry_and_syncs_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = tmp
+        .path()
+        .join("config/autostart/com.canario.Canario.desktop");
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    sidecar.send(json!({
+        "cmd": "set_autostart",
+        "id": "as-1",
+        "enabled": true,
+        "exec": "/usr/bin/fake-canario"
+    }));
+    let resp = sidecar.wait_for("as-1");
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(resp["data"]["enabled"], json!(true));
+
+    // A standalone REGULAR file (not a symlink) embedding the exec.
+    let meta = std::fs::symlink_metadata(&entry).unwrap();
+    assert!(meta.is_file(), "exec entry must be a regular file");
+    let contents = std::fs::read_to_string(&entry).unwrap();
+    assert!(
+        contents.contains("Exec=/usr/bin/fake-canario"),
+        "entry should embed the given exec: {contents}"
+    );
+
+    // config.autostart moved with the filesystem.
+    sidecar.send(json!({ "cmd": "get_config", "id": "as-cfg-1" }));
+    let resp = sidecar.wait_for("as-cfg-1");
+    assert_eq!(resp["data"]["autostart"], json!(true));
+}
+
+#[test]
+fn set_autostart_disable_removes_entry_and_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = tmp
+        .path()
+        .join("config/autostart/com.canario.Canario.desktop");
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    sidecar.send(json!({
+        "cmd": "set_autostart",
+        "id": "as-on",
+        "enabled": true,
+        "exec": "/usr/bin/fake-canario"
+    }));
+    assert_eq!(sidecar.wait_for("as-on")["ok"], json!(true));
+
+    // Disable without an exec — the parameter is only meaningful for
+    // enabling.
+    sidecar.send(json!({ "cmd": "set_autostart", "id": "as-off", "enabled": false }));
+    let resp = sidecar.wait_for("as-off");
+    assert_eq!(resp["ok"], json!(true));
+    assert_eq!(resp["data"]["enabled"], json!(false));
+    assert!(!entry.exists(), "login entry must be gone");
+
+    sidecar.send(json!({ "cmd": "get_config", "id": "as-cfg-2" }));
+    let resp = sidecar.wait_for("as-cfg-2");
+    assert_eq!(resp["data"]["autostart"], json!(false));
+}
+
+#[test]
+fn legacy_autostart_entry_is_renamed_on_sidecar_boot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let autostart_dir = tmp.path().join("config/autostart");
+    std::fs::create_dir_all(&autostart_dir).unwrap();
+    std::fs::write(
+        autostart_dir.join("canario.desktop"),
+        LEGACY_AUTOSTART_ENTRY,
+    )
+    .unwrap();
+
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    // Wait until the sidecar is actually serving before inspecting the
+    // filesystem — migration runs during startup, before the command
+    // loop, and spawn() alone doesn't wait for it.
+    sidecar.send(json!({ "cmd": "ping", "id": "booted" }));
+    assert_eq!(sidecar.wait_for("booted")["ok"], json!(true));
+
+    // Renamed to the unified identity, content preserved, no duplicate.
+    let contents = std::fs::read_to_string(autostart_dir.join("com.canario.Canario.desktop"))
+        .expect("legacy entry should have been renamed to the unified identity");
+    assert_eq!(contents, LEGACY_AUTOSTART_ENTRY);
+    assert!(!autostart_dir.join("canario.desktop").exists());
+    assert_eq!(std::fs::read_dir(&autostart_dir).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_autostart_entry_is_removed_when_new_identity_already_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let autostart_dir = tmp.path().join("config/autostart");
+    std::fs::create_dir_all(&autostart_dir).unwrap();
+    std::fs::write(
+        autostart_dir.join("canario.desktop"),
+        LEGACY_AUTOSTART_ENTRY,
+    )
+    .unwrap();
+    std::fs::write(
+        autostart_dir.join("com.canario.Canario.desktop"),
+        "already unified",
+    )
+    .unwrap();
+
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+
+    sidecar.send(json!({ "cmd": "ping", "id": "booted" }));
+    assert_eq!(sidecar.wait_for("booted")["ok"], json!(true));
+
+    assert!(
+        !autostart_dir.join("canario.desktop").exists(),
+        "the duplicate legacy entry must be removed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(autostart_dir.join("com.canario.Canario.desktop")).unwrap(),
+        "already unified",
+        "the new-identity entry wins when both exist"
+    );
+    assert_eq!(std::fs::read_dir(&autostart_dir).unwrap().count(), 1);
+}
+
 #[test]
 fn shutdown_responds_ok_and_exits() {
     let mut sidecar = Sidecar::spawn();

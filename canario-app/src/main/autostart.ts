@@ -1,56 +1,50 @@
 // Autostart on login — cross-platform
-// macOS/Windows: Electron's app.setLoginItemSettings()
-// Linux: .desktop file in ~/.config/autostart/
+// macOS/Windows: Electron's app.setLoginItemSettings(), with the
+// config.autostart flag persisted through the sidecar's update_config.
+// Linux: fully delegated to the sidecar's set_autostart command, which
+// owns the ~/.config/autostart entry AND persists config.autostart on
+// success (canario-dmp.17 — one writer, no split-brain).
 
 import { app } from "electron";
-import { join } from "path";
-import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "fs";
+import { sendCommand } from "./sidecar.js";
 
-function getLinuxAutostartDir(): string {
-  const configHome = process.env.XDG_CONFIG_HOME || join(process.env.HOME || "~", ".config");
-  return join(configHome, "autostart");
+// Ids only need uniqueness while a response is pending (the sidecar
+// matches responses by id) — a module counter suffices, same pattern as
+// createCanario.ts nextId().
+let autostartSeq = 0;
+
+function nextAutostartId(): string {
+  autostartSeq += 1;
+  return `autostart-${autostartSeq}`;
 }
 
-function getLinuxAutostartPath(): string {
-  return join(getLinuxAutostartDir(), "canario.desktop");
-}
-
-function setLinuxAutostart(enabled: boolean): boolean {
-  try {
-    const autostartPath = getLinuxAutostartPath();
-
-    if (enabled) {
-      const autostartDir = getLinuxAutostartDir();
-      mkdirSync(autostartDir, { recursive: true });
-
-      // Use app.getPath("exe") for the correct binary path
-      const exePath = app.isPackaged ? app.getPath("exe") : process.execPath;
-
-      const desktopEntry = `[Desktop Entry]
-Type=Application
-Name=Canario
-Comment=Voice-to-text
-Exec=${exePath}
-Icon=com.canario.Canario
-Terminal=false
-Categories=Utility;
-X-GNOME-Autostart-enabled=true
-Hidden=false
-`;
-      writeFileSync(autostartPath, desktopEntry, "utf-8");
-    } else {
-      if (existsSync(autostartPath)) {
-        unlinkSync(autostartPath);
+/** Enable or disable autostart on login. Returns false on failure. */
+export async function setAutostart(enabled: boolean): Promise<boolean> {
+  if (process.platform === "linux") {
+    try {
+      const resp = await sendCommand({
+        id: nextAutostartId(),
+        cmd: "set_autostart",
+        enabled,
+        // exec makes the sidecar write a standalone entry pointing at
+        // this binary; without it it would symlink the installed menu
+        // entry. Dev runs under Electron's own binary, packaged runs
+        // the app executable.
+        exec: app.isPackaged ? app.getPath("exe") : process.execPath,
+      });
+      if (resp.ok !== true) {
+        console.error("[autostart] set_autostart rejected:", resp.error);
+        return false;
       }
+      return true;
+    } catch (err) {
+      // Sidecar down or timed out (10s) — sendCommand rejects.
+      console.error("[autostart] set_autostart command failed:", err);
+      return false;
     }
-    return true;
-  } catch (err) {
-    console.error("[autostart] Failed to set Linux autostart:", err);
-    return false;
   }
-}
 
-function setMacWindowsAutostart(enabled: boolean): boolean {
+  // macOS/Windows: the OS login item is Electron's to manage.
   try {
     app.setLoginItemSettings({
       openAtLogin: enabled,
@@ -58,17 +52,27 @@ function setMacWindowsAutostart(enabled: boolean): boolean {
       // is no longer supported). Canario hides from the Dock once ready, so
       // the login-item launch still lands in the tray.
     });
-    return true;
   } catch (err) {
     console.error("[autostart] Failed to set login item:", err);
     return false;
   }
-}
 
-/** Enable or disable autostart on login */
-export function setAutostart(enabled: boolean): boolean {
-  if (process.platform === "linux") {
-    return setLinuxAutostart(enabled);
+  // The settings switch derives from config.autostart, so keep the flag
+  // in sync. On failure return false — the OS entry may have changed but
+  // the flag write didn't; the renderer's toast/revert handles that.
+  try {
+    const resp = await sendCommand({
+      id: nextAutostartId(),
+      cmd: "update_config",
+      config: { autostart: enabled },
+    });
+    if (resp.ok !== true) {
+      console.error("[autostart] update_config rejected:", resp.error);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[autostart] update_config command failed:", err);
+    return false;
   }
-  return setMacWindowsAutostart(enabled);
 }

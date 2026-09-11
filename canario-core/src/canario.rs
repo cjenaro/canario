@@ -532,9 +532,31 @@ impl Canario {
     }
 
     /// Install .desktop file and icon for the current user.
+    ///
+    /// Also absorbs any legacy Electron-written login entry on the way
+    /// (canario-dmp.17) so frontends calling this at startup migrate
+    /// for free. A failed migration only logs — the menu entry must
+    /// still be installed.
     pub fn install_desktop_files(&self) -> anyhow::Result<()> {
+        if let Err(e) = crate::config::autostart::migrate_legacy_autostart() {
+            tracing::warn!("Legacy autostart migration failed: {}", e);
+        }
         crate::config::autostart::install_desktop_file()?;
         Ok(())
+    }
+
+    /// Toggle login autostart through the one shared implementation and
+    /// keep config.autostart in agreement. Filesystem changes happen
+    /// first; the flag is persisted only if they succeeded, so a failed
+    /// toggle leaves state untouched. exec=None symlinks the installed
+    /// menu entry (Exec=canario); Some(exec) writes a standalone entry.
+    pub fn set_autostart(&self, enabled: bool, exec: Option<&str>) -> anyhow::Result<()> {
+        if enabled {
+            crate::config::autostart::enable_autostart(exec)?;
+        } else {
+            crate::config::autostart::disable_autostart()?;
+        }
+        self.update_config(|cfg| cfg.autostart = enabled)
     }
 }
 

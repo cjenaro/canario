@@ -1108,6 +1108,7 @@ Full list of commands the sidecar accepts, with their parameters and responses:
 | `stop_hotkey` | — | — | Stops listener |
 | `restart_hotkey` | — | — | Reloads config + restarts |
 | `hotkey_status` | — | `HotkeyStatus` | Hotkey backend health; Linux evdev permission failures carry `fix_command` |
+| `set_autostart` | `enabled`, `exec` (optional) | `{ enabled: bool }` | Creates/removes the single login entry (`~/.config/autostart/com.canario.Canario.desktop`) and keeps `config.autostart` in sync; `exec` writes a standalone entry, omit it to symlink the menu entry |
 | `ping` | — | `{ pong: true, version: "0.1.2" }` | Health check |
 | `diagnostics` | — | `Diagnostics` JSON (see below) | Reads log tail, probes tools |
 | `shutdown` | — | — | Stops recording + hotkey, exits |

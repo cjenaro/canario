@@ -286,12 +286,14 @@ fn build_settings_window(app: &adw::Application, canario: &Canario) -> adw::Appl
     let autostart_row = adw::SwitchRow::new();
     autostart_row.set_title("Start on Login");
     autostart_row.set_subtitle("Launch Canario automatically when you log in");
-    autostart_row.set_active(canario_core::autostart::is_autostart_enabled().unwrap_or(false));
+    // The config flag is the single source of truth (canario-dmp.17) —
+    // probing the autostart dir would disagree with it before the
+    // legacy migration runs.
+    autostart_row.set_active(config.autostart);
+    let c = canario.clone();
     autostart_row.connect_notify(Some("active"), move |row, _| {
-        if row.is_active() {
-            let _ = canario_core::autostart::enable_autostart();
-        } else {
-            let _ = canario_core::autostart::disable_autostart();
+        if let Err(error) = c.set_autostart(row.is_active(), None) {
+            tracing::error!("Could not save autostart setting: {}", error);
         }
     });
     behavior_group.add(&autostart_row);

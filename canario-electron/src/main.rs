@@ -95,6 +95,15 @@ enum Command {
     RestartHotkey { id: String },
     #[serde(rename = "hotkey_status")]
     HotkeyStatus { id: String },
+    #[serde(rename = "set_autostart")]
+    SetAutostart {
+        id: String,
+        enabled: bool,
+        /// Launch command for the standalone login entry. `None` links
+        /// the installed menu entry (`Exec=canario`) instead — Electron
+        /// callers pass their own exe path here.
+        exec: Option<String>,
+    },
     #[serde(rename = "ping")]
     Ping { id: String },
     #[serde(rename = "diagnostics")]
@@ -174,6 +183,14 @@ fn main() -> anyhow::Result<()> {
     info!("Canario Electron sidecar starting...");
 
     let (canario, rx) = canario_core::Canario::new()?;
+
+    // Absorb the legacy Electron-written login entry (canario-dmp.17).
+    // Non-fatal: the sidecar must still boot if migration fails — the
+    // entry is absorbed on a later successful run or by the next
+    // explicit set_autostart.
+    if let Err(e) = canario_core::autostart::migrate_legacy_autostart() {
+        warn!("Legacy autostart migration failed: {}", e);
+    }
 
     // Spawn event forwarder thread: reads from canario-core channel,
     // writes JSON events to stdout.
@@ -369,6 +386,19 @@ fn handle_command(
             let status = canario.hotkey_status();
             write_json(&ok_data(&id, serde_json::to_value(&status).unwrap()));
         }
+        // One shared login-entry implementation for every frontend
+        // (canario-dmp.17): the entry and config.autostart move
+        // together, so the frontends can never double-launch at login.
+        Command::SetAutostart { id, enabled, exec } => {
+            match canario.set_autostart(enabled, exec.as_deref()) {
+                Ok(()) => {
+                    let now_enabled =
+                        canario_core::autostart::is_autostart_enabled().unwrap_or(enabled);
+                    write_json(&ok_data(&id, serde_json::json!({ "enabled": now_enabled })));
+                }
+                Err(e) => write_json(&err(&id, e.to_string())),
+            }
+        }
         Command::Ping { id } => {
             write_json(&ok_data(
                 &id,
@@ -474,10 +504,16 @@ mod tests {
         // must accept it like any other known AppConfig key.
         let mut cfg = canario_core::AppConfig::default();
         assert!(!cfg.onboarding_completed);
-        merge_config(&mut cfg, &serde_json::json!({ "onboarding_completed": true }));
+        merge_config(
+            &mut cfg,
+            &serde_json::json!({ "onboarding_completed": true }),
+        );
         assert!(cfg.onboarding_completed);
         // And back off (Settings → About "Re-run onboarding")
-        merge_config(&mut cfg, &serde_json::json!({ "onboarding_completed": false }));
+        merge_config(
+            &mut cfg,
+            &serde_json::json!({ "onboarding_completed": false }),
+        );
         assert!(!cfg.onboarding_completed);
         // Untouched field keeps default
         assert!(cfg.auto_paste);

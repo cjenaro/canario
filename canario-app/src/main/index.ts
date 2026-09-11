@@ -349,10 +349,8 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     globalShortcut.unregisterAll();
   });
 
-  // Autostart on login
-  ipcMain.handle("app:setAutostart", async (_e, enabled: boolean) => {
-    return setAutostart(enabled);
-  });
+  // Autostart on login (delegates to the sidecar — see autostart.ts)
+  ipcMain.handle("app:setAutostart", (_e, enabled: boolean) => setAutostart(enabled));
 
   // Version info
   ipcMain.handle("app:version", () => getVersionInfo());

@@ -410,16 +410,10 @@ export function AppPage() {
   }
 
   async function handleConfigToggle(field: string, value: boolean) {
-    await canario.updateConfig({ [field]: value });
-    if (field === "auto_paste") setAutoPaste(value);
-    if (field === "sound_effects") setSoundEffects(value);
-    if (field === "live_captions") setLiveCaptions(value);
-    if (field === "show_tray_icon") {
-      setShowTrayIcon(value);
-      if (!value) {
-        showToast("Tray icon hidden — relaunch Canario to reopen this window", "info", 5000);
-      }
-    }
+    // Autostart bypasses the generic updateConfig path: setAutostart owns
+    // both the OS entry and the config.autostart flag (the sidecar persists
+    // them together). Writing the flag here first would re-split them if
+    // the OS-entry call then failed — the canario-dmp.17 drift bug.
     if (field === "autostart") {
       setAutostart(value);
       const ok = await canario.setAutostart(value);
@@ -429,6 +423,17 @@ export function AppPage() {
         return;
       }
       showToast(value ? "Canario will start on login" : "Autostart disabled", "info", 3000);
+      return;
+    }
+    await canario.updateConfig({ [field]: value });
+    if (field === "auto_paste") setAutoPaste(value);
+    if (field === "sound_effects") setSoundEffects(value);
+    if (field === "live_captions") setLiveCaptions(value);
+    if (field === "show_tray_icon") {
+      setShowTrayIcon(value);
+      if (!value) {
+        showToast("Tray icon hidden — relaunch Canario to reopen this window", "info", 5000);
+      }
     }
   }
 
