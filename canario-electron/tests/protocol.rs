@@ -850,21 +850,15 @@ fn list_audio_devices_responds_ok_with_a_name_array() {
         );
     }
 
-    // Conditional on the runner having an input device (queried in
-    // THIS process, real env): the sidecar's list must be non-empty.
-    // A stronger cross-check — set-equality with a local enumeration,
-    // or presence of the default device's own name — is NOT portable:
-    // the harness gives the sidecar a hermetic XDG_RUNTIME_DIR, which
-    // legitimately hides host pseudo-device PCMs ("default",
-    // "pipewire") from ITS enumeration while this process still sees
-    // them.
-    use cpal::traits::HostTrait;
-    if cpal::default_host().default_input_device().is_some() {
-        assert!(
-            !devices.is_empty(),
-            "a runner with an input device must list at least one: {devices:?}"
-        );
-    }
+    // No non-empty cross-check: it is NOT portable. The harness gives
+    // the sidecar a hermetic XDG_RUNTIME_DIR, which legitimately hides
+    // host pseudo-device PCMs ("default", "pipewire") from ITS
+    // enumeration while the parent process still sees them. That split
+    // is real, not theoretical: ubuntu-latest CI runners report a
+    // default input device to the parent yet yield an empty list
+    // inside the hermetic sidecar (run 34644745332). Machines with
+    // actual hardware cover the non-empty path in manual QA and the
+    // ignored end-to-end recording test.
 }
 
 #[test]
