@@ -22,8 +22,15 @@ import {
   type OverlayOffset,
   type OverlayOffsets,
 } from "../primitives/overlayPlacement";
-
-type OverlayStatus = "hidden" | "recording" | "transcribing";
+// Overlay lifecycle states + the pure transition table (fgm.4) —
+// "transforming" mirrors "transcribing" for the stop→result window
+// that contains the LLM pass when the transform block is enabled.
+import {
+  nextOverlayStatusOnPush,
+  overlayBusyLabel,
+  overlayStatusFromEvent,
+  type OverlayStatus,
+} from "../primitives/overlayStatus";
 
 /** Island rect in window-relative client coords, reported to the main process. */
 type IslandRect = { x: number; y: number; width: number; height: number };
@@ -270,28 +277,29 @@ export function OverlayPage() {
     const unsub = api.onEvent((event) => {
       const name = event.event as string;
 
-      switch (name) {
-        case "RecordingStarted":
-          setStatus("recording");
+      // Lifecycle events map through the pure transition table
+      // (overlayStatus.ts): RecordingStarted flips us to recording;
+      // every pipeline's terminal events (TranscriptionReady /
+      // RecordingStopped / RecordingCancelled / Error) dismiss the
+      // island — including from the "transforming" phase, exactly as
+      // they dismissed "transcribing" before fgm.4. If no terminal
+      // event ever arrived the island would persist, same as today;
+      // the sidecar's transform timeout (fgm.1 D5d) guarantees one.
+      const next = overlayStatusFromEvent(name);
+      if (next !== null) {
+        setStatus(next);
+        if (next === "recording") {
           setStartedAt(Date.now());
           setElapsed("0:00");
-          setCaptions(null);
           // Hide until re-measured — never paint a stale island size
           // (e.g. the caption-card width from the previous recording).
           setMeasured(false);
-          break;
-        // NOTE: the sidecar transcribes in its recording thread and only
-        // emits TranscriptionReady (then RecordingStopped) once it's done.
-        // RecordingStopped is therefore the FINAL event of every pipeline —
-        // the "transcribing" state is entered via the "overlay:status" push
-        // from the main process when a stop command succeeds (see below).
-        case "RecordingStopped":
-        case "TranscriptionReady":
-        case "RecordingCancelled":
-        case "Error":
-          setStatus("hidden");
-          setCaptions(null);
-          break;
+        }
+        setCaptions(null);
+        return;
+      }
+
+      switch (name) {
         case "AudioLevel":
           setAudioLevel(event.level as number);
           break;
@@ -307,9 +315,14 @@ export function OverlayPage() {
     onCleanup(unsub);
   });
 
-  // ── Transcribing state pushed by the main process ────────────────
+  // ── Busy phases pushed by the main process ───────────────────────
   // Sent when a stop/toggle-stop command succeeds; covers every stop path
   // (tray, global shortcut, UI button, Linux hotkey via HotkeyTriggered).
+  // "transcribing" labels the silent stop→result window as before;
+  // "transforming" (fgm.4) is what main pushes when the transform block
+  // is enabled — the sidecar's LLM pass runs in that same window, before
+  // TranscriptionReady fires. The transition table ignores pushes that
+  // would resurrect a hidden overlay (stale) or repeat the current state.
   onMount(() => {
     const onStatus = (window as any).canario?.onOverlayStatus as
       | ((cb: (status: string) => void) => () => void)
@@ -317,8 +330,9 @@ export function OverlayPage() {
     if (!onStatus) return;
 
     const unsub = onStatus((s) => {
-      if (s === "transcribing" && status() === "recording") {
-        setStatus("transcribing");
+      const next = nextOverlayStatusOnPush(status(), s);
+      if (next !== null) {
+        setStatus(next);
       }
     });
 
@@ -373,7 +387,9 @@ export function OverlayPage() {
   };
 
   const isRecording = () => status() === "recording";
-  const isTranscribing = () => status() === "transcribing";
+  // Both post-stop phases share one visual (spinner + label); the
+  // label distinguishes them (fgm.4: "Transforming…" for the LLM pass).
+  const isBusy = () => status() === "transcribing" || status() === "transforming";
   const isVisible = () => status() !== "hidden";
 
   // Caption preview as word tokens — <For> keys by word, so words that
@@ -495,8 +511,9 @@ export function OverlayPage() {
               </span>
             </Show>
 
-            <Show when={isTranscribing()}>
-              {/* Spinner — same accent treatment as the recording dot */}
+            <Show when={isBusy()}>
+              {/* Spinner — same accent treatment as the recording dot;
+                  the label distinguishes the two busy phases. */}
               <div
                 class="w-3 h-3 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0"
                 style={{ "border-color": "rgba(233, 69, 96, 0.35)", "border-top-color": "var(--accent)" }}
@@ -505,15 +522,16 @@ export function OverlayPage() {
                 class="text-[11px] font-medium flex-shrink-0"
                 style={{ color: "rgba(232, 232, 240, 0.9)" }}
               >
-                Transcribing…
+                {overlayBusyLabel(status())}
               </span>
             </Show>
           </div>
 
           {/* Live caption preview — always mounted so it can be measured
               and clipped by the island's spring-animated box. Springs
-              open with the island and stays up through the "transcribing"
-              phase; clears with the final result. */}
+              open with the island and stays up through the busy
+              (transcribing / transforming) phases; clears with the
+              final result. */}
           <div class="caption-text" ref={captionRef}>
             <div>
               <For each={captionWords()}>

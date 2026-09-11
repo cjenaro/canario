@@ -3,6 +3,7 @@
 
 import { onCleanup, onMount } from "solid-js";
 import type { AppMachine } from "../state/machine";
+import { transcriptionTransformFailed } from "./transform";
 
 // Type for the preload-exposed API
 interface CanarioAPI {
@@ -326,6 +327,33 @@ export function createCanario(machine: AppMachine) {
     }
   }
 
+  // ── Transform fallback notification (fgm.4) ────────────────────────
+  // fgm.1 D5d: on timeout or any transform error the sidecar still
+  // emits TranscriptionReady carrying the RAW text — dictation never
+  // blocks and the raw paste already happened by the time anyone
+  // hears about the failure. Subscribers (AppPage) surface one subtle
+  // settings-window toast; the overlay is deliberately untouched.
+  // Dormant until the core actually puts a failure flag on the event
+  // (see transcriptionTransformFailed for the shapes coded against).
+  const transformFallbackListeners = new Set<(event: Record<string, unknown>) => void>();
+
+  function onTransformFallback(callback: (event: Record<string, unknown>) => void): () => void {
+    transformFallbackListeners.add(callback);
+    return () => {
+      transformFallbackListeners.delete(callback);
+    };
+  }
+
+  function notifyTransformFallback(event: Record<string, unknown>) {
+    for (const listener of transformFallbackListeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        console.error("Transform-fallback listener error:", err);
+      }
+    }
+  }
+
   // ── Event listener ─────────────────────────────────────────────────
 
   onMount(() => {
@@ -374,6 +402,15 @@ export function createCanario(machine: AppMachine) {
           });
           send({ type: "TRANSCRIPTION_READY" });
           api.hideOverlay();
+          // fgm.4: a transform-failure flag on the event means the
+          // text above (and the main-process paste) is the RAW
+          // transcript — the D5d fallback. Notify subscribers for the
+          // settings toast; nothing about the machine/paste path
+          // changes. event.text is the canonical value either way
+          // (D3) — no code path reads a raw field for pasting.
+          if (transcriptionTransformFailed(event)) {
+            notifyTransformFallback(event);
+          }
           break;
 
         case "RecordingCancelled":
@@ -482,6 +519,7 @@ export function createCanario(machine: AppMachine) {
       pickFile,
       onNavigateHistory,
       onModelDownloadComplete,
+      onTransformFallback,
       transformStatus,
       transformTest,
       setTransformKey,

@@ -47,9 +47,11 @@ import {
   transformConfigPayload,
   transformFromConfig,
   transformTestResultFromResponse,
+  shouldShowTransformFallbackToast,
   type TransformSettings,
   type TransformTestState,
 } from "../primitives/transform";
+import { isTransformedHistoryEntry } from "../primitives/historyEntry";
 
 const MODELS = [
   { id: "ParakeetV3", name: "Parakeet TDT v3", desc: "Multilingual · ~640MB" },
@@ -60,7 +62,11 @@ const MODELS = [
 const CUSTOM_MODEL = { id: CUSTOM_MODEL_ID, name: "Custom model", desc: "Local sherpa-onnx files · no download" };
 const ALL_MODELS = [...MODELS, CUSTOM_MODEL];
 
-type HistoryEntry = { id: string; text: string; duration_secs: number; timestamp: string };
+// raw_text: optional pre-transform transcript (fgm.1 D3) — the sidecar
+// stores it ONLY when it differs from the canonical `text`; absent on
+// old entries and whenever no transformation ran, so consumers must
+// treat it as maybe-missing (see isTransformedHistoryEntry).
+type HistoryEntry = { id: string; text: string; duration_secs: number; timestamp: string; raw_text?: string | null };
 
 // Read a numeric AppConfig field, falling back to the default when the
 // field is missing or not a number (old configs / hand edits).
@@ -392,6 +398,22 @@ export function AppPage() {
         }
         updateContext({ modelReady: ready });
       })();
+    });
+    onCleanup(unsub);
+  });
+
+  // Transform fallback (fgm.4, fgm.1 D5d): when an enabled transform
+  // pass fails or times out, the raw transcript was already pasted and
+  // stored — surface ONE subtle toast in this window (never the
+  // overlay: nothing about the paste changed for the user to act on).
+  // The condition re-checks the current settings so it only fires for
+  // a pass the user actually opted into; the hook itself stays dormant
+  // until the event carries a failure field (fgm.3's wire shape).
+  onMount(() => {
+    const unsub = canario.onTransformFallback((event) => {
+      if (shouldShowTransformFallbackToast(transformSettings().enabled, event)) {
+        showToast("Transformation fell back to the raw transcript", "warning", 5000);
+      }
     });
     onCleanup(unsub);
   });
@@ -1444,10 +1466,30 @@ export function AppPage() {
                           style={{ "background-color": "var(--bg)", "border-color": "var(--border)" }}
                         >
                           <p class="text-sm leading-relaxed">{entry.text}</p>
-                          <div class="flex items-center justify-between mt-1.5">
-                            <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
-                              {entry.duration_secs.toFixed(1)}s · {formatTimestamp(entry.timestamp)}
-                            </p>
+                          <div class="flex items-center justify-between mt-1.5 gap-2">
+                            <div class="flex items-center gap-1.5 min-w-0">
+                              <p class="text-xs" style={{ color: "var(--text-secondary)" }}>
+                                {entry.duration_secs.toFixed(1)}s · {formatTimestamp(entry.timestamp)}
+                              </p>
+                              {/* Transformed badge (fgm.4, fgm.1 D3): the
+                                  canonical `text` went through an LLM pass;
+                                  the raw transcript survives in raw_text —
+                                  hover reveals it. Absent on old entries and
+                                  whenever no transformation ran. */}
+                              <Show when={isTransformedHistoryEntry(entry)}>
+                                <span
+                                  class="text-[10px] leading-none px-1.5 py-0.5 rounded-full border flex-shrink-0"
+                                  style={{
+                                    "border-color": "var(--border)",
+                                    "background-color": "var(--bg)",
+                                    color: "var(--text-secondary)",
+                                  }}
+                                  title={`Transformed — raw transcript: ${String(entry.raw_text ?? "")}`}
+                                >
+                                  ✨ Transformed
+                                </span>
+                              </Show>
+                            </div>
                             <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
                               <button
                                 class="text-xs px-1.5 py-0.5 rounded hover:opacity-80 transition-opacity"

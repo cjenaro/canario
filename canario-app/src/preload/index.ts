@@ -27,8 +27,9 @@ const api = {
   showOverlay: () => ipcRenderer.invoke("overlay:show"),
   hideOverlay: () => ipcRenderer.invoke("overlay:hide"),
 
-  // Overlay status pushed from the main process (e.g. "transcribing" after
-  // a successful stop command — the sidecar emits no event for that phase)
+  // Overlay status pushed from the main process after a successful stop
+  // command (the sidecar emits no event for that phase): "transcribing"
+  // normally, "transforming" when the transform block is enabled (fgm.4).
   onOverlayStatus: (callback: (status: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, status: string) => callback(status);
     ipcRenderer.on("overlay:status", handler);

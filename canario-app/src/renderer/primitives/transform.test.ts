@@ -18,10 +18,12 @@ import {
   isRemoteWarningDismissed,
   isValidBaseUrl,
   keyCommitAction,
+  shouldShowTransformFallbackToast,
   shouldWarnRemoteEndpoint,
   transformConfigPayload,
   transformFromConfig,
   transformTestResultFromResponse,
+  transcriptionTransformFailed,
   type KeyValueStorage,
 } from "./transform";
 
@@ -379,5 +381,50 @@ describe("transformTestResultFromResponse", () => {
       phase: "error",
       message: "Could not reach the speech backend",
     });
+  });
+});
+
+// ── TranscriptionReady transform-failure signal (fgm.4) ─────────────────────
+
+describe("transcriptionTransformFailed", () => {
+  it("reads field absence as no failure (every event from today's sidecar)", () => {
+    expect(
+      transcriptionTransformFailed({ event: "TranscriptionReady", text: "hi", duration_secs: 1.5 }),
+    ).toBe(false);
+    expect(transcriptionTransformFailed({})).toBe(false);
+  });
+
+  it.each([
+    ["boolean flag (the D5d wording)", { transform_failed: true }],
+    ["non-empty error string", { transform_error: "request timed out" }],
+  ])("detects the %s shape", (_label, event) => {
+    expect(transcriptionTransformFailed(event)).toBe(true);
+  });
+
+  it.each([
+    ["false flag", { transform_failed: false }],
+    ["empty error", { transform_error: "" }],
+    ["whitespace error", { transform_error: "   " }],
+    ["non-string error", { transform_error: 500 }],
+  ])("ignores the %s shape", (_label, event) => {
+    expect(transcriptionTransformFailed(event)).toBe(false);
+  });
+});
+
+describe("shouldShowTransformFallbackToast", () => {
+  const failed = { event: "TranscriptionReady", text: "raw words", transform_failed: true };
+  const clean = { event: "TranscriptionReady", text: "words" };
+
+  it("shows only when the pass was enabled AND the event signals failure", () => {
+    expect(shouldShowTransformFallbackToast(true, failed)).toBe(true);
+  });
+
+  it("stays silent when the pass was off (the user never opted in)", () => {
+    expect(shouldShowTransformFallbackToast(false, failed)).toBe(false);
+  });
+
+  it("stays silent when the event carries no failure signal", () => {
+    expect(shouldShowTransformFallbackToast(true, clean)).toBe(false);
+    expect(shouldShowTransformFallbackToast(false, clean)).toBe(false);
   });
 });

@@ -12,6 +12,7 @@ import { acquireSingleInstanceLock } from "./singleInstance.js";
 import { parseLegacyOnboardingFile } from "./onboarding.js";
 import { decideHotkeyRouting } from "./hotkeyRouting.js";
 import { initTransformCredential, saveTransformCredential } from "./transformCredential.js";
+import { overlayStatusForStop } from "./overlayStatus.js";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -409,6 +410,10 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
 
       // Auto-paste (all platforms: Linux via xdotool ctrl+v, macOS/Windows via robotjs)
       // The sidecar no longer auto-pastes — Electron handles it for better reliability.
+      // event.text is the CANONICAL text (fgm.1 D3): the transformed value
+      // when a transform ran — and when the pass failed or timed out, the
+      // sidecar already fell back to raw text (D5d), so this path needs no
+      // failure branching. No code path pastes a raw field.
       if (event.event === "TranscriptionReady" && event.text) {
         // Decide against fresh config, not the boot snapshot: config.json
         // may have changed under us (GTK running concurrently, a manual
@@ -448,16 +453,21 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
         setTrayOffline(true);
       }
 
+      // Events forward WHOLE: optional fields the core adds later — e.g.
+      // fgm.3's raw_text / transform-failure flag on TranscriptionReady —
+      // reach the renderer untouched; nothing here or in the preload
+      // whitelists or strips fields.
       mainWindow?.webContents.send("sidecar:event", event);
       overlayWindow?.webContents.send("sidecar:event", event);
     });
 
     // The sidecar transcribes inside its recording thread and only emits
     // TranscriptionReady / RecordingStopped once it's done — so the
-    // "transcribing" phase is signalled by a successful stop COMMAND, not by
-    // an event. All stop paths funnel through sendCommand here in the main
-    // process (tray toggle, global shortcut, UI button, and the Linux hotkey
-    // via the sidecar's HotkeyTriggered event → renderer toggle_recording).
+    // "transcribing"/"transforming" phase is signalled by a successful stop
+    // COMMAND, not by an event. All stop paths funnel through sendCommand here
+    // in the main process (tray toggle, global shortcut, UI button, and the
+    // Linux hotkey via the sidecar's HotkeyTriggered event → renderer
+    // toggle_recording).
     onCommandResponse((cmd, res) => {
       const name = cmd.cmd as string;
       const stopped =
@@ -466,7 +476,14 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
           res.ok === true &&
           (res.data as { recording?: boolean } | undefined)?.recording === false);
       if (stopped) {
-        overlayWindow?.webContents.send("overlay:status", "transcribing");
+        // fgm.4: with the transform block enabled, the stop→result
+        // window also contains the sidecar's LLM pass (fgm.1 D1/D3 —
+        // TranscriptionReady only fires after the transform settles or
+        // its timeout falls back to raw, D5d). The phase boundary lives
+        // in the core and is invisible here, so the whole window is
+        // labelled "Transforming…"; the terminal events dismiss the
+        // overlay exactly as they do for "transcribing".
+        overlayWindow?.webContents.send("overlay:status", overlayStatusForStop(cachedConfig));
       }
     });
 

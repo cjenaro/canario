@@ -308,6 +308,41 @@ export function transformConfigPayload(settings: TransformSettings): {
   };
 }
 
+// ── TranscriptionReady transform-failure signal (fgm.4) ─────────────────────
+
+/**
+ * Does a TranscriptionReady event carry a transform-failure signal?
+ *
+ * fgm.1 D5d fixes the CONTRACT — on timeout or ANY transform error the
+ * sidecar still emits TranscriptionReady carrying the raw text plus a
+ * failure flag, so dictation never blocks or loses audio — while
+ * canario-fgm.3 (parallel, core-side) owns the exact wire shape. Coded
+ * against, in order:
+ *   - `transform_failed: true` — the D5d wording, the expected field
+ *   - `transform_error: "<non-empty>"` — the string variant
+ * Anything else — crucially the field being ABSENT, which is every
+ * event from today's sidecar — reads as "no failure", so the fallback
+ * toast hook stays dormant until the field actually appears.
+ */
+export function transcriptionTransformFailed(event: Record<string, unknown>): boolean {
+  if (event.transform_failed === true) return true;
+  return typeof event.transform_error === "string" && event.transform_error.trim().length > 0;
+}
+
+/**
+ * Should the settings window show its one "fell back to raw" toast?
+ * Both halves are required (fgm.4): the transform pass was enabled
+ * (the user opted in — a failure of a pass they never asked for is
+ * silent by design, and per D5d the raw paste already happened) AND
+ * the event signals the failure.
+ */
+export function shouldShowTransformFallbackToast(
+  transformEnabled: boolean,
+  event: Record<string, unknown>,
+): boolean {
+  return transformEnabled === true && transcriptionTransformFailed(event);
+}
+
 // ── transform_test response reduction ───────────────────────────────────────
 
 /** Display state for the section's "Test connection" button. */

@@ -137,4 +137,46 @@ describe("createCanario mount reconciliation", () => {
     expect(api.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ cmd: "cancel_download" }));
     dispose();
   });
+
+  it("notifies transform-fallback subscribers only when the event signals failure (fgm.4)", async () => {
+    const { createCanario } = await import("../primitives/createCanario");
+    let onEventCb: ((e: Record<string, unknown>) => void) | null = null;
+    const api = {
+      ...fakeApi({ recording: false, transcribing: false, downloading: false }),
+      onEvent: vi.fn((cb: (e: Record<string, unknown>) => void) => {
+        onEventCb = cb;
+        return () => {};
+      }),
+    };
+    vi.stubGlobal("window", { canario: api });
+    const machine = createAppMachine();
+    const seen: Record<string, unknown>[] = [];
+    let dispose = () => {};
+    let unsub = () => {};
+    createRoot((d) => {
+      dispose = d;
+      const bridge = createCanario(machine);
+      unsub = bridge.onTransformFallback((e) => seen.push(e));
+    });
+
+    await vi.waitFor(() => expect(onEventCb).not.toBeNull());
+
+    // Clean transcription (today's shape, no failure fields): silent.
+    onEventCb!({ event: "TranscriptionReady", text: "words", duration_secs: 2 });
+    expect(seen).toHaveLength(0);
+
+    // Failure-flagged transcription (fgm.1 D5d fallback): exactly one
+    // notify, carrying the event so the settings toast can decide
+    // against the live transform-enabled state.
+    onEventCb!({ event: "TranscriptionReady", text: "words", duration_secs: 2, transform_failed: true });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].transform_failed).toBe(true);
+
+    // Either way the machine completes the pipeline on the canonical
+    // event.text — the fallback never changes the state path.
+    expect(machine.context().lastTranscription).toBe("words");
+
+    unsub();
+    dispose();
+  });
 });
