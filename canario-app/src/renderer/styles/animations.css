@@ -77,7 +77,7 @@
   overflow: hidden; /* clips the caption text as the island springs */
   background-color: rgba(26, 26, 46, 0.92);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(233, 69, 96, 0.3);
+  border: 1px solid var(--accent-glow);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
   transition: box-shadow 200ms ease;
 }
@@ -85,7 +85,7 @@
 /* Glow while speech is detected (toggled as a class — NOT a reactive
    inline style — see the note above) */
 .island-live {
-  box-shadow: 0 0 12px rgba(233, 69, 96, 0.25);
+  box-shadow: 0 0 12px var(--accent-glow);
 }
 
 /* Indicator row (dot/waveform/timer, or the transcribing spinner).

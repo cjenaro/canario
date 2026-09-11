@@ -9,7 +9,14 @@ import { HotkeyPermissionNotice } from "../components/HotkeyPermissionNotice";
 import { WordRemapping } from "../components/WordRemapping";
 import { Toggle } from "../components/Toggle";
 import { ToastContainer, showToast } from "../components/Toast";
-import { applyTheme } from "../theme";
+import { AppearanceSection } from "../components/AppearanceSection";
+import { applyAppearance, cacheAppearanceForNextBoot, readCachedAppearance } from "../theme";
+import {
+  appearanceFromConfig,
+  resolveThemeMode,
+  type AccentColor,
+  type ThemeMode,
+} from "../primitives/appearance";
 import {
   parseHotkeyStatus,
   shouldShowHotkeyPermissionNotice,
@@ -44,7 +51,13 @@ export function AppPage() {
   const [downloadedModels, setDownloadedModels] = createSignal<Set<string>>(new Set());
   const [loading, setLoading] = createSignal(true);
   const [historySearch, setHistorySearch] = createSignal("");
-  const [theme, setTheme] = createSignal<string>("dark");
+
+  // Appearance — initialized from the pre-paint cache (see index.html /
+  // theme.ts) so the first effect application matches what's already
+  // painted; the AppConfig values take over once loaded below.
+  const cachedAppearance = readCachedAppearance();
+  const [themeMode, setThemeMode] = createSignal<ThemeMode>(cachedAppearance?.mode ?? "dark");
+  const [accent, setAccent] = createSignal<AccentColor>(cachedAppearance?.accent ?? null);
 
   // Track history items being animated out
   const [deletingIds, setDeletingIds] = createSignal<Set<string>>(new Set());
@@ -125,9 +138,9 @@ export function AppPage() {
     setHotkeyStatus(res?.ok ? parseHotkeyStatus(res.data) : null);
   }
 
-  // Apply theme
+  // Apply appearance live (theme mode + accent override)
   createEffect(() => {
-    applyTheme(theme());
+    applyAppearance(themeMode(), accent());
   });
 
   // Clear error after it's been shown
@@ -165,10 +178,6 @@ export function AppPage() {
         void refreshHotkeyStatus();
       }
 
-      // Theme
-      const savedTheme = await canario.getTheme();
-      setTheme(savedTheme || "dark");
-
       // 1. Get current config
       const cfg = await canario.getConfig();
       if (cfg) {
@@ -197,6 +206,22 @@ export function AppPage() {
 
         updateContext({ config });
       }
+
+      // Appearance — AppConfig (`theme` + `accent_color`) is the source
+      // of truth. theme.json (main process) is mirrored on every change
+      // and doubles as the fallback/migration source for choices made
+      // before appearance lived in AppConfig: when the two disagree, the
+      // main-process copy is the user's latest intent, so persist it
+      // back into AppConfig.
+      const appearance = appearanceFromConfig(cfg);
+      const legacyMode = resolveThemeMode(await canario.getTheme());
+      if (legacyMode !== appearance.mode) {
+        await canario.updateConfig({ theme: legacyMode });
+        appearance.mode = legacyMode;
+      }
+      setThemeMode(appearance.mode);
+      setAccent(appearance.accent);
+      cacheAppearanceForNextBoot(appearance);
 
       // 2. Check which models are downloaded
       for (const m of MODELS) {
@@ -382,9 +407,19 @@ export function AppPage() {
     showToast("History cleared", "info", 2000);
   }
 
-  async function handleThemeChange(t: string) {
-    setTheme(t);
-    await canario.setTheme(t);
+  async function handleModeChange(mode: ThemeMode) {
+    setThemeMode(mode);
+    cacheAppearanceForNextBoot({ mode, accent: accent() });
+    // AppConfig is the source of truth; theme.json stays mirrored so the
+    // main-process fallback keeps working when the sidecar is down.
+    await canario.updateConfig({ theme: mode });
+    await canario.setTheme(mode);
+  }
+
+  async function handleAccentChange(next: AccentColor) {
+    setAccent(next);
+    cacheAppearanceForNextBoot({ mode: themeMode(), accent: next });
+    await canario.updateConfig({ accent_color: next });
   }
 
   // Re-run the onboarding wizard (PRD §5.1): clear the persisted flag and
@@ -686,7 +721,7 @@ export function AppPage() {
                     style={{
                       "background-color": "var(--accent)",
                       color: "white",
-                      "box-shadow": "0 4px 14px rgba(233, 69, 96, 0.3)",
+                      "box-shadow": "0 4px 14px var(--accent-glow)",
                       cursor: "pointer",
                     }}
                     onClick={handleToggle}
@@ -879,24 +914,12 @@ export function AppPage() {
           {/* ── Appearance ────────────────────────────────────────── */}
           <section class="rounded-xl border p-5" style={sectionStyle}>
             <h2 class={sectionHeader} style={sectionHeaderStyle}>Appearance</h2>
-            <div class="flex gap-2">
-              <For each={["dark", "light", "system"]}>
-                {(t) => (
-                  <button
-                    class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors"
-                    style={{
-                      "background-color": theme() === t ? "var(--surface-hover)" : "transparent",
-                      "border-color": theme() === t ? "var(--accent)" : "var(--border)",
-                      color: "var(--text-primary)",
-                      cursor: "pointer",
-                    }}
-                    onClick={() => handleThemeChange(t)}
-                  >
-                    {t.charAt(0).toUpperCase() + t.slice(1)}
-                  </button>
-                )}
-              </For>
-            </div>
+            <AppearanceSection
+              mode={themeMode()}
+              accent={accent()}
+              onModeChange={handleModeChange}
+              onAccentChange={handleAccentChange}
+            />
           </section>
 
           {/* ── About & Updates ────────────────────────────────────── */}

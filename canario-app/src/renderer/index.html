@@ -7,6 +7,36 @@
   <style>
     html, body, #root { margin: 0; padding: 0; height: 100%; }
   </style>
+  <script>
+    // Pre-paint appearance (theme mode + accent) from the last session's
+    // localStorage cache, so the window never flashes the default theme
+    // before the app bundle applies the authoritative AppConfig values.
+    // Non-authoritative: any error is ignored and the bundle re-applies.
+    // Keep in sync with src/renderer/theme.ts (applyAppearance) and
+    // primitives/appearance.ts (APPEARANCE_CACHE_KEY).
+    try {
+      var appearance = JSON.parse(localStorage.getItem("canario.appearance") || "null");
+      if (appearance && typeof appearance === "object") {
+        var root = document.documentElement;
+        if (appearance.mode === "light") {
+          root.style.setProperty("color-scheme", "light");
+          root.setAttribute("data-theme", "light");
+        } else if (appearance.mode === "system") {
+          root.removeAttribute("data-theme");
+        } else {
+          root.style.setProperty("color-scheme", "dark");
+          root.setAttribute("data-theme", "dark");
+        }
+        var HEX_RE = /^#[0-9a-fA-F]{6}$/;
+        if (typeof appearance.accent === "string" && HEX_RE.test(appearance.accent)) {
+          root.style.setProperty("--accent", appearance.accent);
+        }
+        if (typeof appearance.hover === "string" && HEX_RE.test(appearance.hover)) {
+          root.style.setProperty("--accent-hover", appearance.hover);
+        }
+      }
+    } catch (err) { /* ignore — the bundle re-applies after boot */ }
+  </script>
 </head>
 <body>
   <div id="root"></div>

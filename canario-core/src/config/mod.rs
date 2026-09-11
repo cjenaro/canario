@@ -65,6 +65,15 @@ pub struct AppConfig {
     /// Seconds of continuous recording before live captions kick in.
     /// Shorter recordings stay silent (no partial decodes).
     pub live_captions_threshold_secs: f64,
+
+    /// UI theme mode: dark, light, or follow the OS preference (system).
+    /// The Electron renderer applies it before first paint — see
+    /// canario-app/src/renderer/theme.ts and index.html.
+    pub theme: ThemeMode,
+
+    /// Custom accent color as a hex string (e.g. "#e94560"). `None` uses
+    /// the per-theme default accent from themes.css.
+    pub accent_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +92,17 @@ pub enum AudioBehavior {
     DoNothing,
     /// Mute system audio while recording
     Mute,
+}
+
+/// UI theme mode (Settings → Appearance). Serialized lowercase to match
+/// the renderer's vocabulary ("dark" | "light" | "system"). `System`
+/// follows the OS `prefers-color-scheme` media query.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    Dark,
+    Light,
+    System,
 }
 
 /// Resolved filesystem paths to the four sherpa-onnx model files.
@@ -128,6 +148,8 @@ impl Default for AppConfig {
             sound_effects: true,
             live_captions: true,
             live_captions_threshold_secs: 8.0,
+            theme: ThemeMode::Dark,
+            accent_color: None,
         }
     }
 }
@@ -278,6 +300,9 @@ mod tests {
         assert!(config.live_captions);
         assert_eq!(config.live_captions_threshold_secs, 8.0);
         assert!(config.custom_encoder_path.is_none());
+        // Appearance defaults: dark theme, per-theme default accent
+        assert_eq!(config.theme, ThemeMode::Dark);
+        assert_eq!(config.accent_color, None);
     }
 
     #[test]
@@ -309,6 +334,43 @@ mod tests {
             loaded.live_captions_threshold_secs,
             config.live_captions_threshold_secs
         );
+        assert_eq!(loaded.theme, config.theme);
+        assert_eq!(loaded.accent_color, config.accent_color);
+    }
+
+    #[test]
+    fn parses_appearance_fields() {
+        let json = r##"{ "theme": "system", "accent_color": "#3b82f6" }"##;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.theme, ThemeMode::System);
+        assert_eq!(config.accent_color.as_deref(), Some("#3b82f6"));
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+    }
+
+    #[test]
+    fn appearance_fields_round_trip() {
+        let config = AppConfig {
+            theme: ThemeMode::Light,
+            accent_color: Some("#e94560".into()),
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        // Serialized lowercase to match the renderer's vocabulary
+        assert!(json.contains(r##""theme":"light""##));
+        assert!(json.contains(r##""accent_color":"#e94560""##));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.theme, ThemeMode::Light);
+        assert_eq!(loaded.accent_color.as_deref(), Some("#e94560"));
+    }
+
+    #[test]
+    fn accent_color_none_round_trips_as_null() {
+        let config = AppConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""accent_color":null"#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.accent_color, None);
     }
 
     #[test]

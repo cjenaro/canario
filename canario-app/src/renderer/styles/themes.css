@@ -10,6 +10,9 @@
   --text-secondary: #8888a8;
   --accent: #e94560;
   --accent-hover: #ff6b81;
+  /* Per-theme default accent, never overridden by a user accent — used
+     to render the "Default" swatch in Settings → Appearance. */
+  --accent-default: #e94560;
   --success: #4ade80;
   --warning: #fbbf24;
   --error: #ef4444;
@@ -27,6 +30,7 @@
   --text-secondary: #666680;
   --accent: #d63050;
   --accent-hover: #e94560;
+  --accent-default: #d63050;
   --success: #22c55e;
   --warning: #f59e0b;
   --error: #dc2626;
@@ -43,6 +47,7 @@
   --text-secondary: #8888a8;
   --accent: #e94560;
   --accent-hover: #ff6b81;
+  --accent-default: #e94560;
   --success: #4ade80;
   --warning: #fbbf24;
   --error: #ef4444;
@@ -59,9 +64,17 @@
     --text-secondary: #666680;
     --accent: #d63050;
     --accent-hover: #e94560;
+    --accent-default: #d63050;
     --success: #22c55e;
     --warning: #f59e0b;
     --error: #dc2626;
     --recording-dot: #dc2626;
   }
+}
+
+/* Accent glow — soft accent-tinted shadow/border for the record button
+   and the overlay island. Derived from the active --accent (theme
+   default or user override) so custom accents glow their own color. */
+:root {
+  --accent-glow: color-mix(in srgb, var(--accent) 30%, transparent);
 }
