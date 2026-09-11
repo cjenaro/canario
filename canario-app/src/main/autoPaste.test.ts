@@ -1,8 +1,9 @@
 // Tests for the Linux auto-paste strategy (canario-cy0): clipboard +
 // synthesized Ctrl+V first — but only when a read-back verified the
 // fresh text (canario-fhm stale-clipboard guard) — with char-by-char
-// typing as the fallback.
-import { describe, it, expect, vi } from "vitest";
+// typing as the fallback. The macOS/Windows arm (canario-ubb) routes
+// through the sidecar's native paste command.
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("electron", () => ({
   clipboard: { readText: vi.fn(), writeText: vi.fn() },
@@ -11,7 +12,15 @@ vi.mock("electron", () => ({
   BrowserWindow: {},
 }));
 
-import { clipboardHoldsText, linuxPastePlan, linuxPasteStepArgs } from "./autoPaste";
+const sendCommandMock = vi.fn();
+vi.mock("./sidecar.js", () => ({ sendCommand: (...a: unknown[]) => sendCommandMock(...a) }));
+
+import { autoPasteText, clipboardHoldsText, linuxPastePlan, linuxPasteStepArgs } from "./autoPaste";
+
+const { readText, writeText } = vi.mocked(await import("electron")).clipboard as unknown as {
+  readText: ReturnType<typeof vi.fn>;
+  writeText: ReturnType<typeof vi.fn>;
+};
 
 describe("linuxPastePlan", () => {
   it("puts verified-clipboard Ctrl+V before typing on Wayland", () => {
@@ -124,5 +133,50 @@ describe("clipboardHoldsText", () => {
     await expect(clipboardHoldsText("abc", () => {
       throw new Error("no clipboard");
     }, noSleep)).resolves.toBe(false);
+  });
+});
+
+// ── macOS/Windows arm: sidecar native paste (canario-ubb) ──────────────
+
+describe("autoPasteText (non-Linux)", () => {
+  const realPlatform = process.platform;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // A non-Linux platform takes the sidecar arm.
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+  });
+
+  it("writes the clipboard, verifies it, then sends paste_text to the sidecar", async () => {
+    readText.mockResolvedValue("hello");
+    sendCommandMock.mockResolvedValue({ ok: true, data: { pasted: true } });
+
+    await expect(autoPasteText("hello")).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith("hello");
+    expect(sendCommandMock).toHaveBeenCalledTimes(1);
+    const cmd = sendCommandMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(cmd.cmd).toBe("paste_text");
+    expect(cmd.text).toBe("hello");
+  });
+
+  it("never sends the chord when the clipboard read-back cannot verify", async () => {
+    readText.mockResolvedValue("stale-previous-content");
+    await expect(autoPasteText("hello")).resolves.toBe(false);
+    expect(sendCommandMock).not.toHaveBeenCalled();
+  });
+
+  it("reports false (not an error) when the sidecar backends fail to deliver", async () => {
+    readText.mockResolvedValue("hello");
+    sendCommandMock.mockResolvedValue({ ok: true, data: { pasted: false } });
+    await expect(autoPasteText("hello")).resolves.toBe(false);
+  });
+
+  it("survives a sidecar round-trip error", async () => {
+    readText.mockResolvedValue("hello");
+    sendCommandMock.mockRejectedValue(new Error("sidecar gone"));
+    await expect(autoPasteText("hello")).resolves.toBe(false);
   });
 });
