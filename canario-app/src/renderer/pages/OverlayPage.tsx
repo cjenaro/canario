@@ -1,6 +1,6 @@
 // Overlay page — loaded in the overlay BrowserWindow
 // Self-contained: listens to sidecar events directly, no state machine needed.
-import { createSignal, onCleanup, onMount, Show, For, createEffect } from "solid-js";
+import { createSignal, onCleanup, onMount, Show, For, createEffect, createMemo } from "solid-js";
 // Imperative Motion One core, NOT the <Motion> component wrapper: the
 // wrapper bakes a stale snapshot of the initial animate targets into the
 // element's reactive style (combineStyle(props.style, createStyles(
@@ -8,8 +8,29 @@ import { createSignal, onCleanup, onMount, Show, For, createEffect } from "solid
 // geometry springs. Driving animate() directly from the measurement
 // effect avoids that entirely.
 import { animate, spring } from "@motionone/dom";
+// Per-monitor drag placement: pure offset math + AppConfig serialization.
+// See canario-aud.1 and the drag-affordance notes further below.
+import {
+  applyDragDelta,
+  clampOverlayPosition,
+  overlayOffsetsConfigPayload,
+  overlayOffsetsFromConfig,
+  resolveOverlayPosition,
+  toStorableOffset,
+  withOverlayOffset,
+  withoutOverlayOffset,
+  type OverlayOffset,
+  type OverlayOffsets,
+} from "../primitives/overlayPlacement";
 
 type OverlayStatus = "hidden" | "recording" | "transcribing";
+
+/** Island rect in window-relative client coords, reported to the main process. */
+type IslandRect = { x: number; y: number; width: number; height: number };
+
+// Pointer travel (px) before a press counts as a drag — a stray click on
+// the island must not write a config update.
+const DRAG_THRESHOLD_PX = 3;
 
 export function OverlayPage() {
   const [status, setStatus] = createSignal<OverlayStatus>("hidden");
@@ -103,7 +124,144 @@ export function OverlayPage() {
 
   const api = (window as any).canario as {
     onEvent: (cb: (e: Record<string, unknown>) => void) => () => void;
+    sendCommand: (cmd: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    updateConfigCache: (config: Record<string, unknown>) => Promise<void>;
+    setOverlayIslandRect: (rect: IslandRect | null) => void;
+    onOverlayDisplay: (cb: (info: { id: string }) => void) => () => void;
+    onOverlayInteractive: (cb: (interactive: boolean) => void) => () => void;
   } | undefined;
+
+  // ── Island placement (canario-aud.1) ──────────────────────────────
+  // Drag-to-move + per-monitor persistence. The overlay window stays
+  // click-through; the MAIN process polls the cursor against the island
+  // rect we push below and enables mouse events only while the cursor is
+  // over the island (forwarded mousemove doesn't exist on Linux —
+  // electron#16777 — so hover detection can't live here). While it deems
+  // us interactive we get real pointer events and the island becomes a
+  // drag handle; everything else keeps passing clicks through.
+  const [displayId, setDisplayId] = createSignal<string | null>(null);
+  const [interactive, setInteractive] = createSignal(false);
+  const [storedOffsets, setStoredOffsets] = createSignal<OverlayOffsets>({});
+  const [dragging, setDragging] = createSignal(false);
+  const [dragPos, setDragPos] = createSignal<OverlayOffset | null>(null);
+  // Viewport size (= the overlay window, which exactly covers one
+  // display) for default centering and clamp math. Re-read on resize —
+  // positionOverlayWindow() re-bounds the window onto the display under
+  // the cursor, which can differ in size.
+  const [vw, setVw] = createSignal(window.innerWidth);
+  const [vh, setVh] = createSignal(window.innerHeight);
+
+  let dragStartPointer: { x: number; y: number } | null = null;
+  let dragStartPos: OverlayOffset | null = null;
+  let dragMoved = false;
+
+  // Resolved island top-left (client coords = display-relative DIPs).
+  // During a drag it's the live clamped pointer delta; otherwise the
+  // stored offset for THIS monitor, falling back to the default
+  // top-center, re-clamped so a stale offset can't land off-screen
+  // (the monitor may have changed since the drag).
+  const pos = createMemo<OverlayOffset>(() => {
+    const live = dragPos();
+    if (dragging() && live) return live;
+    const stored = storedOffsets()[displayId() ?? ""];
+    const base = resolveOverlayPosition(stored, vw(), islandW());
+    return clampOverlayPosition(base, { width: vw(), height: vh() }, { width: islandW(), height: islandH() });
+  });
+
+  // Report the island's rect whenever it moves or resizes — the main
+  // process hit-tests the cursor against it to toggle interactivity.
+  // null while the island is hidden stops that polling entirely.
+  createEffect(() => {
+    const rect: IslandRect | null =
+      isVisible() && measured()
+        ? { x: pos().x, y: pos().y, width: islandW(), height: islandH() }
+        : null;
+    api?.setOverlayIslandRect?.(rect);
+  });
+
+  // Persist the full per-monitor map (update_config merges top-level
+  // keys wholesale, so partial maps would clobber other monitors).
+  async function sendPlacementUpdate(next: OverlayOffsets) {
+    setStoredOffsets(next);
+    const payload = overlayOffsetsConfigPayload(next);
+    try {
+      await api?.sendCommand({ id: `overlay-place-${Date.now()}`, cmd: "update_config", config: payload });
+      await api?.updateConfigCache?.(payload);
+    } catch (err) {
+      console.error("[overlay] placement save failed:", err);
+    }
+  }
+
+  function persistPlacement(finalPos: OverlayOffset) {
+    const id = displayId();
+    if (!id) return; // no display push yet — visual only, reverts next show
+    void sendPlacementUpdate(withOverlayOffset(storedOffsets(), id, toStorableOffset(finalPos)));
+  }
+
+  // Reset-to-default: drop THIS monitor's entry (others survive) and
+  // snap back to the top-center default via the pos() memo.
+  function resetPlacement() {
+    const id = displayId();
+    if (!id || !(id in storedOffsets())) return;
+    void sendPlacementUpdate(withoutOverlayOffset(storedOffsets(), id));
+  }
+
+  function endDrag(persist = true) {
+    const wasDragging = dragging();
+    const finalPos = dragPos();
+    dragStartPointer = null;
+    dragStartPos = null;
+    // Below-threshold presses are clicks, not drags — never persist those.
+    const moved = dragMoved && finalPos !== null;
+    dragMoved = false;
+    setDragging(false);
+    setDragPos(null);
+    if (wasDragging && persist && moved) persistPlacement(finalPos);
+  }
+
+  // ── Placement listeners ───────────────────────────────────────────
+  onMount(() => {
+    // Load persisted placements once; drag/reset keep the map current
+    // locally so consecutive updates never read back stale config.
+    api
+      ?.sendCommand({ id: "overlay-config", cmd: "get_config" })
+      .then((res) => {
+        if (res?.ok && res.data) setStoredOffsets(overlayOffsetsFromConfig(res.data));
+      })
+      .catch(() => {});
+
+    // Which display the overlay landed on (pushed on every show)
+    const unsubDisplay = api?.onOverlayDisplay?.((info) => setDisplayId(info.id));
+    // Interactive ↔ click-through flips from the main process
+    const unsubInteractive = api?.onOverlayInteractive?.((i) => {
+      setInteractive(i);
+      // Lost mid-drag (e.g. the button was released outside the window):
+      // settle where the island is rather than reverting.
+      if (!i) endDrag();
+    });
+
+    const onResize = () => {
+      setVw(window.innerWidth);
+      setVh(window.innerHeight);
+    };
+    window.addEventListener("resize", onResize);
+
+    onCleanup(() => {
+      unsubDisplay?.();
+      unsubInteractive?.();
+      window.removeEventListener("resize", onResize);
+      api?.setOverlayIslandRect?.(null);
+    });
+  });
+
+  // Recording ended mid-drag: cancel without persisting (the island is
+  // unmounting anyway) and drop any stale interactive state.
+  createEffect(() => {
+    if (!isVisible()) {
+      endDrag(false);
+      setInteractive(false);
+    }
+  });
 
   // ── Listen to sidecar events directly ─────────────────────────────
   onMount(() => {
@@ -225,25 +383,83 @@ export function OverlayPage() {
 
   return (
     <Show when={isVisible()}>
-      <div class="fixed inset-0 flex items-start justify-center pt-3 pointer-events-none">
-        {/* One island, spring-morphed by Motion One's imperative
-            animate() (see the measurement effect): collapsed it's the
-            recording pill; live captions spring it open into a wider,
-            taller card. Geometry is written only by the animate calls —
-            keep it out of this element's reactive style. */}
+      <div class="fixed inset-0 pointer-events-none">
+        {/* Placement wrapper: absolute left/top from the pos() memo —
+            default top-center, the stored per-monitor offset, or the
+            live drag position. Keeping positioning here leaves the
+            island's spring-driven width/height untouched. */}
         <div
-          ref={islandRef}
-          class="island no-select shadow-2xl"
-          classList={{
-            "animate-slide-down": measured(),
-            "island-live": hasAudio(),
-          }}
           style={{
-            // Hidden until the first real measurement lands. This is the
-            // ONLY reactive key — it flips while the island is invisible.
-            visibility: measured() ? "visible" : "hidden",
+            position: "absolute",
+            left: `${pos().x}px`,
+            top: `${pos().y}px`,
           }}
         >
+          {/* One island, spring-morphed by Motion One's imperative
+              animate() (see the measurement effect): collapsed it's the
+              recording pill; live captions spring it open into a wider,
+              taller card. Geometry is written only by the animate calls —
+              keep it out of this element's reactive style.
+              Drag affordance: pointer events only ever arrive while the
+              main process deems the window interactive (cursor over the
+              island) — see the placement section above. */}
+          <div
+            ref={islandRef}
+            class="island no-select shadow-2xl pointer-events-auto"
+            classList={{
+              "animate-slide-down": measured(),
+              "island-live": hasAudio(),
+              "cursor-grab": interactive() && !dragging(),
+              "cursor-grabbing": dragging(),
+            }}
+            style={{
+              // Hidden until the first real measurement lands. This is the
+              // ONLY reactive key — it flips while the island is invisible.
+              visibility: measured() ? "visible" : "hidden",
+            }}
+            title="Drag to move · double-click to reset"
+            onPointerDown={(e) => {
+              // Left button only, and only while the window is interactive
+              if (e.button !== 0 || !interactive()) return;
+              dragStartPointer = { x: e.clientX, y: e.clientY };
+              dragStartPos = { ...pos() };
+              dragMoved = false;
+              setDragging(true);
+              setDragPos(dragStartPos);
+              // Capture so pointermove/up keep flowing to the island even
+              // when the cursor outruns it mid-drag.
+              try {
+                islandRef?.setPointerCapture(e.pointerId);
+              } catch { /* capture is best-effort */ }
+            }}
+            onPointerMove={(e) => {
+              if (!dragging() || !dragStartPointer || !dragStartPos) return;
+              const dx = e.clientX - dragStartPointer.x;
+              const dy = e.clientY - dragStartPointer.y;
+              if (!dragMoved && Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) dragMoved = true;
+              setDragPos(
+                clampOverlayPosition(
+                  applyDragDelta(dragStartPos, dx, dy),
+                  { width: vw(), height: vh() },
+                  { width: islandW(), height: islandH() },
+                ),
+              );
+            }}
+            onPointerUp={(e) => {
+              try {
+                islandRef?.releasePointerCapture(e.pointerId);
+              } catch { /* not captured */ }
+              endDrag();
+            }}
+            onPointerCancel={() => endDrag(false)}
+            onDblClick={() => resetPlacement()}
+            onContextMenu={(e) => {
+              // Right-click doubles as reset (and must not open a menu
+              // over the transparent overlay).
+              e.preventDefault();
+              resetPlacement();
+            }}
+          >
           <div class="island-row" ref={rowRef}>
             <Show when={isRecording()}>
               {/* Recording dot */}
@@ -304,6 +520,7 @@ export function OverlayPage() {
                 {(word) => <span class="caption-word">{word}</span>}
               </For>
             </div>
+          </div>
           </div>
         </div>
       </div>

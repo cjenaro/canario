@@ -1,6 +1,7 @@
 pub mod autostart;
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::inference::postprocess::PostProcessor;
@@ -74,6 +75,15 @@ pub struct AppConfig {
     /// Custom accent color as a hex string (e.g. "#e94560"). `None` uses
     /// the per-theme default accent from themes.css.
     pub accent_color: Option<String>,
+
+    /// User-dragged overlay island placement, per monitor. Keyed by the
+    /// Electron `Display.id` (stable per connected monitor, serialized as
+    /// a string because JSON object keys are strings); values are the
+    /// island's top-left offset from that monitor's origin in DIPs.
+    /// Monitors without an entry (or an empty map) fall back to the
+    /// default top-center placement. Electron-side only for now — the
+    /// GTK app keeps its fixed placement (see canario-aud.1).
+    pub overlay_offsets: BTreeMap<String, OverlayOffset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,12 +96,22 @@ pub enum ModelVariant {
     Custom,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum AudioBehavior {
     /// Don't touch system audio
     DoNothing,
     /// Mute system audio while recording
     Mute,
+}
+
+/// Overlay island placement for one monitor: the island's top-left
+/// offset from that monitor's origin, in device-independent pixels
+/// (DIPs — CSS pixels in the Electron overlay window, which exactly
+/// covers the monitor).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct OverlayOffset {
+    pub x: i32,
+    pub y: i32,
 }
 
 /// UI theme mode (Settings → Appearance). Serialized lowercase to match
@@ -150,6 +170,7 @@ impl Default for AppConfig {
             live_captions_threshold_secs: 8.0,
             theme: ThemeMode::Dark,
             accent_color: None,
+            overlay_offsets: BTreeMap::new(),
         }
     }
 }
@@ -303,6 +324,8 @@ mod tests {
         // Appearance defaults: dark theme, per-theme default accent
         assert_eq!(config.theme, ThemeMode::Dark);
         assert_eq!(config.accent_color, None);
+        // Overlay placement defaults to "not user-positioned yet"
+        assert!(config.overlay_offsets.is_empty());
     }
 
     #[test]
@@ -336,6 +359,7 @@ mod tests {
         );
         assert_eq!(loaded.theme, config.theme);
         assert_eq!(loaded.accent_color, config.accent_color);
+        assert_eq!(loaded.overlay_offsets, config.overlay_offsets);
     }
 
     #[test]
@@ -371,6 +395,89 @@ mod tests {
         assert!(json.contains(r#""accent_color":null"#));
         let loaded: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.accent_color, None);
+    }
+
+    #[test]
+    fn overlay_offsets_default_to_empty_map() {
+        // Old configs (and `{}`) have no overlay_offsets key — the
+        // island then uses the default top-center placement.
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.overlay_offsets.is_empty());
+        // The default config serializes the empty map explicitly.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(r#""overlay_offsets":{}"#));
+    }
+
+    #[test]
+    fn parses_overlay_offsets() {
+        // Multi-monitor: one entry per display id (JSON keys are strings).
+        let json = r#"{
+            "overlay_offsets": {
+                "2305843009213693953": { "x": 640, "y": 12 },
+                "7": { "x": -20, "y": 900 }
+            }
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.overlay_offsets.get("2305843009213693953"),
+            Some(&OverlayOffset { x: 640, y: 12 })
+        );
+        assert_eq!(
+            config.overlay_offsets.get("7"),
+            Some(&OverlayOffset { x: -20, y: 900 })
+        );
+        assert_eq!(config.overlay_offsets.len(), 2);
+        // Untouched fields fall back to defaults
+        assert_eq!(config.model, ModelVariant::ParakeetV3);
+    }
+
+    #[test]
+    fn overlay_offsets_round_trip() {
+        let config = AppConfig {
+            overlay_offsets: BTreeMap::from([
+                ("42".to_string(), OverlayOffset { x: 100, y: 200 }),
+                ("43".to_string(), OverlayOffset { x: 0, y: 0 }),
+            ]),
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        // Per-monitor entries serialize as { "x": .., "y": .. } — the
+        // wire shape the Electron renderer reads and writes.
+        assert!(json.contains(r#""overlay_offsets":{"42":{"x":100,"y":200},"43":{"x":0,"y":0}}"#));
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.overlay_offsets, config.overlay_offsets);
+    }
+
+    #[test]
+    fn overlay_offsets_apply_as_a_whole_key() {
+        // update_config merges top-level keys wholesale: the renderer
+        // always sends the FULL map (existing entries merged client-side
+        // plus the changed monitor), so other monitors' placements
+        // survive an update. Model that merge here.
+        let current_json = serde_json::to_value(&AppConfig {
+            overlay_offsets: BTreeMap::from([("1".to_string(), OverlayOffset { x: 10, y: 20 })]),
+            ..AppConfig::default()
+        })
+        .unwrap();
+        let mut merged = current_json.clone();
+        merged["overlay_offsets"] = serde_json::json!({
+            "1": { "x": 11, "y": 22 },
+            "2": { "x": 300, "y": 400 }
+        });
+        let merged: AppConfig = serde_json::from_value(merged).unwrap();
+        assert_eq!(
+            merged.overlay_offsets.get("1"),
+            Some(&OverlayOffset { x: 11, y: 22 })
+        );
+        assert_eq!(
+            merged.overlay_offsets.get("2"),
+            Some(&OverlayOffset { x: 300, y: 400 })
+        );
+        // Clearing the map (reset to default) round-trips as empty.
+        let mut cleared = current_json;
+        cleared["overlay_offsets"] = serde_json::json!({});
+        let cleared: AppConfig = serde_json::from_value(cleared).unwrap();
+        assert!(cleared.overlay_offsets.is_empty());
     }
 
     #[test]

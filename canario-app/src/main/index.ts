@@ -88,7 +88,94 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const { x, y, width, height } = display.bounds;
     overlayWindow.setBounds({ x, y, width, height });
+    // Tell the overlay page which monitor it landed on — it keys the
+    // persisted overlay placement per display id (canario-aud.1).
+    overlayWindow.webContents.send("overlay:display", { id: display.id.toString() });
   }
+
+  // ── Overlay drag affordance (canario-aud.1) ─────────────────────────────
+  // The overlay window is click-through so dictation never blocks the apps
+  // below. Dragging routes around that: the overlay page reports the
+  // island's rect, and this poll enables mouse events ONLY while the
+  // cursor is over the island (so it can be grabbed and moved).
+  //
+  // Why polling in the main process instead of the renderer watching
+  // mousemove? `setIgnoreMouseEvents(true, { forward: true })` — the
+  // usual trick — forwards no mouse moves on Linux (macOS/Windows only,
+  // electron#16777), and Linux is our primary platform. The cursor
+  // position is already main-process-only (screen API), so the hit test
+  // lives here. The renderer keeps real pointer events for the drag
+  // itself once interactive.
+  let overlayIslandRect: { x: number; y: number; width: number; height: number } | null = null;
+  let overlayInteractive = false;
+  let overlayPollTimer: ReturnType<typeof setInterval> | null = null;
+  let overlayOutsidePolls = 0;
+  const OVERLAY_POLL_INTERVAL_MS = 75;
+  // Hysteresis: click-through resumes only after the cursor stays this
+  // far outside the island for consecutive polls — a fast drag (rect
+  // updates chasing the pointer) must not drop interactivity mid-flight.
+  const OVERLAY_EXIT_MARGIN = 24;
+  const OVERLAY_EXIT_POLLS = 2;
+
+  function setOverlayInteractive(interactive: boolean) {
+    if (!overlayWindow || interactive === overlayInteractive) return;
+    overlayInteractive = interactive;
+    overlayWindow.setIgnoreMouseEvents(!interactive);
+    // Let the page swap in the grab cursor / enable its pointer handlers
+    overlayWindow.webContents.send("overlay:interactive", interactive);
+  }
+
+  function stopOverlayPolling() {
+    if (overlayPollTimer) {
+      clearInterval(overlayPollTimer);
+      overlayPollTimer = null;
+    }
+  }
+
+  function pollOverlayHover() {
+    if (!overlayWindow || !overlayIslandRect || overlayWindow.isVisible() === false) return;
+    const cursor = screen.getCursorScreenPoint();
+    const [winX, winY] = overlayWindow.getPosition();
+    const r = overlayIslandRect;
+    // The reported rect is window-relative; the window may not sit exactly
+    // at its display's origin, so anchor via the window position.
+    const margin = overlayInteractive ? OVERLAY_EXIT_MARGIN : 0;
+    const inside =
+      cursor.x >= winX + r.x - margin &&
+      cursor.x <= winX + r.x + r.width + margin &&
+      cursor.y >= winY + r.y - margin &&
+      cursor.y <= winY + r.y + r.height + margin;
+    if (inside) {
+      overlayOutsidePolls = 0;
+      if (!overlayInteractive) setOverlayInteractive(true);
+    } else if (overlayInteractive && ++overlayOutsidePolls >= OVERLAY_EXIT_POLLS) {
+      overlayOutsidePolls = 0;
+      setOverlayInteractive(false);
+    }
+  }
+
+  function startOverlayPolling() {
+    if (overlayPollTimer) return;
+    overlayPollTimer = setInterval(pollOverlayHover, OVERLAY_POLL_INTERVAL_MS);
+  }
+
+  // The overlay page pushes the island's current rect (window-relative
+  // client coords, which equal display-relative offsets since the window
+  // covers the display exactly). null = island hidden → stop hit-testing.
+  ipcMain.on("overlay:island-rect", (_e, rect: { x: number; y: number; width: number; height: number } | null) => {
+    overlayIslandRect =
+      rect && Number.isFinite(rect.x) && Number.isFinite(rect.y) &&
+      Number.isFinite(rect.width) && Number.isFinite(rect.height)
+        ? rect
+        : null;
+    overlayOutsidePolls = 0;
+    if (overlayIslandRect && overlayWindow?.isVisible()) {
+      startOverlayPolling();
+    } else {
+      stopOverlayPolling();
+      setOverlayInteractive(false);
+    }
+  });
 
   function createOverlayWindow() {
     const display = screen.getPrimaryDisplay();
@@ -138,10 +225,15 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
     // Full-screen overlay — re-position onto the display with the cursor each
     // time it's shown (multi-monitor), CSS handles placement within it.
     positionOverlayWindow();
+    // Never carry interactive state across hides (e.g. a drag interrupted
+    // by the recording ending) — start each show fully click-through.
+    setOverlayInteractive(false);
     overlayWindow?.showInactive();
   });
 
   ipcMain.handle("overlay:hide", () => {
+    setOverlayInteractive(false);
+    stopOverlayPolling();
     overlayWindow?.hide();
   });
 
@@ -359,6 +451,7 @@ if (!acquireSingleInstanceLock(() => mainWindow)) {
 
   // Clean shutdown on quit
   app.on("will-quit", () => {
+    stopOverlayPolling();
     stopSidecar();
     globalShortcut.unregisterAll();
   });

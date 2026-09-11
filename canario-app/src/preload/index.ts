@@ -25,6 +25,34 @@ const api = {
     return () => ipcRenderer.removeListener("overlay:status", handler);
   },
 
+  // ── Overlay drag affordance (canario-aud.1) ─────────────────────────────
+  // The overlay page reports the island's rect; the main process enables
+  // mouse events on the click-through window only while the cursor is
+  // inside it (hover detection runs main-side because forwarded mouse
+  // moves don't work on Linux — electron#16777).
+
+  // Report the island's current rect (window-relative client coords) or
+  // null when the island is hidden. Fire-and-forget.
+  setOverlayIslandRect: (rect: { x: number; y: number; width: number; height: number } | null) =>
+    ipcRenderer.send("overlay:island-rect", rect),
+
+  // Pushed after each overlay:show — which display the window landed on
+  // (id keys the per-monitor placement in AppConfig.overlay_offsets)
+  onOverlayDisplay: (callback: (info: { id: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, info: { id: string }) => callback(info);
+    ipcRenderer.on("overlay:display", handler);
+    return () => ipcRenderer.removeListener("overlay:display", handler);
+  },
+
+  // Pushed when the main process toggles the overlay window between
+  // click-through and interactive — true while the cursor is over the
+  // island (the only moment pointer handlers can fire)
+  onOverlayInteractive: (callback: (interactive: boolean) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, interactive: boolean) => callback(interactive);
+    ipcRenderer.on("overlay:interactive", handler);
+    return () => ipcRenderer.removeListener("overlay:interactive", handler);
+  },
+
   // Window control
   showSettings: () => ipcRenderer.invoke("window:showSettings"),
   hideSettings: () => ipcRenderer.invoke("window:hideSettings"),
