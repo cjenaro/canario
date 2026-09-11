@@ -191,6 +191,9 @@ fn handle_event(
 
         Event::RecordingStopped => {
             is_recording_flag.store(false, Ordering::SeqCst);
+            // Clear the caption (and starting size) while the window still
+            // exists; hide then closes it.
+            RecordingIndicator::clear_caption(app);
             RecordingIndicator::hide(app);
             refresh_tray(tray_handle);
         }
@@ -200,6 +203,7 @@ fn handle_event(
             // reset the tray, and do NOT paste or add to history.
             tracing::info!("Recording cancelled — audio discarded");
             is_recording_flag.store(false, Ordering::SeqCst);
+            RecordingIndicator::clear_caption(app);
             RecordingIndicator::hide(app);
             refresh_tray(tray_handle);
         }
@@ -239,11 +243,14 @@ fn handle_event(
             RecordingIndicator::update_level(app, level);
         }
 
-        // Live caption preview for long recordings — rendered by the
-        // Electron overlay. The GTK indicator shows no text yet, so the
-        // partial is only logged (follow-up: caption view in GTK).
+        // Live caption preview for long recordings — preview only; the
+        // authoritative text still arrives via TranscriptionReady, so it
+        // is never pasted or stored. update_caption only mutates an
+        // existing indicator: a late partial racing this stop/cancel is
+        // dropped and can never reopen the indicator.
         Event::PartialTranscript { text } => {
             tracing::debug!("Live partial transcript: {}", text);
+            RecordingIndicator::update_caption(app, &text);
         }
 
         // Model download events are routed straight to the settings window's
