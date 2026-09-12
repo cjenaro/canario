@@ -1,0 +1,10 @@
+{
+  "id": "uppercase",
+  "name": "Uppercase",
+  "version": "0.1.0",
+  "api_version": 0,
+  "entry": "upper.py",
+  "hooks": ["transform"],
+  "permissions": ["transcripts"],
+  "source_url": "https://github.com/cjenaro/canario/tree/main/examples/plugins/uppercase"
+}

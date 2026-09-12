@@ -151,6 +151,20 @@ pub struct AppConfig {
     /// byte-identical to the pre-transform behavior.
     pub transform: TransformSettings,
 
+    /// Plugin system settings (canario-11h.1 decisions; prototype from
+    /// canario-11h.2). Absent (the default) keeps the whole subsystem
+    /// dark — no discovery, no processes, byte-identical pipeline.
+    pub plugins: PluginsSettings,
+
+    /// UI locale (canario-tts). Empty string (the default) = resolve
+    /// automatically from the OS/browser preference list; otherwise an
+    /// exact locale tag the shipped catalogs recognize ("en", "es").
+    /// Read by the Electron main process (tray strings) at boot and on
+    /// every ConfigChanged, and by the renderer (which falls back to
+    /// navigator.languages when empty). Unknown values fall back to
+    /// English on both sides.
+    pub locale: String,
+
     /// Fields this build doesn't know about, preserved verbatim on save
     /// so a downgrade never destroys newer config (canario-dmp.22).
     /// Populated by serde via flatten; unknown keys in the FILE land here
@@ -325,6 +339,75 @@ pub struct TransformProvider {
     pub model: String,
 }
 
+/// Default per-plugin response deadline (canario-11h.1 OQ-2): plugins
+/// are cheap local text filters — a full second is generous, and the
+/// chain budget below bounds the total added press-to-transcript
+/// latency.
+pub const DEFAULT_PLUGIN_TIMEOUT_MS: u64 = 1000;
+
+/// Total wall-clock budget for the whole plugin chain per transcript
+/// (canario-11h.1 OQ-2). Plugins past the budget are skipped (and
+/// marked degraded) so the stage can never eat into the LLM
+/// transform's 4 s budget, let alone block dictation.
+pub const PLUGIN_CHAIN_BUDGET_MS: u64 = 2000;
+
+/// Clamp window for a hand-edited `plugins.timeout_ms`: smaller than
+/// 100 ms can't be distinguished from a dead plugin, larger than 10 s
+/// would stall the chain budget single-handedly.
+const MIN_PLUGIN_TIMEOUT_MS: u64 = 100;
+const MAX_PLUGIN_TIMEOUT_MS: u64 = 10_000;
+
+/// Plugin system settings (canario-11h.1 P4/OQ-9 decisions).
+///
+/// Everything defaults OFF (D5 symmetry with `transform.enabled`):
+/// `enabled_master` is the global kill-switch, `enabled` is the
+/// per-plugin allow-list, and a plugin runs only when BOTH admit it —
+/// discovery alone never executes anything. Old config files (no
+/// `plugins` block) deserialize to the all-off default, and unknown
+/// fields are ignored, so old and new configs/sidecars interoperate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PluginsSettings {
+    /// Global master switch (OQ-9). `false` (the default) disables the
+    /// whole subsystem regardless of the allow-list — the panic button
+    /// and the honest "this feature ships dark" default in one field.
+    pub enabled_master: bool,
+
+    /// Per-plugin allow-list: directory names under the plugins folder
+    /// (`~/.config/canario/plugins/<id>/`). A plugin is dispatched
+    /// only when its id is listed here AND `enabled_master` is true.
+    pub enabled: Vec<String>,
+
+    /// Per-plugin response deadline in milliseconds. `0` selects the
+    /// default; other values are clamped (see the consts above).
+    pub timeout_ms: u64,
+}
+
+impl Default for PluginsSettings {
+    fn default() -> Self {
+        Self {
+            enabled_master: false,
+            enabled: Vec::new(),
+            timeout_ms: DEFAULT_PLUGIN_TIMEOUT_MS,
+        }
+    }
+}
+
+impl PluginsSettings {
+    /// Effective per-plugin deadline: the default when unset/hand-zero,
+    /// clamped otherwise (same posture as
+    /// [`TransformSettings::effective_timeout`]).
+    pub fn effective_timeout(&self) -> std::time::Duration {
+        let ms = if self.timeout_ms == 0 {
+            DEFAULT_PLUGIN_TIMEOUT_MS
+        } else {
+            self.timeout_ms
+                .clamp(MIN_PLUGIN_TIMEOUT_MS, MAX_PLUGIN_TIMEOUT_MS)
+        };
+        std::time::Duration::from_millis(ms)
+    }
+}
+
 /// Resolved filesystem paths to the four sherpa-onnx model files.
 ///
 /// Used as the recognizer cache key: a config change that resolves to
@@ -404,6 +487,8 @@ impl Default for AppConfig {
             animations: AnimationSettings::default(),
             onboarding_completed: false,
             transform: TransformSettings::default(),
+            plugins: PluginsSettings::default(),
+            locale: String::new(),
             extra: BTreeMap::new(),
         }
     }

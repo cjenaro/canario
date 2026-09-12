@@ -134,6 +134,16 @@ impl Canario {
         #[cfg(not(test))]
         sync_mic_preference(&config);
 
+        // Plugin chain (canario-11h.2): install the process-wide
+        // manager from the loaded config — same not-test gating for
+        // the same reason (hermetic plugin tests install their own
+        // managers under the plugins STORE_LOCK).
+        #[cfg(not(test))]
+        crate::plugins::init(
+            crate::config::AppConfig::config_dir().join("plugins"),
+            config.plugins.clone(),
+        );
+
         // Pre-warm the recognizer cache in the background (when the
         // selected model is already on disk) so even the first
         // dictation is fast. Cheap existence check here; the heavy
@@ -390,7 +400,15 @@ impl Canario {
     pub fn update_config(&self, f: impl FnOnce(&mut AppConfig)) -> anyhow::Result<()> {
         let mut config = lock(&self.inner.config);
         let cache_key_before = recognizer_cache_key(&config);
+        // Serialized plugins block before/after: the process-wide
+        // plugin manager is re-initialized only when its settings
+        // actually changed (a re-init kills resident plugin children —
+        // it must not ride along with unrelated config writes).
+        #[cfg(not(test))]
+        let plugins_before = serde_json::to_value(&config.plugins).ok();
         f(&mut config);
+        #[cfg(not(test))]
+        let plugins_after = serde_json::to_value(&config.plugins).ok();
         config.save()?;
         // canario-1hq.2: a device switch takes effect on the next
         // recording — push it into the warm-mic preference now (a
@@ -415,6 +433,18 @@ impl Canario {
         // dropped, so a receiver handling the event may re-enter
         // (e.g. call get_config) without deadlocking.
         let _ = self.inner.event_tx.send(Event::ConfigChanged);
+
+        // Plugin settings changed: swap in a fresh manager (kills the
+        // old children; enabling a plugin applies on the next
+        // dictation without a restart). Same not-test posture as the
+        // install in `new`.
+        #[cfg(not(test))]
+        if plugins_before != plugins_after {
+            crate::plugins::init(
+                crate::config::AppConfig::config_dir().join("plugins"),
+                self.config().plugins.clone(),
+            );
+        }
         Ok(())
     }
 

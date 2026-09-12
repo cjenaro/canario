@@ -861,6 +861,131 @@ fn list_audio_devices_responds_ok_with_a_name_array() {
     // ignored end-to-end recording test.
 }
 
+// ── Plugins (canario-11h.2) ─────────────────────────────────────────────────
+//
+// Hermetic sidecar-level coverage of the new pull-based commands. The
+// transform dispatch itself (spawn → NDJSON → deadline → raw fallback)
+// is covered by canario-core's plugins tests; driving it THROUGH the
+// sidecar needs a real model + microphone (see the ignored recording
+// test at the bottom of this file).
+
+/// Write one plugin fixture under the hermetic config's plugins dir.
+/// `permissions` is a JSON array literal (e.g. `"[]"` or
+/// `"["transcripts"]"`).
+fn write_sidecar_plugin(home: &std::path::Path, id: &str, script: &str, permissions: &str) {
+    let dir = home.join("config/canario/plugins").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plugin.py"), script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("plugin.py"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "{id}",
+  "name": "{id}",
+  "version": "0.1.0",
+  "api_version": 0,
+  "entry": "plugin.py",
+  "hooks": ["transform"],
+  "permissions": {permissions}
+}}"#
+        ),
+    )
+    .unwrap();
+}
+
+const SIDEKICK_UPPER_PY: &str = r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({"id": req["id"], "text": req["text"].upper()}), flush=True)
+"#;
+
+#[test]
+fn list_plugins_reports_discovery_and_classification() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Two plugins: one fully-granted, one missing the transcripts
+    // grant (P4) — both discovered, differently classified.
+    write_sidecar_plugin(tmp.path(), "upper", SIDEKICK_UPPER_PY, r#"["transcripts"]"#);
+    write_sidecar_plugin(tmp.path(), "mum", SIDEKICK_UPPER_PY, "[]");
+    // Config with master off: everything must classify disabled —
+    // discovery never executes anything by itself.
+    let config = r#"{
+  "plugins": { "enabled_master": false, "enabled": ["upper"] }
+}"#;
+    std::fs::create_dir_all(tmp.path().join("config/canario")).unwrap();
+    std::fs::write(tmp.path().join("config/canario/config.json"), config).unwrap();
+
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+    sidecar.send(json!({ "cmd": "list_plugins", "id": "pl-1" }));
+    let resp = sidecar.wait_for("pl-1");
+    assert_eq!(resp["ok"], json!(true), "{resp}");
+    let plugins = resp["data"]["plugins"].as_array().unwrap();
+    assert_eq!(plugins.len(), 2, "both manifests discovered: {resp}");
+
+    let upper = plugins.iter().find(|p| p["id"] == "upper").unwrap();
+    assert_eq!(upper["state"], json!("disabled"), "master off ⇒ disabled");
+    let mum = plugins.iter().find(|p| p["id"] == "mum").unwrap();
+    assert_eq!(
+        mum["state"],
+        json!("not_granted"),
+        "P4: no transcripts grant ⇒ not granted (regardless of master)"
+    );
+
+    // plugin_status mirrors the master switch and the classifications.
+    sidecar.send(json!({ "cmd": "plugin_status", "id": "pl-2" }));
+    let resp = sidecar.wait_for("pl-2");
+    assert_eq!(resp["data"]["enabled_master"], json!(false));
+    assert_eq!(resp["data"]["plugins"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn plugin_status_reports_enabled_plugin_as_idle_before_first_dictation() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_sidecar_plugin(tmp.path(), "upper", SIDEKICK_UPPER_PY, r#"["transcripts"]"#);
+    let config = r#"{
+  "plugins": { "enabled_master": true, "enabled": ["upper"] }
+}"#;
+    std::fs::create_dir_all(tmp.path().join("config/canario")).unwrap();
+    std::fs::write(tmp.path().join("config/canario/config.json"), config).unwrap();
+
+    let mut sidecar = Sidecar::spawn_with_home(tmp);
+    sidecar.send(json!({ "cmd": "plugin_status", "id": "pl-3" }));
+    let resp = sidecar.wait_for("pl-3");
+    assert_eq!(resp["data"]["enabled_master"], json!(true));
+    let plugins = resp["data"]["plugins"].as_array().unwrap();
+    let upper = plugins.iter().find(|p| p["id"] == "upper").unwrap();
+    // Lazy spawn: enabled but idle until the first transform dispatch.
+    assert_eq!(upper["state"], json!("idle"), "{resp}");
+    assert_eq!(upper["calls"], json!(0));
+}
+
+#[test]
+fn plugin_commands_on_a_fresh_install_are_empty_not_errors() {
+    // No plugins dir, no plugins config: the commands still answer ok
+    // with empty lists (pull-based commands never error for absence).
+    let mut sidecar = Sidecar::spawn();
+
+    sidecar.send(json!({ "cmd": "list_plugins", "id": "pl-4" }));
+    let resp = sidecar.wait_for("pl-4");
+    assert_eq!(resp["ok"], json!(true), "{resp}");
+    assert_eq!(resp["data"]["plugins"].as_array().unwrap().len(), 0);
+
+    sidecar.send(json!({ "cmd": "plugin_status", "id": "pl-5" }));
+    let resp = sidecar.wait_for("pl-5");
+    assert_eq!(resp["ok"], json!(true), "{resp}");
+    assert_eq!(resp["data"]["enabled_master"], json!(false));
+    assert_eq!(resp["data"]["plugins"].as_array().unwrap().len(), 0);
+}
+
 #[test]
 fn hotkey_status_before_start_reports_not_started() {
     let mut sidecar = Sidecar::spawn();

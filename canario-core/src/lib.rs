@@ -35,6 +35,15 @@ mod hotkey;
 mod inference;
 mod mic_warm;
 mod paste;
+/// Plugin system (canario-11h.1 decisions, canario-11h.2 prototype):
+/// local-folder manifest discovery, resident NDJSON-over-stdio child
+/// processes, one `transform` hook at the same pipeline stage as the
+/// LLM transform (local rules → plugins → LLM), capabilities enforced
+/// at the dispatch point (no `transcripts` grant = no text), default
+/// OFF behind a master kill-switch + per-plugin allow-list, and a
+/// per-plugin deadline + chain budget with D5d-style raw fallback on
+/// every failure mode.
+pub mod plugins;
 mod recording;
 pub mod timing;
 /// LLM transformation (canario-fgm.1 D1–D5): OpenAI chat-completions

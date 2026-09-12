@@ -138,6 +138,10 @@ enum Command {
     TransformStatus { id: String },
     #[serde(rename = "transform_test")]
     TransformTest { id: String },
+    #[serde(rename = "list_plugins")]
+    ListPlugins { id: String },
+    #[serde(rename = "plugin_status")]
+    PluginStatus { id: String },
     #[serde(rename = "list_audio_devices")]
     ListAudioDevices { id: String },
     #[serde(rename = "set_autostart")]
@@ -544,6 +548,31 @@ fn handle_command(
                 // only ever travels inside the Authorization header.
                 Err(e) => write_json(&err(&id, e.to_string())),
             }
+        }
+        // Plugin discovery view (canario-11h.2): every manifest under
+        // the plugins folder with its classification. Pull-based like
+        // hotkey_status; never spawns anything, so the renderer can
+        // render a read-only Plugins section on mount. Additive
+        // command — PROTOCOL_VERSION unchanged (an old sidecar errors
+        // this id cleanly; an old app never sends it).
+        Command::ListPlugins { id } => {
+            write_json(&ok_data(
+                &id,
+                serde_json::json!({ "plugins": canario_core::plugins::list() }),
+            ));
+        }
+        // Plugin runtime state (canario-11h.2): master switch + per-
+        // plugin state/latency/counters for diagnostics. Same
+        // pull-based posture as list_plugins.
+        Command::PluginStatus { id } => {
+            let (master, statuses) = canario_core::plugins::status();
+            write_json(&ok_data(
+                &id,
+                serde_json::json!({
+                    "enabled_master": master,
+                    "plugins": statuses,
+                }),
+            ));
         }
         // Audio input device enumeration for the settings device
         // picker (canario-1hq.2). Never errors the response: a

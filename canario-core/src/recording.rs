@@ -438,6 +438,13 @@ fn recording_loop(
     match transcript {
         Some(raw_transcript) => {
             let transcript = post_processor.process(&raw_transcript);
+            // Plugin chain (canario-11h.2): local rules → plugins → LLM
+            // (OQ-1 — deterministic/free work first, the LLM receives
+            // plugin-cleaned text, plugin deadlines never eat the LLM
+            // budget). Passthrough when the plugin store is empty or
+            // disabled; the manager's own chain budget bounds the worst
+            // case. Provenance is log-only (OQ-4).
+            let transcript = crate::plugins::transform(&transcript);
             tracing::info!(
                 "✅ Transcription ({} chars): {}",
                 transcript.chars().count(),
