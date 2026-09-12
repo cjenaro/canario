@@ -3,6 +3,7 @@ import { Tray, Menu, nativeImage, BrowserWindow, app } from "electron";
 import { join } from "path";
 import { sendCommand } from "./sidecar.js";
 import { versionWarningText } from "./version.js";
+import { mainT } from "./strings.js";
 
 let tray: Tray | null = null;
 let currentState: "idle" | "recording" | "transcribing" = "idle";
@@ -28,8 +29,8 @@ export function setTrayOffline(isOffline: boolean): void {
 
 function baseTooltip(): string {
   const warning = versionWarningText();
-  const parts = ["Canario — Voice to Text"];
-  if (offline) parts.push("⚠ backend offline — restart Canario");
+  const parts = [mainT("tray.tooltip.tagline")];
+  if (offline) parts.push(mainT("tray.tooltip.offline"));
   else if (warning) parts.push(`⚠ ${warning}`);
   return parts.join(" ");
 }
@@ -92,11 +93,12 @@ export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
   if (!tray) return;
 
   const statusLabel =
-    state === "recording" ? "● Recording" :
-    state === "transcribing" ? "⟳ Transcribing…" :
-    "● Ready";
+    state === "recording" ? mainT("tray.status.recording") :
+    state === "transcribing" ? mainT("tray.status.transcribing") :
+    mainT("tray.status.ready");
 
-  const toggleLabel = state === "recording" ? "■ Stop Recording" : "▶ Start Recording";
+  const toggleLabel =
+    state === "recording" ? mainT("tray.toggle.stop") : mainT("tray.toggle.start");
 
   const contextMenu = Menu.buildFromTemplate([
     { label: statusLabel, enabled: false },
@@ -109,7 +111,7 @@ export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
     },
     { type: "separator" },
     {
-      label: "📜 History",
+      label: mainT("tray.history"),
       click: () => {
         showSettingsWindow();
         // Tell the renderer to scroll to the History section (PRD §5.2)
@@ -117,14 +119,14 @@ export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
       },
     },
     {
-      label: "⚙ Settings",
+      label: mainT("tray.settings"),
       click: () => {
         showSettingsWindow();
       },
     },
     { type: "separator" },
     {
-      label: "Quit",
+      label: mainT("tray.quit"),
       click: () => {
         sendCommand({ id: "quit", cmd: "shutdown" }).finally(() => {
           app.quit();
@@ -134,4 +136,16 @@ export function updateTrayMenu(state: "idle" | "recording" | "transcribing") {
   ]);
 
   tray.setContextMenu(contextMenu);
+}
+
+/**
+ * Re-render every tray string after a locale change (canario-tts):
+ * rebuilds the context menu and the tooltip against the catalog the
+ * main process just switched to. Called from fetchConfig's ConfigChanged
+ * path — config is the persisted locale source of truth.
+ */
+export function refreshTrayLocale(): void {
+  if (!tray) return;
+  tray.setToolTip(baseTooltip());
+  updateTrayMenu(currentState);
 }

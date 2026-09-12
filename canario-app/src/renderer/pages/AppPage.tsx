@@ -2,7 +2,7 @@
 // Phase 2: Polish - animations, error states, empty states, autostart
 import { createSignal, Show, For, onMount, onCleanup, createEffect } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { t, type MessageKey } from "../i18n";
+import { applyConfigLocale, t, type MessageKey } from "../i18n";
 import { useAppState } from "../state/context";
 import { createCanario } from "../primitives/createCanario";
 import { HotkeyCapture, toAccelerator } from "../components/HotkeyCapture";
@@ -116,6 +116,10 @@ export function AppPage() {
   // painted; the AppConfig values take over once loaded below.
   const cachedAppearance = readCachedAppearance();
   const [themeMode, setThemeMode] = createSignal<ThemeMode>(cachedAppearance?.mode ?? "dark");
+
+  // Locale choice (canario-tts): "" = Automatic. Mirrors AppConfig.locale;
+  // the picker writes both (config persists, signal applies live).
+  const [localeChoice, setLocaleChoice] = createSignal<"" | "en" | "es">("");
   const [accent, setAccent] = createSignal<AccentColor>(cachedAppearance?.accent ?? null);
 
   // Animation preferences — same pattern (see index.html / motion.ts):
@@ -346,6 +350,18 @@ export function AppPage() {
         setThemeMode(appearance.mode);
         setAccent(appearance.accent);
         cacheAppearanceForNextBoot(appearance);
+
+        // Locale (canario-tts): AppConfig.locale is authoritative when
+        // set; "" (Automatic) re-resolves from the browser preference
+        // list. The i18n signal flips and reactive t() callers
+        // re-render; the localStorage mirror covers the next boot.
+        applyConfigLocale((cfg as Record<string, unknown>).locale);
+        setLocaleChoice(
+          typeof (cfg as Record<string, unknown>).locale === "string" &&
+            (cfg as Record<string, unknown>).locale !== ""
+            ? ((cfg as Record<string, unknown>).locale as "en" | "es")
+            : "",
+        );
       }
 
       // Animations — AppConfig (`animations`) is the source of truth;
@@ -688,6 +704,16 @@ export function AppPage() {
     // theme.json mirror anymore); the pre-paint cache covers the next
     // boot.
     await canario.updateConfig({ theme: mode });
+  }
+
+  // Language picker (canario-tts): "" = Automatic (navigator-based).
+  // Persist to AppConfig.locale (the main process re-reads it on
+  // ConfigChanged and rebuilds the tray strings), and apply live via
+  // the i18n signal — every reactive t() caller re-renders.
+  async function handleLocaleChange(choice: "" | "en" | "es") {
+    setLocaleChoice(choice);
+    applyConfigLocale(choice);
+    await canario.updateConfig({ locale: choice });
   }
 
   async function handleAccentChange(next: AccentColor) {
@@ -1371,6 +1397,38 @@ export function AppPage() {
               onModeChange={handleModeChange}
               onAccentChange={handleAccentChange}
             />
+
+            {/* Language (canario-tts) — same Appearance area; mirrors the
+                theme-mode button group. "" = Automatic (navigator-based). */}
+            <div class="mt-6">
+              <p class="text-sm font-medium">{t("appearance.language.title")}</p>
+              <p class="text-xs mb-2.5" style={{ color: "var(--text-secondary)" }}>
+                {t("appearance.language.desc")}
+              </p>
+              <div class="flex gap-2">
+                <For each={(["", "en", "es"] as const)}>
+                  {(choice) => (
+                    <button
+                      class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors"
+                      style={{
+                        "background-color": localeChoice() === choice ? "var(--surface-hover)" : "transparent",
+                        "border-color": localeChoice() === choice ? "var(--accent)" : "var(--border)",
+                        color: "var(--text-primary)",
+                        cursor: "pointer",
+                      }}
+                      aria-pressed={localeChoice() === choice}
+                      onClick={() => void handleLocaleChange(choice)}
+                    >
+                      {t(
+                        choice === "" ? "appearance.language.auto"
+                        : choice === "en" ? "appearance.language.en"
+                        : "appearance.language.es",
+                      )}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
 
             {/* Indicator style (canario-aud.2) — same Appearance area:
                 which on-screen indicator to show while dictating. */}

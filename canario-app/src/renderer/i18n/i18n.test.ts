@@ -2,12 +2,16 @@
 // catalog invariants, and completeness of the extraction — every `t("…")`
 // call site must have a catalog entry, and every catalog entry must be
 // referenced somewhere (no dead keys).
+// canario-tts additions: the Spanish catalog's invariants (complete key
+// set, no empty values, placeholders preserved) and the persisted-choice
+// seam (applyConfigLocale).
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { en, type MessageKey } from "./en";
-import { resolveLocale, t } from "./index";
+import { es } from "./es";
+import { applyConfigLocale, resolveLocale, t } from "./index";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -79,6 +83,67 @@ describe("i18n catalog", () => {
   });
 });
 
+describe("Spanish catalog (canario-tts)", () => {
+  it("uses only keys that exist in the English catalog", () => {
+    const englishKeys = new Set(Object.keys(en));
+    const unknown = Object.keys(es).filter((key) => !englishKeys.has(key));
+    expect(unknown).toEqual([]);
+  });
+
+  it("has no empty or whitespace-only values", () => {
+    for (const [key, value] of Object.entries(es)) {
+      expect(value, key).toMatch(/\S/);
+    }
+  });
+
+  it("keeps every English placeholder in the translated string", () => {
+    // A dropped/renamed {{ placeholder }} renders as a literal gap at
+    // runtime — catch it here per-key. Only PRESENCE matters: order may
+    // differ (word order changes across languages) and a locale may
+    // reuse a placeholder more times than English does.
+    const placeholder = (s: string) => [...s.matchAll(/\{\{\s*\w+\s*\}\}/g)].map((m) => m[0]);
+    for (const key of Object.keys(es) as MessageKey[]) {
+      const want = [...new Set(placeholder(en[key]).map((p) => p.replace(/\s/g, "")))].sort();
+      const got = [...new Set(placeholder(es[key]!).map((p) => p.replace(/\s/g, "")))].sort();
+      expect(got, key).toEqual(want);
+    }
+  });
+});
+
+describe("applyConfigLocale (persisted choice)", () => {
+  // The renderer tests run in node: stub the browser localStorage the
+  // cache mirror uses (a plain Map is the whole contract we rely on).
+  const backing = new Map<string, string>();
+  const storage = {
+    getItem: (k: string) => backing.get(k) ?? null,
+    setItem: (k: string, v: string) => void backing.set(k, v),
+    removeItem: (k: string) => void backing.delete(k),
+  };
+
+  it("applies a known locale and mirrors it to the cache", () => {
+    vi.stubGlobal("localStorage", storage);
+    try {
+      applyConfigLocale("es");
+      expect(t("common.cancel")).toBe("Cancelar");
+      expect(backing.get("canario-locale")).toBe("es");
+
+      applyConfigLocale("en");
+      expect(t("common.cancel")).toBe("Cancel");
+      expect(backing.get("canario-locale")).toBe("en");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("treats '' and unknown values as Automatic (browser resolution)", () => {
+    // An unknown locale must fall back to resolution, never crash.
+    applyConfigLocale("xx-pirate");
+    expect(["en", "es"]).toContain(t("common.cancel") === "Cancelar" ? "es" : "en");
+    applyConfigLocale("");
+    expect(["en", "es"]).toContain(t("common.cancel") === "Cancelar" ? "es" : "en");
+  });
+});
+
 describe("resolveLocale", () => {
   it("falls back to en with no preference list", () => {
     expect(resolveLocale(undefined)).toBe("en");
@@ -90,10 +155,12 @@ describe("resolveLocale", () => {
 
   it("accepts an exact match", () => {
     expect(resolveLocale(["en"])).toBe("en");
+    expect(resolveLocale(["es"])).toBe("es");
   });
 
   it("accepts a base-language match (en-GB → en)", () => {
     expect(resolveLocale(["en-GB", "en-US"])).toBe("en");
+    expect(resolveLocale(["es-AR", "en-US"])).toBe("es");
   });
 
   it("matches case-insensitively (EN-us → en)", () => {

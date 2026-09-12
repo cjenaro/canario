@@ -9,6 +9,7 @@
 
 import { app } from "electron";
 import { sendCommand } from "./sidecar.js";
+import { mainT } from "./strings.js";
 
 // Wire-protocol compatibility version expected from the sidecar.
 // Keep in sync with PROTOCOL_VERSION in canario-electron/src/main.rs —
@@ -86,10 +87,16 @@ export function hasProtocolMismatch(): boolean {
  */
 export function versionWarningText(): string | null {
   if (protocolMismatch) {
-    return `Protocol mismatch (app ${PROTOCOL_VERSION}, sidecar ${sidecarProtocol ?? "unknown"}) — restart with a matching build`;
+    return mainT("version.protocolMismatch", {
+      app: PROTOCOL_VERSION,
+      sidecar: sidecarProtocol ?? "unknown (pre-handshake)",
+    });
   }
   if (versionMismatch && sidecarVersion) {
-    return `Sidecar ${sidecarVersion} does not match app ${app.getVersion()} — a stale backend may be running`;
+    return mainT("version.staleSidecar", {
+      sidecar: sidecarVersion,
+      app: app.getVersion(),
+    });
   }
   return null;
 }

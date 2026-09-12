@@ -187,6 +187,11 @@ export const en = {
   "appearance.mode.dark": "Dark",
   "appearance.mode.light": "Light",
   "appearance.mode.system": "System",
+  "appearance.language.title": "Language",
+  "appearance.language.desc": "Canario's interface language",
+  "appearance.language.auto": "Automatic",
+  "appearance.language.en": "English",
+  "appearance.language.es": "Español",
   "appearance.accent.title": "Accent color",
   "appearance.accent.desc": "Used for buttons, highlights, and the recording glow",
   "appearance.accent.defaultTitle": "Default — each theme's built-in accent",
@@ -340,3 +345,11 @@ export type EnglishCatalog = typeof en;
 
 /** Every valid `t()` key. A typo'd key is a typecheck error. */
 export type MessageKey = keyof EnglishCatalog;
+
+/**
+ * A catalog with widened values — the type a translation file declares.
+ * (`EnglishCatalog` carries `as const` LITERAL value types, which would
+ * force every translation to be byte-identical to English; `Catalog`
+ * keeps the key set exact while letting values be any string.)
+ */
+export type Catalog = { [K in MessageKey]: string };

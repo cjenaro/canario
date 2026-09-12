@@ -1,7 +1,8 @@
 // Canario Electron — main process entry
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen } from "electron";
 import { join } from "path";
-import { createTray, setSettingsWindow, setTrayOffline, setTrayVisible, updateTrayMenu } from "./tray.js";
+import { createTray, refreshTrayLocale, setSettingsWindow, setTrayOffline, setTrayVisible, updateTrayMenu } from "./tray.js";
+import { setMainLocale } from "./strings.js";
 import { startSidecar, stopSidecar, sendCommand, onSidecarEvent, onCommandResponse } from "./sidecar.js";
 import { loadWindowState, saveWindowState, trackWindowState } from "./windowState.js";
 import { setAutostart } from "./autostart.js";
@@ -706,8 +707,17 @@ async function fetchConfig() {
   try {
     const res = await sendCommand({ cmd: "get_config" });
     if (res?.ok && res.data) {
+      const previous = cachedConfig;
       cachedConfig = res.data as Record<string, unknown>;
       applyOverlayMode();
+      // Locale (canario-tts): apply the persisted choice to the
+      // main-process catalog and re-render the tray strings — but only
+      // when it actually changed (setToolTip + setContextMenu on every
+      // config write would be churn).
+      if (previous?.locale !== cachedConfig.locale) {
+        setMainLocale(cachedConfig.locale);
+        refreshTrayLocale();
+      }
     }
   } catch {
     // Config fetch is non-critical
