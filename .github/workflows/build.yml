@@ -189,6 +189,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # A tag containing a hyphen (v0.2.0-rc.1) is semver-prerelease:
+          # mark it so electron-updater's default (no-allowPrerelease)
+          # stable installs are never offered an rc. The action does NOT
+          # infer this from the tag by itself.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             artifacts/canario-ubuntu-latest/**/*
             artifacts/canario-macos-latest/**/*
