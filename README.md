@@ -29,16 +29,25 @@ are never upgraded to an `-rc`.
 ### macOS
 
 macOS builds are **unsigned** (no Apple Developer certificate), so Gatekeeper
-will block them on first launch. To open:
+blocks them with a scary — and misleading — "'Canario' is damaged and can't
+be opened" message. The app is fine: the browser stamps a quarantine
+attribute on downloads, and an app Gatekeeper can't validate + quarantine
+reads as "damaged". Note that on recent macOS the classic
+right-click → **Open** bypass no longer works for unsigned apps.
 
-1. Move `Canario.app` to `/Applications`.
-2. Right-click `Canario.app` → **Open** → **Open** in the dialog
-   (a plain double-click only offers "Move to Trash").
+To install, clear the attribute and grant paste access:
 
-Or from a terminal: `xattr -cr /Applications/Canario.app`
+1. Drag `Canario.app` from the dmg to `/Applications`.
+2. In a terminal:
+   ```bash
+   xattr -cr /Applications/Canario.app
+   ```
+3. Open the app, and grant **Accessibility** permission
+   (System Settings → Privacy & Security → Accessibility) for Cmd+V paste
+   to work.
 
-You'll also need to grant **Accessibility** permission
-(System Settings → Privacy & Security → Accessibility) for Cmd+V paste to work.
+Alternatively: System Settings → Privacy & Security → scroll to the blocked
+notice → **Open Anyway**.
 
 ### Build from source
 
