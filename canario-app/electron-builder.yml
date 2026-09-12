@@ -94,9 +94,16 @@ mac:
         - x64
   category: public.app-category.utilities
   icon: resources/icon.png
-  # No code signing
-  identity: null
-  # Hardened runtime is needed even without signing for some permissions
+  # Ad-hoc signing (electron-builder: identity "-" = ad-hoc, null = skip).
+  # arm64 macOS KILLS completely unsigned binaries at exec — no dialog,
+  # nothing launches (verified in the rc.1 rollout). Ad-hoc makes the
+  # app + sidecar runnable without an Apple Developer account; the
+  # Gatekeeper quarantine friction remains (README documents xattr).
+  # LIMIT: ad-hoc signatures are non-stable, so macOS auto-update apply
+  # still won't work — that genuinely needs a paid cert (canario-7hx.5
+  # de-scope). Linux/Windows updaters are unaffected.
+  identity: "-"
+  # Hardened runtime pairs with real signing; pointless for ad-hoc.
   hardenedRuntime: false
   # Minimum macOS version — Electron 44 requires macOS 13+
   minimumSystemVersion: "13.0.0"

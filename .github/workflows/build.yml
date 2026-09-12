@@ -151,8 +151,6 @@ jobs:
       - name: Package (electron-builder)
         working-directory: canario-app
         run: npx electron-builder ${{ matrix.builder-flag }} --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
